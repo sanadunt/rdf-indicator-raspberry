@@ -197,13 +197,12 @@ def serve(args,ground=False,demo=False):
         cfg['state_dir']=str(state); cfg['api']['port']=args.port
         cfg['api']['admin_hash_file']=str(state/'admin-hash.json')
         cfg['source'].update(share_dir=str(state/'source'),authority_verified=True,angle_verified=True)
-        from .api import set_password
-        if not Path(cfg['api']['admin_hash_file']).exists():
-            password=secrets.token_urlsafe(18); set_password(Path(cfg['api']['admin_hash_file']),password)
-            atomic_write(state/'demo-password.txt',password.encode()+b'\n')
+        from .api import set_pin
+        pin=f'{secrets.randbelow(1_000_000):06d}'; set_pin(Path(cfg['api']['admin_hash_file']),pin)
+        atomic_write(state/'demo-pin.txt',pin.encode()+b'\n')
         generator=threading.Thread(target=generate_demo,args=(state/'source',stop_demo),daemon=True); generator.start(); time.sleep(.1)
         print('DEMO - data sintetis, MQTT OFF, tidak mengubah perangkat.')
-        print('Password demo tersimpan lokal di:',state/'demo-password.txt')
+        print('PIN demo tersimpan lokal di:',state/'demo-pin.txt')
     if ground:
         from .ground import Ground
         app=Ground(cfg,demo=args.demo_namespace)
@@ -222,14 +221,14 @@ def serve(args,ground=False,demo=False):
 def main():
     p=argparse.ArgumentParser(description='RDF Node service and deployment CLI')
     sub=p.add_subparsers(dest='command',required=True)
-    for name in ('edge','ground','doctor','setup','set-password','import-bundle','controls'):
+    for name in ('edge','ground','doctor','setup','set-pin','import-bundle','controls'):
         s=sub.add_parser(name)
         s.add_argument('--config',default='/etc/rdf-ground/config.yaml' if name=='ground' else '/etc/rdf-node/config.yaml')
         if name=='ground': s.add_argument('--demo-namespace',action='store_true')
         if name=='setup':
             s.add_argument('--share-dir');s.add_argument('--engine-unit');s.add_argument('--grant-read',action='store_true')
             s.add_argument('--verify-source',action='store_true');s.add_argument('--yes',action='store_true')
-        if name=='set-password': s.add_argument('--password-file')
+        if name=='set-pin': s.add_argument('--pin-file')
         if name=='import-bundle': s.add_argument('directory')
         if name=='controls':
             s.add_argument('action',choices=['approve','maintenance-open','maintenance-close']);s.add_argument('--settings',action='store_true')
@@ -247,17 +246,17 @@ def main():
     elif a.command=='setup': setup(a)
     elif a.command=='import-bundle': import_bundle(a)
     elif a.command=='controls': controls(a)
-    elif a.command=='set-password':
+    elif a.command=='set-pin':
         require_root(); cfg=load_config(a.config)
-        password=Path(a.password_file).read_text().strip() if a.password_file else getpass.getpass('Password admin baru (>=12): ')
-        from .api import set_password
-        set_password(Path(cfg['api']['admin_hash_file']),password)
+        pin=Path(a.pin_file).read_text().strip() if a.pin_file else getpass.getpass('PIN admin baru (6 digit): ')
+        from .api import set_pin
+        set_pin(Path(cfg['api']['admin_hash_file']),pin)
         target=Path(cfg['api']['admin_hash_file'])
         try:
             import grp
             os.chown(target,0,grp.getgrnam('rdf-ground' if str(target).startswith('/etc/rdf-ground') else 'rdf-edge').gr_gid)
         except KeyError: pass
-        print('Password diperbarui; login berikutnya memakai hash baru.')
+        print('PIN diperbarui; login berikutnya memakai hash baru.')
     elif a.command=='selftest':
         import unittest
         sys.path.insert(0,str(ROOT/'tests'))

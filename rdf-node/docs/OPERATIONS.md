@@ -20,7 +20,7 @@ watchdog tambahan belum ada. Layar/backlight fisik tetap perlu diperiksa terpisa
 ## File dan izin
 
 Release root-owned read-only untuk service. State aplikasi berada pada /var/lib.
-MQTT credential dan hash password bukan bagian UI export. Semua assets browser lokal.
+MQTT credential dan hash PIN admin bukan bagian UI export. Semua assets browser lokal.
 Source permission memakai ACL terbatas pada _share; tidak chmod777 atau recursive home read.
 
 ACL perlu diperiksa kembali jika deployment engine membuat file dengan mode yang menolak
@@ -30,7 +30,7 @@ Dokumen lama mungkin menyebut path berbeda; file config menjadi sumber deploymen
 ## Logs dan backup
 
 Ambil log terbatas `journalctl -n60 --no-pager`; hindari `-f` atau file besar melalui T900
-saat telemetry berjalan. Aplikasi tidak memasukkan raw settings/password ke log normal.
+saat telemetry berjalan. Aplikasi tidak memasukkan raw settings, PIN, atau secret ke log normal.
 Redact identifier sensitif sebelum membagikan diagnosis.
 
 Backup yang disarankan pada media aman:
@@ -47,7 +47,9 @@ history besar yang dibangun aplikasi.
 ## Upgrade
 
 Ekstrak ZIP release baru ke folder terpisah, jalankan installer yang sama.
-Installer mempertahankan config/password/journal yang ada dan menyimpan symlink previous.
+Installer mempertahankan config, hash PIN, dan journal serta menyimpan symlink previous.
+Sesudah upgrade dari versi password, jalankan `sudo rdf-node set-pin` lalu restart service
+yang sesuai untuk mengganti credential lama dan mencabut sesi admin aktif.
 Checksum diverifikasi sebelum copy. Script tidak mengganti path source otomatis.
 Sesudah upgrade: doctor, health/receipt/curve, command read-only, lalu test subset controlled.
 Schema config unknown key ditolak; periksa release notes saat berpindah versi.

@@ -4,7 +4,7 @@ from unittest import mock
 from rdf_node.agent import Agent
 from rdf_node.ground import Ground
 from rdf_node.config import load_config
-from rdf_node.api import Server,set_password
+from rdf_node.api import Server,set_pin
 from rdf_node.util import now_ms,compact,atomic_write
 from rdf_node.monitor import Monitor
 from test_core import settings,record,csv_bytes,status
@@ -94,7 +94,7 @@ class ApiTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.path=Path(self.tmp.name)
         self.a=make_agent(self.path);self.addCleanup(self.a.journal.close)
-        self.password='only-a-local-test-password';set_password(Path(self.a.cfg['api']['admin_hash_file']),self.password)
+        self.pin='381604';set_pin(Path(self.a.cfg['api']['admin_hash_file']),self.pin)
         self.server=Server(self.a,self.a.cfg);self.port=self.server.server_port
         self.thread=threading.Thread(target=self.server.serve_forever,daemon=True);self.thread.start()
         self.addCleanup(self.shutdown);self.cookie='';self.csrf=''
@@ -105,20 +105,44 @@ class ApiTests(unittest.TestCase):
         h.update(headers or {});conn.request(method,path,body=raw if raw is not None else compact(obj) if obj is not None else None,headers=h)
         r=conn.getresponse();data=r.read();out=(r.status,dict(r.getheaders()),data);conn.close();return out
     def login(self):
-        code,h,b=self.http('POST','/api/v2/login',{'password':self.password});self.assertEqual(code,200)
+        code,h,b=self.http('POST','/api/v2/login',{'pin':self.pin});self.assertEqual(code,200)
         self.cookie=h['Set-Cookie'].split(';')[0];self.csrf=json.loads(b)['csrf']
     def test_snapshot_no_secrets(self):
-        code,h,b=self.http('GET','/api/v2/snapshot');self.assertEqual(code,200);self.assertNotIn(self.password.encode(),b);self.assertNotIn(b'admin_hash_file',b);self.assertEqual(h['Cache-Control'],'no-store')
+        code,h,b=self.http('GET','/api/v2/snapshot');self.assertEqual(code,200);self.assertNotIn(self.pin.encode(),b);self.assertNotIn(b'admin_hash_file',b);self.assertEqual(h['Cache-Control'],'no-store')
     def test_host_dns_rebinding_rejected(self):self.assertEqual(self.http('GET','/',headers={'Host':'attacker.invalid'})[0],403)
-    def test_cors_write_rejected(self):self.assertEqual(self.http('POST','/api/v2/login',{'password':self.password},headers={'Origin':'https://attacker.invalid'})[0],403)
+    def test_cors_write_rejected(self):self.assertEqual(self.http('POST','/api/v2/login',{'pin':self.pin},headers={'Origin':'https://attacker.invalid'})[0],403)
     def test_no_auth_write_rejected(self):self.assertEqual(self.http('POST','/api/v2/display/preferences',{'theme':'light'})[0],403)
-    def test_wrong_password_rejected(self):self.assertEqual(self.http('POST','/api/v2/login',{'password':'wrong'})[0],401)
+    def test_wrong_pin_rejected(self):self.assertEqual(self.http('POST','/api/v2/login',{'pin':'000000'})[0],401)
+    def test_login_requires_exact_ascii_pin_and_new_field(self):
+        for body in ({'pin':'12345'},{'pin':'1234567'},{'pin':'１２３４５６'},{'password':self.pin}):
+            self.assertEqual(self.http('POST','/api/v2/login',body)[0],401)
+    def test_set_pin_requires_six_ascii_digits(self):
+        for value in ('1','12345','1234567','１２３４５６'):
+            with self.assertRaises(ValueError):set_pin(self.path/'invalid-pin-hash.json',value)
+    def test_legacy_hash_requires_local_pin_rotation(self):
+        path=Path(self.a.cfg['api']['admin_hash_file'])
+        legacy=json.loads(path.read_bytes());legacy.pop('credential')
+        path.write_bytes(compact(legacy))
+        self.assertEqual(self.http('POST','/api/v2/login',{'pin':self.pin})[0],401)
     def test_missing_csrf_rejected(self):
         self.login();self.csrf='';self.assertEqual(self.http('POST','/api/v2/display/preferences',{'theme':'light'})[0],403)
-    def test_authorized_preference(self):
-        self.login();self.assertEqual(self.http('POST','/api/v2/display/preferences',{'theme':'light'})[0],200);self.assertEqual(self.a.journal.get('display')['theme'],'light')
-    def test_unknown_preference_rejected(self):
-        self.login();self.assertEqual(self.http('POST','/api/v2/display/preferences',{'run_shell':'true'})[0],400)
+    def test_authorized_preferences_persist_theme_accent_and_font(self):
+        self.login()
+        body={'theme':'light','accent':'blue','font':'mono'}
+        code,_,response=self.http('POST','/api/v2/display/preferences',body)
+        self.assertEqual(code,200)
+        self.assertEqual(json.loads(response),{**self.a.cfg['display'],**body})
+        self.assertEqual(self.a.journal.get('display'),{**self.a.cfg['display'],**body})
+    def test_old_saved_preferences_receive_new_defaults(self):
+        self.a.journal.set('display',{'theme':'light','blank_after_seconds':0})
+        self.login()
+        code,_,response=self.http('POST','/api/v2/display/preferences',{'accent':'amber'})
+        self.assertEqual(code,200)
+        self.assertEqual(json.loads(response)['font'],'system')
+    def test_unknown_or_invalid_preference_rejected(self):
+        self.login()
+        for body in ({'run_shell':'true'},{'accent':'ultraviolet'},{'font':'comic-sans'}):
+            self.assertEqual(self.http('POST','/api/v2/display/preferences',body)[0],400)
     def test_invalid_json_rejected(self):self.assertEqual(self.http('POST','/api/v2/login',raw=b'{bad')[0],400)
     def test_oversize_body_rejected(self):self.assertEqual(self.http('POST','/api/v2/login',raw=b' '*9000)[0],400)
     def test_healthz_does_not_imply_daq(self):

@@ -3,7 +3,9 @@ const $=id=>document.getElementById(id);let csrf=null,snapshot={};
 async function get(p){const r=await fetch(p,{cache:'no-store',signal:AbortSignal.timeout(2000)});return r.json();}
 async function post(p,j){const r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf||''},body:JSON.stringify(j)});const out=await r.json();if(!r.ok)throw Error(out.error||'Gagal');return out;}
 async function command(op,extra={}){try{$('operation').textContent=JSON.stringify(await post('/api/v2/commands',{op,base_rev:snapshot.config?.sdr_revision??null,...extra}),null,2);}catch(e){$('operation').textContent=e.message;}}
-$('login').onclick=async()=>{try{const r=await post('/api/v2/login',{password:$('password').value});csrf=r.csrf;$('password').value='';$('authstate').textContent='ADMIN - operasi tetap memerlukan izin node.';}catch(e){$('authstate').textContent=e.message;}};
+const pinInput=$('pin');const loginButton=$('login');loginButton.disabled=true;
+pinInput.addEventListener('input',()=>{pinInput.value=pinInput.value.replace(/[^0-9]/g,'').slice(0,6);loginButton.disabled=pinInput.value.length!==6;});
+loginButton.onclick=async()=>{try{const r=await post('/api/v2/login',{pin:pinInput.value});csrf=r.csrf;pinInput.value='';loginButton.disabled=true;$('authstate').textContent='ADMIN - operasi tetap memerlukan izin node.';}catch(e){pinInput.value='';loginButton.disabled=true;$('authstate').textContent=e.message;}};
 $('refresh').onclick=()=>command('config.get');$('start').onclick=()=>command('processing.set',{desired:'RUNNING'});$('stop').onclick=()=>{if(confirm('Hentikan stack RDF? Telemetry tetap hidup.'))command('processing.set',{desired:'STOPPED'});};
 $('restart').onclick=()=>{if(confirm('Restart stack RDF yang sudah di-approve?'))command('service.restart');};
 $('reboot').onclick=async()=>{

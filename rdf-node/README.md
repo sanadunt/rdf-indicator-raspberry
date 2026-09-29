@@ -20,8 +20,9 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
 - Dua koneksi MQTT: control/health/DoA dan bulk angular; satu broker di Ubuntu.
 - Q16 360 titik, dua chunk; alternatif U8 tetap 360 titik. Bukan kurva buatan dari satu DoA.
 - Receipt dari backend Ground; MQTT CONNECTED tidak otomatis berarti Ground menerima data.
-- Panel **Utama | Link | Sistem | Config**, tepat logical viewport **480x320**.
-- API loopback; autentikasi admin, CSRF/Origin checks, password acak saat instalasi.
+- Panel **Utama | Link | Sistem | Config**, logical viewport **480x320**, login PIN 6 digit dengan keypad layar sentuh.
+- API loopback; login PIN dibatasi percobaan, dengan session dan CSRF/Origin checks.
+- `Config > Tampilan` menyimpan mode gelap/terang, aksen warna, dan font lokal.
 - Jurnal command SQLite, ID dedup, expiry/session/revision validation, satu mutasi aktif.
 - Safe settings patch, Start/Stop seluruh stack SDR yang di-approve, Restart stack,
   serta reboot Raspberry prepare/execute dengan lease maintenance lokal.
@@ -110,22 +111,29 @@ session melalui XDG autostart, dan entri labwc bila konfigurasinya ada. Installe
 mengaktifkan autologin OS**. Agar layar muncul setelah cold boot, OS harus masuk graphical
 session yang sesuai; verifikasi nanti pada maintenance window.
 
-Password admin hanya dibuat pada perangkat ini:
+### PIN admin
+
+PIN admin tepat 6 digit dibuat acak saat instalasi dan hanya disimpan pada perangkat.
+PIN lebih mudah ditebak daripada password panjang. API tetap loopback dan membatasi 6
+kegagalan per menit; jangan ubah binding agar panel terbuka ke LAN.
 
 ```bash
-sudo cat /etc/rdf-node/initial-admin-password.txt
+sudo cat /etc/rdf-node/initial-admin-pin.txt
 ```
 
-Jangan unggah password ke chat/Git. Untuk menggantinya:
+Jangan bagikan PIN, credential, atau hash ke chat/Git. Untuk mengganti PIN Raspberry:
 
 ```bash
-sudo rdf-node set-password
+sudo rdf-node set-pin
 sudo systemctl restart rdf-edge.service
 ```
 
-Restart tersebut hanya bridge; engine dan PPP tidak dihentikan. Restart juga mencabut session
-admin lama. File `initial-admin-password.txt` tidak otomatis berubah setelah password diganti;
-hapus salinan awal ketika tidak diperlukan.
+Untuk Ground, gunakan `sudo rdf-node set-pin --config /etc/rdf-ground/config.yaml`, lalu
+restart `rdf-ground.service`. Instalasi lama yang masih memakai password harus mengganti
+kredensial melalui CLI sebelum login PIN; hash lama tidak dapat dikonversi menjadi PIN.
+Restart mencabut sesi admin aktif. File `initial-admin-pin.txt` tidak berubah setelah PIN
+diganti; hapus salinan awal dengan aman bila tidak diperlukan. Saat upgrade, hapus juga
+file awal `initial-admin-password.txt` lama setelah mengganti PIN.
 
 ### Cek service dan sumber
 
@@ -193,10 +201,10 @@ Di Ubuntu, buka preview Ground:
 http://127.0.0.1:8791
 ```
 
-Password admin Ground:
+PIN admin Ground:
 
 ```bash
-sudo cat /etc/rdf-ground/initial-admin-password.txt
+sudo cat /etc/rdf-ground/initial-admin-pin.txt
 ```
 
 Receiver berjalan walaupun browser Ground ditutup. Ini pendamping integrasi, bukan

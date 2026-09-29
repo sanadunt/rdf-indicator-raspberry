@@ -56,15 +56,17 @@ save_config(pathlib.Path(sys.argv[2])/'config.yaml',c)
 PY
   chown root:"$ACCOUNT" "$CONFIG_DIR/config.yaml"; chmod 0640 "$CONFIG_DIR/config.yaml"
 fi
+PIN_CREATED=0
 if [ ! -f "$CONFIG_DIR/admin-hash.json" ]; then
+  PIN_CREATED=1
  /usr/bin/python3 - "$CONFIG_DIR" <<'PY'
 import sys,secrets,pathlib
 sys.path[:0]=['/opt/rdf-node/current/src','/opt/rdf-node/current/vendor']
-from rdf_node.api import set_password
+from rdf_node.api import set_pin
 from rdf_node.util import atomic_write
-p=pathlib.Path(sys.argv[1]); password=secrets.token_urlsafe(20)
-set_password(p/'admin-hash.json',password)
-atomic_write(p/'initial-admin-password.txt',(password+'\n').encode(),0o600)
+p=pathlib.Path(sys.argv[1]); pin=f'{secrets.randbelow(1_000_000):06d}'
+set_pin(p/'admin-hash.json',pin)
+atomic_write(p/'initial-admin-pin.txt',(pin+'\n').encode(),0o600)
 PY
  chown root:"$ACCOUNT" "$CONFIG_DIR/admin-hash.json"; chmod 0640 "$CONFIG_DIR/admin-hash.json"
 fi
@@ -123,5 +125,14 @@ EOF
  echo 'Kiosk autostart installed. From the graphical desktop, run: rdf-kiosk-session'
  echo 'If Chromium is missing, install your distro Chromium package. No display driver is changed.'
 fi
-printf '\nInstalled. Initial admin password is local only: sudo cat %s/initial-admin-password.txt\n' "$CONFIG_DIR"
+if [ "$PIN_CREATED" -eq 1 ]; then
+  printf '\nInstalled. Initial admin PIN is local only: sudo cat %s/initial-admin-pin.txt\n' "$CONFIG_DIR"
+else
+  echo 'Existing admin credential hash preserved. If this release follows password login, rotate it locally:'
+  if [ "$ROLE" = ground ]; then
+    echo 'sudo rdf-node set-pin --config /etc/rdf-ground/config.yaml'
+  else
+    echo 'sudo rdf-node set-pin'
+  fi
+fi
 echo 'No reboot is needed to start the backend. Cold-boot acceptance still needs a later device test.'

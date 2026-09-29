@@ -21,6 +21,10 @@ def status(t=None,idx=1):
 
 class ConfigTests(unittest.TestCase):
     def test_default_config(self): self.assertEqual(load_config()['api']['port'],8790)
+    def test_display_accent_and_font_are_allowlisted(self):
+        for key,value in (('accent','ultraviolet'),('font','comic-sans')):
+            c=load_config();c['display'][key]=value
+            with self.assertRaises(ValueError):validate_config(c)
     def test_plaintext_remote_rejected(self):
         c=load_config();c['mqtt']['tls']=False
         with self.assertRaises(ValueError):validate_config(c)

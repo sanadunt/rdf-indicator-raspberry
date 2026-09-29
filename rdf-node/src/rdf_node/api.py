@@ -15,20 +15,21 @@ from .util import compact, strict_json, atomic_write
 
 ROOT=Path(__file__).resolve().parents[2]
 
-def hash_password(password:str):
-    if len(password)<12: raise ValueError('Use at least 12 characters.')
+def hash_pin(pin:str):
+    if not isinstance(pin,str) or len(pin)!=6 or not pin.isascii() or not pin.isdigit():
+        raise ValueError('PIN must contain exactly 6 digits.')
     salt=secrets.token_bytes(16); iterations=260000
-    derived=hashlib.pbkdf2_hmac('sha256',password.encode(),salt,iterations)
-    return dict(algorithm='pbkdf2-sha256',iterations=iterations,salt=salt.hex(),hash=derived.hex())
+    derived=hashlib.pbkdf2_hmac('sha256',pin.encode(),salt,iterations)
+    return dict(credential='pin-6',algorithm='pbkdf2-sha256',iterations=iterations,salt=salt.hex(),hash=derived.hex())
 
-def set_password(path:Path,password:str):
-    atomic_write(path,compact(hash_password(password)),0o640)
+def set_pin(path:Path,pin:str):
+    atomic_write(path,compact(hash_pin(pin)),0o640)
 
 class Auth:
     def __init__(self,hash_file,seconds=600):
         self.file=Path(hash_file); self.seconds=seconds; self.sessions={}; self.attempts=[]; self.lock=threading.RLock()
-    def login(self,password):
-        if not isinstance(password,str) or len(password)>256: return None
+    def login(self,pin):
+        if not isinstance(pin,str) or len(pin)!=6 or not pin.isascii() or not pin.isdigit(): return None
         with self.lock:
             now=time.monotonic(); self.attempts=[x for x in self.attempts if now-x<60]
             if len(self.attempts)>=6: return None
@@ -36,8 +37,8 @@ class Auth:
             try:
                 data=strict_json(self.file.read_bytes())
                 expected=bytes.fromhex(data['hash']); salt=bytes.fromhex(data['salt'])
-                if data['algorithm']!='pbkdf2-sha256' or not 100000<=data['iterations']<=1000000: return None
-                candidate=hashlib.pbkdf2_hmac('sha256',password.encode(),salt,data['iterations'])
+                if data.get('credential')!='pin-6' or data['algorithm']!='pbkdf2-sha256' or not 100000<=data['iterations']<=1000000: return None
+                candidate=hashlib.pbkdf2_hmac('sha256',pin.encode(),salt,data['iterations'])
                 if not hmac.compare_digest(candidate,expected): return None
             except (OSError,ValueError,KeyError): return None
             self.attempts=[]
@@ -151,7 +152,7 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError,OSError,RecursionError): return self.reply(400,{'error':'INVALID_JSON_REQUEST'})
         p=urlsplit(self.path).path
         if p=='/api/v2/login':
-            result=self.server.auth.login(obj.get('password'))
+            result=self.server.auth.login(obj.get('pin'))
             if not result: return self.reply(401,{'error':'LOGIN_FAILED_OR_RATE_LIMITED'})
             token,csrf=result
             return self.reply(200,{'authenticated':True,'csrf':csrf},extra={'Set-Cookie':f'rdf_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={self.server.cfg["api"]["session_seconds"]}'})
@@ -172,10 +173,13 @@ class Handler(BaseHTTPRequestHandler):
                 else: result=app.commands.submit(obj,'local-admin')
                 return self.reply(400 if result.get('stage')=='REJECTED' else 202,result)
             if p=='/api/v2/display/preferences' and not self.server.ground:
-                if set(obj)-{'theme','blank_after_seconds'}: raise ValueError('UNKNOWN_PREFERENCE')
-                prefs=app.journal.get('display',app.cfg['display'])
+                if set(obj)-{'theme','accent','font','blank_after_seconds'}: raise ValueError('UNKNOWN_PREFERENCE')
+                prefs=dict(app.cfg['display'])
+                prefs.update(app.journal.get('display',{}))
                 prefs.update(obj)
-                if prefs['theme'] not in ('dark','light') or type(prefs['blank_after_seconds']) is not int or not 0<=prefs['blank_after_seconds']<=86400:
+                if (prefs['theme'] not in ('dark','light') or prefs['accent'] not in ('teal','blue','amber') or
+                    prefs['font'] not in ('system','serif','mono') or type(prefs['blank_after_seconds']) is not int or
+                    not 0<=prefs['blank_after_seconds']<=86400):
                     raise ValueError('BAD_PREFERENCE')
                 app.journal.set('display',prefs)
                 return self.reply(200,prefs)

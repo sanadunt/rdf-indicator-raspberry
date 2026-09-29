@@ -58,4 +58,6 @@ api:
   max_clients: 16
 display:
   theme: dark
+  accent: teal
+  font: system
   blank_after_seconds: 0

@@ -72,6 +72,10 @@ def validate_config(c: dict) -> None:
         raise ValueError('RECEIPT_THRESHOLDS')
     if c['display']['theme'] not in ('dark','light'):
         raise ValueError('INVALID_THEME')
+    if c['display']['accent'] not in ('teal','blue','amber'):
+        raise ValueError('INVALID_DISPLAY_ACCENT')
+    if c['display']['font'] not in ('system','serif','mono'):
+        raise ValueError('INVALID_DISPLAY_FONT')
     finite(c['display']['blank_after_seconds'],0,86400)
     for p in (c['state_dir'], c['source']['share_dir'], c['mqtt']['ca_file'], c['mqtt']['control_credentials_file'],
               c['mqtt']['bulk_credentials_file'], c['api']['admin_hash_file'], c['control']['helper_socket']):

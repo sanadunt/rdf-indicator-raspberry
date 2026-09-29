@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Replace local admin passwords with six-digit PIN login and a touch keypad on the Raspberry panel.
+- Add saved accent-color and font preferences to the Config panel.
+- Existing installations must set a new PIN locally with `rdf-node set-pin`.
+
+
 ## 1.0.0 - 2026-09-29
 
 Initial commissioning release:

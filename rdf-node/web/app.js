@@ -1,6 +1,6 @@
 'use strict';
 const $=id=>document.getElementById(id);
-let snapshot={}, csrf=null, authenticated=false, lastSeq=null, lastProgress=0, lastApi=0, linkData=false, hostPage=false, lastTouch=Date.now();
+let snapshot={}, csrf=null, authenticated=false, lastSeq=null, lastProgress=0, lastApi=0, linkData=false, hostPage=false, lastTouch=Date.now(), pinKeyHandler=null, modalReturnFocus=null;
 const good=['UP','CONNECTED','RECEIVING','HEALTHY','SYNCED','APPLIED'];
 const bad=['ERROR','LOST','DEGRADED','FAILED','UNAVAILABLE'];
 function label(id,text,code){const el=$(id);if(!el)return;el.textContent=text;el.classList.remove('good','warn','bad','neutral');el.classList.add(good.includes(code)?'good':bad.includes(code)?'bad':code?'warn':'neutral');}
@@ -35,7 +35,9 @@ function render(s){
  rows('configrows',[["Node / profil",`${s.node_id||'--'} / ${c.profile||'--'}`],["Source / MQTT",`${c.source_configured?'OK':'SETUP'} / ${c.mqtt_configured?'CONFIGURED':'OFF'}`],["RF revision / proof",`${c.sdr_revision??'--'} / ${c.proof||'--'}`],["Akses / maintenance",`${authenticated?'ADMIN':'READ ONLY'} / ${s.capabilities?.maintenance?'AKTIF':'OFF'}`]]);
  $('admin').textContent=authenticated?'Logout':'Login';
  $('configreason').textContent='Kontrol perlu approval adapter dan maintenance lokal.';
- document.body.classList.toggle('light',c.preferences?.theme==='light');
+ const prefs={theme:'dark',accent:'teal',font:'system',...(c.preferences||{})};
+ document.body.classList.toggle('light',prefs.theme==='light');
+ document.body.dataset.accent=prefs.accent;document.body.dataset.font=prefs.font;
 }
 async function get(path){const response=await fetch(path,{cache:'no-store',signal:AbortSignal.timeout(1200)});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json();}
 async function post(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf||''},body:JSON.stringify(body),signal:AbortSignal.timeout(6000)});let j=await response.json();if(!response.ok)throw new Error(j.error||j.result?.error||j.stage||'Permintaan gagal');return j;}
@@ -44,16 +46,95 @@ setInterval(()=>{const stale=Date.now()-lastProgress>5000;$('stale').hidden=!sta
 for(const button of document.querySelectorAll('nav button'))button.addEventListener('click',()=>{for(const e of document.querySelectorAll('.page'))e.classList.toggle('active',e.id===button.dataset.tab);for(const e of document.querySelectorAll('nav button'))e.classList.toggle('selected',e===button);});
 $('linkpage').onclick=()=>{linkData=!linkData;$('linkpage').textContent=linkData?'Link \u203a':'Data \u203a';render(snapshot);};
 $('syspage').onclick=()=>{hostPage=!hostPage;$('syspage').textContent=hostPage?'DAQ \u203a':'Host \u203a';$('systitle').textContent=hostPage?'RASPBERRY / HOST':'RDF / DAQ';render(snapshot);};
-function modal(title){$('modaltitle').textContent=title;$('modalbody').replaceChildren();$('modalmsg').textContent='';$('modal').hidden=false;return $('modalbody');}
-$('closemodal').onclick=()=>$('modal').hidden=true;
+function modal(title){modalReturnFocus=document.activeElement;pinKeyHandler=null;$('modaltitle').textContent=title;$('modalbody').replaceChildren();$('modalmsg').textContent='';$('modal').hidden=false;return $('modalbody');}
+function dismissModal(){$('modal').hidden=true;pinKeyHandler=null;const target=modalReturnFocus;modalReturnFocus=null;if(target&&typeof target.focus==='function')target.focus();}
+$('closemodal').onclick=dismissModal;
+function modalKeydown(event){
+ if($('modal').hidden)return;
+ if(event.key==='Escape'){event.preventDefault();dismissModal();return;}
+ if(event.key==='Tab'){
+  const items=Array.from(document.querySelectorAll('#modal .dialog button:not(:disabled),#modal .dialog select:not(:disabled),#modal .dialog input:not(:disabled)'));
+  const first=items[0],last=items[items.length-1];
+  if(!first){event.preventDefault();return;}
+  if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}
+  else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus();}
+  return;
+ }
+ if(pinKeyHandler)pinKeyHandler(event);
+}
+document.addEventListener('keydown',modalKeydown);
 function text(parent,s){const p=document.createElement('p');p.textContent=s;parent.append(p);return p;}
 function action(parent,label,fn,danger=false){let wrap=parent.querySelector('.actions');if(!wrap){wrap=document.createElement('div');wrap.className='actions';parent.append(wrap);}let b=document.createElement('button');b.textContent=label;if(danger)b.className='danger';b.onclick=async()=>{b.disabled=true;try{await fn();}catch(e){$('modalmsg').textContent=e.message;}finally{b.disabled=false;}};wrap.append(b);return b;}
 function needLogin(){if(authenticated)return false;login();return true;}
-function login(){const box=modal('Login admin lokal');text(box,'Password dibuat saat instalasi. Tidak ada password default.');const input=document.createElement('input');input.type='password';input.autocomplete='current-password';input.placeholder='Password admin';box.append(input);action(box,'Masuk',async()=>{const r=await post('/api/v2/login',{password:input.value});csrf=r.csrf;authenticated=true;$('modal').hidden=true;render(snapshot);});input.focus();}
+function login(){
+ let pin='',pending=false;
+ const box=modal('PIN admin lokal');text(box,'Masukkan 6 angka menggunakan keypad.');
+ const layout=document.createElement('div');layout.className='pin-layout';
+ const pad=document.createElement('div');pad.className='pin-pad';pad.setAttribute('role','group');pad.setAttribute('aria-label','Keypad PIN');
+ const readout=document.createElement('div');readout.className='pin-readout';readout.setAttribute('role','img');
+ const slots=Array.from({length:6},()=>{const slot=document.createElement('span');slot.className='pin-slot';slot.setAttribute('aria-hidden','true');readout.append(slot);return slot;});
+ const status=document.createElement('span');status.className='sr-only';status.setAttribute('role','status');status.setAttribute('aria-live','polite');
+ const unlock=document.createElement('button');unlock.type='button';unlock.className='pin-unlock';unlock.textContent='Unlock';
+ const keys=[];
+ function addKey(label,aria,run,cls=''){
+  const button=document.createElement('button');button.type='button';button.textContent=label;button.setAttribute('aria-label',aria);if(cls)button.className=cls;
+  button.onclick=run;pad.append(button);keys.push(button);
+ }
+ function refresh(){
+  slots.forEach((slot,index)=>slot.classList.toggle('filled',index<pin.length));
+  const message=`PIN ${pin.length} dari 6 angka.`;readout.setAttribute('aria-label',message);status.textContent=message;
+  unlock.disabled=pending||pin.length!==6;keys.forEach(button=>button.disabled=pending);
+ }
+ function addDigit(digit){if(!pending&&pin.length<6){pin+=digit;refresh();}}
+ function removeDigit(){if(!pending&&pin.length){pin=pin.slice(0,-1);refresh();}}
+ function clearPin(){if(!pending){pin='';refresh();}}
+ for(let digit=1;digit<=9;digit++)addKey(String(digit),`Angka ${digit}`,()=>addDigit(String(digit)));
+ addKey('Reset','Hapus seluruh PIN',clearPin,'pin-clear');addKey('0','Angka 0',()=>addDigit('0'));addKey('⌫','Hapus angka terakhir',removeDigit,'pin-backspace');
+ layout.append(pad,readout,unlock);box.append(layout,status);
+ async function submitPin(){
+  if(pending||pin.length!==6)return;
+  pending=true;refresh();
+  try{const result=await post('/api/v2/login',{pin});csrf=result.csrf;authenticated=true;dismissModal();render(snapshot);}
+  catch(e){$('modalmsg').textContent=e.message==='LOGIN_FAILED_OR_RATE_LIMITED'?'PIN salah atau percobaan dibatasi.':e.message;pin='';pending=false;refresh();pad.querySelector('button')?.focus();return;}
+  pending=false;refresh();
+ }
+ unlock.onclick=submitPin;
+ pinKeyHandler=event=>{
+  if(/^[0-9]$/.test(event.key)){event.preventDefault();addDigit(event.key);}
+  else if(event.key==='Backspace'){event.preventDefault();removeDigit();}
+  else if(event.key==='Delete'){event.preventDefault();clearPin();}
+ };
+ refresh();pad.querySelector('button')?.focus();
+}
 $('admin').onclick=async()=>{if(!authenticated)return login();await post('/api/v2/logout',{});authenticated=false;csrf=null;render(snapshot);};
 async function command(op,extras={}){const r={v:2,id:`local-${Date.now()}-${crypto.randomUUID().slice(0,8)}`,sid:snapshot.sid,boot:snapshot.boot_id,issued_ms:Date.now(),expires_ms:Date.now()+15000,base_rev:snapshot.config?.sdr_revision??null,op,...extras};const result=await post('/api/v2/commands',r);$('modalmsg').textContent=`${result.stage}: ${result.id||''}`;return result;}
 $('profilebtn').onclick=()=>{if(needLogin())return;const box=modal('Profil telemetry');text(box,'Grafik otomatis dipause saat command, data invalid, atau receipt hilang.');action(box,'CONTROL',()=>command('stream.set',{profile:'control'}));action(box,'BALANCED',()=>command('stream.set',{profile:'balanced'}));action(box,'GRAPH U8',()=>command('stream.set',{profile:'graph_u8'}));};
-$('themebtn').onclick=async()=>{if(needLogin())return;try{await post('/api/v2/display/preferences',{theme:document.body.classList.contains('light')?'dark':'light'});}catch(e){modal('Preferensi');$('modalmsg').textContent=e.message;}};
+function preferences(){
+ if(needLogin())return;
+ const box=modal('Tema dan font');text(box,'Pilihan ini disimpan pada perangkat.');
+ const current={theme:'dark',accent:'teal',font:'system',...(snapshot.config?.preferences||{})};
+ const grid=document.createElement('div');grid.className='preference-grid';const selects={};
+ const fields=[
+  ['theme','Mode',[['dark','Gelap'],['light','Terang']]],
+  ['accent','Warna aksen',[['teal','Teal'],['blue','Biru'],['amber','Amber']]],
+  ['font','Jenis huruf',[['system','Sistem'],['serif','Serif'],['mono','Monospace']]]
+ ];
+ for(const [key,label,choices] of fields){
+  const field=document.createElement('label');field.className='preference-field';
+  const caption=document.createElement('span');caption.textContent=label;
+  const select=document.createElement('select');select.setAttribute('aria-label',label);
+  for(const [value,title] of choices){const option=document.createElement('option');option.value=value;option.textContent=title;select.append(option);}
+  select.value=current[key];field.append(caption,select);grid.append(field);selects[key]=select;
+ }
+ box.append(grid);
+ action(box,'Simpan tampilan',async()=>{
+  const body={};for(const [key,select] of Object.entries(selects))body[key]=select.value;
+  const saved=await post('/api/v2/display/preferences',body);
+  snapshot.config={...(snapshot.config||{}),preferences:saved};render(snapshot);$('modalmsg').textContent='Tampilan disimpan pada perangkat.';
+ });
+ grid.querySelector('select')?.focus();
+}
+$('themebtn').onclick=preferences;
 $('controlbtn').onclick=()=>{if(needLogin())return;const box=modal('Kontrol RDF - bukan bridge');const caps=snapshot.capabilities||{};text(box,`Maintenance: ${caps.maintenance?'AKTIF':'OFF'}; start/stop hanya stack yang di-approve.`);
  action(box,'Start',()=>command('processing.set',{desired:'RUNNING'})).disabled=!caps.processing;
  action(box,'Stop',()=>confirmOperation('STOP RDF','processing.set',{desired:'STOPPED'}),true).disabled=!caps.processing;

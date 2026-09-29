@@ -20,11 +20,11 @@
 <section id="config" class="page details">
 <div class="pagetitle"><b>CONFIG / MAINTENANCE</b><button id="admin" class="smallbtn">Login</button></div>
 <div id="configrows" class="configrows"></div>
-<div class="configbuttons"><button id="profilebtn">Profil</button><button id="controlbtn">Kontrol</button><button id="themebtn">Tema</button></div>
+<div class="configbuttons"><button id="profilebtn">Profil</button><button id="controlbtn">Kontrol</button><button id="themebtn">Tampilan</button></div>
 <p id="configreason" class="hint">Read-only; pengaturan sumber melalui setup CLI.</p>
 </section>
 <nav><button data-tab="home" class="selected" aria-label="Utama"><span>&#9673;</span>Utama</button><button data-tab="link" aria-label="Link"><span>&#8644;</span>Link</button><button data-tab="system" aria-label="Sistem"><span>&#9638;</span>Sistem</button><button data-tab="config" aria-label="Config"><span>&#9881;</span>Config</button></nav>
 <div id="stale" hidden><b>SUMBER STATUS HILANG</b><span id="stalereason">API lokal tidak merespons.</span><small>Data di belakang bukan status terkini.</small></div>
-<div id="modal" hidden><div class="dialog"><div class="dialoghead"><b id="modaltitle">Login</b><button id="closemodal" aria-label="Tutup">&times;</button></div><div id="modalbody"></div><div id="modalmsg" class="hint"></div></div></div>
+<div id="modal" hidden><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="modaltitle"><div class="dialoghead"><b id="modaltitle">Login</b><button id="closemodal" aria-label="Tutup">&times;</button></div><div id="modalbody"></div><div id="modalmsg" class="hint" aria-live="polite"></div></div></div>
 <div id="blank" hidden><span>Ketuk untuk menampilkan indikator</span></div>
 </main><script src="/app.js"></script></body></html>

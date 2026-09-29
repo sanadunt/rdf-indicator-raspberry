@@ -1,9 +1,10 @@
-# Mulai di sini - RDF Node 1.0.0
+# Mulai di sini - RDF Node
 
 ## Raspberry
+Gunakan folder sumber `rdf-node/` dari checkout terbaru. Arsip `rdf-node-1.0.0.zip` adalah rilis lama dan belum memuat perubahan PIN ini.
+
 
 ```bash
-unzip rdf-node-1.0.0.zip
 cd rdf-node
 sudo bash install.sh --kiosk=rdf
 ```
@@ -15,8 +16,9 @@ saat commissioning. Dari desktop grafis jalankan `rdf-kiosk-session`, atau buka
 Prerequisites: Linux systemd, Python3.10+, Chromium untuk layar, ACL bila memberikan izin
 baca pada folder SDR. Installer tidak mengubah PPP, Conda, atau driver layar.
 
-Password lokal dibuat acak, baca melalui `sudo cat /etc/rdf-node/initial-admin-password.txt`.
-Jangan kirim password atau credential ke chat/Git.
+PIN lokal acak 6 digit dibuat saat instalasi, baca melalui `sudo cat /etc/rdf-node/initial-admin-pin.txt`.
+Jangan kirim PIN atau credential ke chat/Git. Ganti PIN dengan `sudo rdf-node set-pin`.
+Instalasi lama yang masih memakai password perlu mengganti PIN dari CLI sebelum login baru.
 
 ## MQTT dan Ground
 
@@ -55,4 +57,4 @@ Reboot memerlukan lease maintenance dan prepare/execute, bukan satu tombol tanpa
 command validation diuji. Panel4halaman diperiksa di viewport480x320.
 Belum diuji pada hardware Raspberry/T900 Anda atau Mosquitto aktual. Baca TEST_REPORT.md.
 
-Semua petunjuk rinci, troubleshooting, rollback dan source ada di ZIP.
+Semua petunjuk rinci, troubleshooting, rollback dan source ada di `rdf-node/`.

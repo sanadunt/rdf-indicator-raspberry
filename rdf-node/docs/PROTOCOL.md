@@ -120,7 +120,7 @@ Receiver Ubuntu: `http://127.0.0.1:8791`.
 - `GET /api/v2/config`: safe report/proof.
 - `GET /api/v2/operations/latest`: public results, challenge disensor.
 - `GET /api/v2/capabilities`: capability yang dilaporkan node.
-- `POST /api/v2/login`: password lokal Ground, HttpOnly cookie+CSRF.
+- `POST /api/v2/login`: PIN lokal enam digit, field JSON `pin`, HttpOnly cookie+CSRF.
 - `POST /api/v2/commands`: authenticated intent, tidak perlu membangun envelope di frontend.
 - `POST /api/v2/operation/result`: private result, membutuhkan auth+CSRF.
 
