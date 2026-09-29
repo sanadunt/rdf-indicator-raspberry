@@ -1,0 +1,120 @@
+# Implementasi RDF Node 1.0.0
+
+## Arsitektur yang benar-benar dibuat
+
+```text
+Native SDR _share
+   -> Source parser + provenance/freshness gates
+   -> Agent cached snapshot
+       -> HTTP loopback + static 480x320 panel
+       -> Scheduler -> MQTT control / MQTT bulk -> T900 PPP
+
+Ground MQTT consumer
+   -> validate session/config/health
+   -> decode DoA + assemble angular chunks
+   -> local API + preview graph
+   -> receipt with accepted sequences
+
+Authenticated command
+   -> CommandManager -> SQLite journal -> single worker
+   -> restricted Unix helper -> fixed approved settings/unit action
+   -> verify evidence -> result/report
+```
+
+### Isolation
+
+Panel dan MQTT tidak menjalankan receiver SDR kedua. Browser tidak memiliki credential MQTT,
+tidak membaca file native langsung, dan tidak memiliki hak root. Edge tetap hidup bila
+SDR, helper, PPP, atau Ground gagal. Engine GUI lama tidak dihentikan: pada deployment tertentu
+proses tersebut juga menjalankan signal processor.
+
+Runtime menggunakan `/usr/bin/python3`, bukan Conda `base` atau environment SDR.
+Local HTTP server stdlib memiliki client/body caps, Host/Origin checks, cookie admin,
+CSRF, no-store dan CSP. Tidak boleh dibind ke LAN melalui perubahan tidak terkontrol.
+
+## Perbedaan implementasi terhadap dokumen planning
+
+Perubahan berikut eksplisit, bukan klaim bahwa semuanya identik dengan contoh planning:
+
+1. **MQTT:** planning merekomendasikan Paho. Release ini memakai client MQTT 5 subset
+   buatan project (`mqtt.py`) agar installer tidak bergantung download pip yang tidak
+   tersedia di lingkungan build. Ia mendukung TLS, QoS 0/1, clean sessions, SUBACK readiness,
+   message expiry, retained state/LWT, reconnect, dan bounded outbox yang digunakan aplikasi.
+   Ia BUKAN implementasi MQTT universal tersertifikasi; tidak ada QoS 2, WebSocket,
+   enhanced auth, persistent offline session, topic alias atau MQTT 3 fallback.
+   Test suite menggunakan fixture broker independen; interoperability dengan Mosquitto
+   actual harus menjadi acceptance gate perangkat. Jangan menyebut tes fixture sebagai
+   tes Mosquitto. Untuk penggunaan operasional kritis, audit client ini atau ganti adapter
+   dengan library MQTT mapan sesudah dependency dapat diprovisioning dan diuji.
+2. **API/UI:** stdlib HTTP + HTML/CSS/JavaScript lokal, bukan FastAPI/TypeScript build.
+   Ini alternatif library setara yang dibolehkan rencana. Tidak ada development server.
+3. **In-flight:** satu publish aktif per koneksi, lebih konservatif dari plafon rencana 4.
+   Queue aplikasi sampai 16 pesan control atau 2 bulk dan 16 KiB, latest-value keyed.
+4. **Snapshot lokal:** collector membentuk snapshot setiap 250 ms; browser mengambilnya
+   setiap 500 ms. Status native dibaca 500 ms dan config 1 detik.
+5. **Capabilities/report:** field lebih lengkap daripada contoh budget planning, termasuk
+   instance/boot, bukti config, dan dukungan command. Ukuran pesan saat ini harus dihitung
+   aktual; angka historis 9.14 kbit/s bukan hasil ukur software ini.
+6. **Clock:** provider MVP menggunakan status time sync OS. Tidak ada provider GPS time,
+   model uncertainty/holdover, atau time sync RF otomatis. Unknown menutup write/live gate.
+7. **Lifecycle:** kontrol yang disediakan ialah unit stack SDR terpilih, bukan API DSP-only
+   yang belum terbukti tersedia. Helper menangani stop intent dan startup reconciliation,
+   tetapi tidak menambahkan watchdog DSP otomatis baru. Recovery crash engine tetap
+   bergantung pada unit yang diaudit; kegagalan tampil sebagai health/error.
+8. **Settings:** hanya lima field allowlist di bawah. Algoritma/geometri/DAQ calibration
+   tidak diubah oleh command generic. Permintaan lain ditolak sebagai unsupported.
+9. **Display:** theme dan blank timeout didukung. Brightness hardware, rotasi driver,
+   on-screen keyboard, touch calibration, compositor installation dan autologin OS
+   tidak diimplementasikan karena hardware belum diketahui. Panel bisa memakai mouse.
+10. **Ground preview:** ditambahkan agar codec/receipt dapat segera diuji. Integrasi ke
+    aplikasi Ground lama tetap memakai API/decoder; source lama tidak tersedia di ZIP.
+
+## Source validity
+
+CSV: 377 field, opsional trailing delimiter kosong. Exact 360 nilai finite; satu output VFO
+harus tidak ambigu. Source timestamp, frequency dan revision-at-read dilacak. Re-reading
+file tidak membuat q baru. Timestamp regresi ditolak sampai sumber/agent direkonsiliasi.
+
+DAQ sehat memerlukan status fresh, daq_ok boolean, frame/sample-delay/IQ sync true, dan
+kemajuan frame. Observasi frame pertama belum membuktikan progress. Counter turun/reset
+memerlukan progress berikutnya. Missing field dianggap unknown, tidak dibuat hijau.
+
+LIVE membutuhkan authority dan angle approval, clock, config attribution, DAQ dan freshness.
+Tidak ada cara membuktikan NO_DETECTION dari file stale saja; panel menyebut NO_FRESH_DOA.
+Array tetap native; PAPR tetap dB native; power bukan link RSSI dan bukan calibrated dBm.
+GPS/altitude/SNR tidak diisi dengan angka dummy. Mode nav OFF.
+
+## Konfigurasi dan bukti
+
+`rev` mengikuti perubahan safe settings yang diamati. Ini revision mirror, bukan janji
+bahwa setiap parameter runtime sudah diverifikasi. Data dikorelasikan terhadap safe digest
+pada saat dibaca dan timestamp setelah config berubah. UI membedakan:
+
+- unverified;
+- source_correlated: output VFO baru cocok, belum semua parameter runtime;
+- persisted_unverified: write sudah tersimpan, evidence belum cukup;
+- runtime: field perubahan telah diverifikasi dari evidence yang diperlukan.
+
+`CFG SYNCED` memerlukan runtime proof dan receipt fresh yang revision-nya cocok.
+`REPORTED_SAME` bukan sinonim runtime applied. Single-writer approval tetap diperlukan;
+atomic rename tidak menyelesaikan konflik semua writer otomatis.
+
+## Indikator dan cadangan kapasitas
+
+PPP UP diperoleh dari interface/address peer; USB present bukan bukti RF sehat.
+MQTT CONNECTED/READY dibedakan dari Ground receipt. Receipt hq harus pernah terkirim dan
+bertambah; receipt berulang tidak menyegarkan progress. Setelah 10 detik terlambat,
+setelah 15 detik lost, belum pernah receipt berarti unconfirmed.
+
+Grafik dipause karena source invalid, command, receipt, token/backlog, atau profile CONTROL.
+Token bucket adalah estimasi biaya aplikasi+allowance transport, bukan shaping seluruh
+socket/kernel/radio. Shell SSH, download log, ping terus-menerus juga berbagi link.
+QoS 0 tetap berjalan di TCP; data yang sudah masuk TCP tidak bisa ditarik kembali.
+
+## Struktur source
+
+`source.py`: parser/collector. `codec.py`: angular. `mqtt.py`: wire/network/outbox.
+`agent.py`: orchestration/scheduling. `monitor.py`: bounded host probes.
+`control.py`: validation/journal/workers. `helper.py`: privileged allowlist.
+`api.py`: HTTP/auth. `ground.py`: receiver. `cli.py`: setup/doctor/demo/approval.
+`web/`: panel dan preview. `deploy/`: unit/kiosk. `tests/`: self-contained acceptance fixtures.

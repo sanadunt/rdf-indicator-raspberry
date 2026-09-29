@@ -1,0 +1,277 @@
+from __future__ import annotations
+from collections import deque
+import copy
+import queue
+import threading
+import time
+import uuid
+from pathlib import Path
+from . import __version__
+from .util import now_ms, compact, strict_json, read_boot_id, integer
+from .config import PROFILES
+from .journal import Journal
+from .source import Source
+from .monitor import Monitor
+from .control import CommandManager, OPS
+from .helper import call_helper
+from .mqtt import Client
+from .codec import encode, split
+
+class Agent:
+    def __init__(self,cfg,demo=False):
+        self.cfg=cfg; self.demo=demo; self.boot=read_boot_id(); self.instance=str(uuid.uuid4()); self.sid=uuid.uuid4().hex[:8]
+        self.prefix=('sdr/demo/v2/' if demo else 'sdr/v2/')+cfg['node_id']
+        self.journal=Journal(Path(cfg['state_dir'])/'state.sqlite3'); self.journal.recover(self.boot)
+        self.source=Source(cfg,self.journal); self.monitor=Monitor(cfg); self.commands=CommandManager(self)
+        self.profile=self.journal.get('profile',cfg['telemetry']['profile'])
+        if self.profile not in PROFILES: self.profile=cfg['telemetry']['profile']
+        self.config_proof='unverified'; self.request_config_report=True; self.planned_reboot=False
+        self.lock=threading.RLock(); self.snapshot_data={}; self.snapshot_seq=0
+        self.stop_event=threading.Event(); self.events=queue.Queue(32)
+        self.bulk_resume_after=time.monotonic()+cfg['telemetry']['resume_stable_seconds']
+        self.receipt=None; self.receipt_progress=None; self.receipt_last_seen=None; self.receipt_rejects=0
+        self.sent_health=deque(maxlen=120); self.sent_doa=deque(maxlen=120); self.sent_angular=deque(maxlen=30)
+        self.hq=0; self.last_doa_q=0; self.last_angular_q=0; self.angular_parts=[]; self.angular_started=0
+        self.angular_q=0; self.angular_abort=0; self.bulk_reason='BOOTSTRAP'; self.helper_status={}
+        self.clients={}; self._generation=-1; self.last_config_rev=None; self.last_sent_state=None
+        if cfg['mqtt']['enabled']:
+            m=cfg['mqtt']; subs=[(self.prefix+'/'+suffix,1,True) for suffix in OPS.values()]+[(self.prefix+'/ground/receipt',0,True)]
+            will=(self.prefix+'/availability',compact({'v':2,'sid':self.sid,'online':False,'reason':'CONNECTION_LOST'}))
+            self.clients['control']=Client(cfg=m,client_id=cfg['node_id']+'-control'+('-demo' if demo else ''),
+                credentials_file=m['control_credentials_file'],subscriptions=subs,will=will,on_message=self._incoming,
+                rate=cfg['telemetry']['control_budget_bytes_s'])
+            self.clients['bulk']=Client(cfg=m,client_id=cfg['node_id']+'-bulk'+('-demo' if demo else ''),
+                credentials_file=m['bulk_credentials_file'],rate=cfg['telemetry']['bulk_budget_bytes_s'],bulk=True)
+        self.threads=[]
+    def start(self):
+        self.monitor.start(); self.commands.start()
+        for client in self.clients.values(): client.start()
+        for fn,name in ((self._collect,'rdf-collector'),(self._schedule,'rdf-scheduler'),(self._events,'rdf-inbound')):
+            t=threading.Thread(target=fn,name=name,daemon=True); self.threads.append(t); t.start()
+    def stop(self):
+        self.stop_event.set()
+        self.commands.stop()
+        for c in self.clients.values(): c.stop()
+        self.monitor.stop()
+        for t in self.threads: t.join(3)
+        # A long lifecycle worker may still be reconciling; daemon exits without replay.
+        if not self.commands.thread.is_alive(): self.journal.close()
+    def _incoming(self,topic,payload,retained):
+        if len(payload)>4096: return
+        try: self.events.put_nowait((topic,payload,retained))
+        except queue.Full: pass
+    def _events(self):
+        while not self.stop_event.is_set():
+            try: topic,data,retained=self.events.get(timeout=.2)
+            except queue.Empty: continue
+            try:
+                j=strict_json(data)
+                if topic==self.prefix+'/ground/receipt': self.accept_receipt(j,retained)
+                else: self.commands.submit(j,'ground-controller',retained=retained,topic=topic)
+            except (ValueError,TypeError,KeyError,RecursionError): pass
+            finally: self.events.task_done()
+    def accept_receipt(self,r,retained=False):
+        try:
+            if retained or not isinstance(r,dict) or r.get('v')!=2 or r.get('sid')!=self.sid: raise ValueError('BAD_RECEIPT_SESSION')
+            hq=integer(r['hq'],0,0xffffffff); dq=integer(r.get('dq',0),0,0xffffffff); aq=integer(r.get('aq',0),0,0xffffffff)
+            with self.lock:
+                if hq not in self.sent_health: raise ValueError('RECEIPT_HEALTH_NOT_SENT')
+                if dq and dq not in self.sent_doa: raise ValueError('RECEIPT_DOA_NOT_SENT')
+                if aq and aq not in self.sent_angular: raise ValueError('RECEIPT_ANGULAR_NOT_SENT')
+                if self.receipt and hq<self.receipt['hq']: raise ValueError('RECEIPT_REGRESSED')
+                if not self.receipt or hq>self.receipt['hq']: self.receipt_progress=time.monotonic()
+                self.receipt_last_seen=time.monotonic(); self.receipt=dict(r)
+        except (ValueError,KeyError,TypeError): self.receipt_rejects+=1
+    def _remember(self,kind,q):
+        def sent():
+            with self.lock:
+                target={'health':self.sent_health,'doa':self.sent_doa,'angular':self.sent_angular}[kind]
+                if q not in target: target.append(q)
+        return sent
+    def receipt_view(self):
+        with self.lock:
+            age=int((time.monotonic()-self.receipt_progress)*1000) if self.receipt_progress is not None else None
+            state='UNCONFIRMED' if age is None else 'LOST' if age>self.cfg['freshness']['receipt_lost_ms'] else 'LATE' if age>self.cfg['freshness']['receipt_warn_ms'] else 'RECEIVING'
+            return {'state':state,'age_ms':age,'last':dict(self.receipt) if self.receipt else None,'rejected':self.receipt_rejects}
+    def _collect(self):
+        count=0
+        while not self.stop_event.is_set():
+            try:
+                self.source.poll()
+                if count%20==0 and not self.demo:
+                    try: self.helper_status=call_helper(self.cfg['control']['helper_socket'],{'op':'status'},timeout=1)
+                    except Exception: self.helper_status={}
+                self._snapshot()
+                if count%240==0: self.journal.prune()
+            except Exception as e:
+                with self.lock:
+                    self.snapshot_data['collector_error']=type(e).__name__
+            count+=1; self.stop_event.wait(self.cfg['source']['poll_ms']/1000)
+    def _snapshot(self):
+        host=self.monitor.snapshot()
+        if self.demo: host['clock_trusted']=True; host['clock_state']='DEMO'
+        view=self.source.view(host['clock_trusted'],self.commands.busy)
+        processing='UNKNOWN'
+        if host['service_state']=='ACTIVE': processing='RUNNING'
+        elif host['service_state']=='FAILED': processing='ERROR'
+        elif host['service_state']=='INACTIVE': processing='STOPPED'
+        elif self.source.status and view['daq']['source_age_ms'] is not None and view['daq']['source_age_ms']<3000:
+            processing='RUNNING'
+        if self.commands.busy:
+            latest=self.journal.lookup(self.commands.active_id)
+            if latest and latest['request']['op'] in ('processing.set','service.restart'):
+                processing='STOPPING' if latest['request'].get('desired')=='STOPPED' else 'STARTING'
+        receipt=self.receipt_view()
+        ctrl=self.clients.get('control'); bulk=self.clients.get('bulk')
+        cs=ctrl.status() if ctrl else {'state':'DISABLED','ready':False,'depth':0,'pending_age_ms':0}
+        bs=bulk.status() if bulk else {'state':'DISABLED','ready':False,'depth':0,'pending_age_ms':0}
+        # A read-only source can prove VFO frequency but not every native parameter.
+        if view['valid'] and self.config_proof=='unverified': self.config_proof='source_correlated'
+        if self.source.revision!=self.last_config_rev:
+            self.config_proof='source_correlated' if view['valid'] else 'unverified'
+            self.last_config_rev=self.source.revision; self.request_config_report=True
+        sync='UNVERIFIED'
+        if self.source.revision is not None and receipt['last']:
+            if receipt['last'].get('rev')!=self.source.revision: sync='PENDING'
+            elif receipt['state']=='RECEIVING' and self.config_proof=='runtime': sync='SYNCED'
+            else: sync='REPORTED_SAME' if receipt['state']=='RECEIVING' else 'LAST_KNOWN'
+        latest=self.journal.latest(1)
+        alerts=[]
+        if self.demo: alerts.append({'severity':'warning','code':'DEMO','text':'DEMO - bukan data perangkat'})
+        if not self.source.path: alerts.append({'severity':'warning','code':'SETUP_REQUIRED','text':'Pilih folder output SDR terlebih dahulu'})
+        if host.get('undervoltage'): alerts.append({'severity':'error','code':'UNDERVOLTAGE','text':'Tegangan rendah: periksa power'})
+        if host.get('temperature_c') is not None and host['temperature_c']>=80: alerts.append({'severity':'error','code':'HOT','text':'Suhu tinggi: periksa pendinginan'})
+        if host.get('disk_free_percent') is not None and host['disk_free_percent']<5: alerts.append({'severity':'error','code':'DISK_LOW','text':'Storage hampir penuh'})
+        if processing=='RUNNING' and view['daq']['state']!='HEALTHY': alerts.append({'severity':'error','code':'DAQ_DEGRADED','text':'DAQ belum sehat / data tidak valid'})
+        if not view['valid'] and view['reasons']: alerts.append({'severity':'warning','code':view['reasons'][0],'text':view['reasons'][0]})
+        if self.source.error: alerts.append({'severity':'warning','code':'SOURCE_READ','text':self.source.error})
+        if receipt['state'] in ('LATE','LOST'): alerts.append({'severity':'warning','code':'GROUND_LOST','text':'Ground belum menerima data terbaru'})
+        self.snapshot_seq+=1
+        snap={'schema_version':2,'version':__version__,'mode':'DEMO' if self.demo else 'LIVE',
+              'node_id':self.cfg['node_id'],'sid':self.sid,'boot_id':self.boot,'agent_instance_id':self.instance,
+              'snapshot_seq':self.snapshot_seq,'snapshot_ms':now_ms(),
+              'processing':{'observed':processing,'desired':self.helper_status.get('desired'),'scope':'SDR_STACK'},
+              'detection':view,'daq':view['daq'],'host':host,
+              'link':{'usb':host['usb'],'ppp':host['ppp'],'interface':host['interface'],'mqtt_control':cs,'mqtt_bulk':bs,
+                      'ground':receipt,'tx_kbit_s':host['tx_kbit_s'],'rx_kbit_s':host['rx_kbit_s'],
+                      'traffic_layer':'PPP_IP_COUNTERS','profile':self.profile,'bulk_pause':self.bulk_reason,'angular_aborted':self.angular_abort},
+              'config':self.config_view(sync),'capabilities':self.capabilities(),
+              'last_operation':self.commands.public(latest[0]) if latest else None,'active_alerts':alerts}
+        with self.lock: self.snapshot_data=snap
+    def snapshot(self):
+        with self.lock: return copy.deepcopy(self.snapshot_data)
+    def config_view(self,sync=None):
+        return {'sdr_revision':self.source.revision,'digest':self.source.safe_digest,'proof':self.config_proof,
+                'ground_sync':sync or 'UNVERIFIED','safe_settings':dict(self.source.safe),
+                'profile':self.profile,'source_configured':self.source.path is not None,
+                'authority_verified':self.cfg['source']['authority_verified'],'angle_verified':self.cfg['source']['angle_verified'],
+                'mqtt_configured':self.cfg['mqtt']['enabled'],'preferences':self.journal.get('display',self.cfg['display'])}
+    def capabilities(self):
+        c=self.cfg['control']
+        return {'v':2,'sid':self.sid,'boot':self.boot,'instance':self.instance,'version':__version__,
+                'mode':'DEMO' if self.demo else self.cfg['runtime_mode'],'codecs':['q16','u8'],
+                'angle':self.cfg['source']['angle_mode'],'native_axis':1,'count':360,
+                'profiles':list(PROFILES),'scope':'SDR_STACK','helper_available':bool(self.helper_status),
+                'maintenance':self.helper_status.get('maintenance',False),
+                'remote_commands':c['remote_commands_enabled'],
+                'config_patch':c['config_patch_enabled'] and self.helper_status.get('allow_config',False),
+                'processing':c['processing_enabled'] and self.helper_status.get('allow_lifecycle',False),
+                'restart':c['restart_enabled'] and self.helper_status.get('allow_lifecycle',False),
+                'reboot':c['reboot_enabled'] and self.helper_status.get('allow_reboot',False)}
+    def _offer(self,key,suffix,payload,qos=0,retain=False,expiry=None,priority=2,sent=None,bulk=False):
+        client=self.clients.get('bulk' if bulk else 'control')
+        if not client: return False
+        return client.offer(key,self.prefix+'/'+suffix,payload,qos=qos,retain=retain,expiry=expiry,priority=priority,on_sent=sent)
+    def operation_changed(self,id,op,stage,result):
+        suffix='ack/config' if op.startswith('config.') else 'ack/operation'
+        self._offer('op:'+id,suffix,{'v':2,'sid':self.sid,'id':id,'status':stage,'t':now_ms(),'rev':self.source.revision,'result':result},
+                    qos=1,expiry=30,priority=0)
+    def _state(self,s):
+        return {'v':2,'sid':self.sid,'boot':self.boot,'instance':self.instance,'t':now_ms(),
+                'run':s.get('processing',{}).get('observed','UNKNOWN'),'daq':s.get('daq',{}).get('healthy',False),
+                'cfg':self.source.revision,'profile':self.profile,'clock':s.get('host',{}).get('clock_state','UNTRUSTED')}
+    def _schedule(self):
+        due={}; last_bootstrap=0; parts_next=0
+        while not self.stop_event.is_set():
+            try:
+                s=self.snapshot(); now=time.monotonic(); ctrl=self.clients.get('control'); bulk=self.clients.get('bulk')
+                if not s or not ctrl or not ctrl.ready:
+                    if self.angular_parts: self.angular_abort+=1
+                    self.angular_parts=[]; self.bulk_reason='MQTT_NOT_READY'
+                    self.stop_event.wait(.1); continue
+                if ctrl.generation!=self._generation:
+                    self._generation=ctrl.generation; self.angular_parts=[]; self.request_config_report=True
+                    self.bulk_resume_after=now+self.cfg['telemetry']['resume_stable_seconds']
+                    self._offer('available','availability',{'v':2,'sid':self.sid,'online':True,'t':now_ms()},1,True,priority=0)
+                    self._offer('caps','capabilities',self.capabilities(),1,True,priority=3)
+                    due['state']=0
+                def tick(key,seconds):
+                    if now>=due.get(key,0): due[key]=now+seconds; return True
+                    return False
+                d=s['detection']; h=s['host']; daq=s['daq']; run=s['processing']['observed']
+                if tick('health',1):
+                    self.hq+=1
+                    payload={'v':2,'sid':self.sid,'q':self.hq,'t':now_ms(),
+                             'run':{'STOPPED':0,'RUNNING':1,'STARTING':2,'STOPPING':3,'ERROR':4}.get(run,255),
+                             'daq':1 if daq['healthy'] else 2 if daq['state']=='UNKNOWN' else 0,
+                             'drop':daq['dropped_frames'],'age':d['source_age_ms'],'temp':h['temperature_c'],
+                             'clk':1 if h['clock_trusted'] else 0,'rev':self.source.revision}
+                    self._offer('health','telemetry/health',payload,expiry=5,priority=1,sent=self._remember('health',self.hq))
+                if tick('detail',10):
+                    self._offer('detail','telemetry/health/detail',{'v':2,'sid':self.sid,'t':now_ms(),
+                        'usb':h['usb_count'],'sync':list(daq['sync'].values()),'cpu':h['cpu_percent'],'mem':h['memory_percent'],
+                        'disk_free':h['disk_free_percent'],'throt':h['throttled'],'uv':h['undervoltage'],
+                        'tx':h['tx_kbit_s'],'rx':h['rx_kbit_s'],'adrop':self.angular_abort,'parse':self.source.parse_errors},expiry=15,priority=4)
+                state=self._state(s); state_changed=(state['run'],state['daq'],state['cfg'],state['profile'],state['clock'])
+                if (state_changed!=self.last_sent_state and now-due.get('state_event_last',-10)>1) or now>=due.get('state',0):
+                    if self._offer('state','state',state,1,True,priority=1):
+                        due['state']=now+60; due['state_event_last']=now; self.last_sent_state=state_changed
+                if self.request_config_report and now>=due.get('config',0):
+                    reported={'v':2,'sid':self.sid,'rev':self.source.revision,'t':now_ms(),'proof':self.config_proof,
+                              'digest':self.source.safe_digest,'effective':self.source.safe}
+                    if self._offer('config','config/reported',reported,1,True,priority=3):
+                        self.request_config_report=False; due['config']=now+2
+                if tick('doa',PROFILES[self.profile]['doa_s']) and d['valid'] and d['q']!=self.last_doa_q:
+                    payload={'v':2,'sid':self.sid,'q':d['q'],'t':d['source_timestamp_ms'],'f':d['frequency_hz'],
+                             'a':round(d['relative_doa_deg'],2),'c':round(d['confidence_native_db'],2),
+                             'p':round(d['power_native_db'],2),'rev':d['revision'],'ok':1}
+                    if self._offer('doa','telemetry/doa',payload,expiry=3,sent=self._remember('doa',d['q'])): self.last_doa_q=d['q']
+                reason=None
+                if self.profile=='control': reason='PROFILE_CONTROL'
+                elif not d['valid']: reason='SOURCE_NOT_ELIGIBLE'
+                elif self.commands.busy: reason='CONTROL_IN_PROGRESS'
+                elif not bulk or not bulk.ready: reason='BULK_NOT_READY'
+                elif self.cfg['telemetry']['require_ground_receipt_for_bulk'] and s['link']['ground']['state']!='RECEIVING': reason='GROUND_RECEIPT_REQUIRED'
+                elif ctrl.pending_age_ms>500: reason='CONTROL_BACKLOG'
+                if reason:
+                    if self.angular_parts: self.angular_abort+=1
+                    self.angular_parts=[]
+                    if bulk: bulk.outbox.clear()
+                    self.bulk_reason=reason
+                    self.bulk_resume_after=now+self.cfg['telemetry']['resume_stable_seconds']
+                elif now<self.bulk_resume_after:
+                    self.bulk_reason='WAIT_STABLE'
+                else:
+                    self.bulk_reason=None
+                    interval=PROFILES[self.profile]['angular_s']
+                    if self.angular_parts and now-self.angular_started>3:
+                        self.angular_parts=[]; self.angular_abort+=1
+                    if not self.angular_parts and now>=due.get('angular',0) and d['q']!=self.last_angular_q:
+                        r=self.source.record
+                        if r and r['q']==d['q']:
+                            frame=encode(r['values'],sid=int(self.sid,16),seq=r['q'],timestamp_ms=r['timestamp_ms'],
+                                frequency_hz=r['frequency_hz'],revision=d['revision'],vfo=self.cfg['source']['output_vfo'],
+                                raw_doa=r['raw_doa_deg'],confidence=r['confidence_native_db'],encoding=PROFILES[self.profile]['encoding'])
+                            self.angular_parts=split(frame); self.angular_q=r['q']; self.angular_started=now
+                            due['angular']=now+interval; parts_next=now
+                    if self.angular_parts and now>=parts_next and bulk.outbox.status()['depth']==0 and bulk.pending_age_ms==0:
+                        chunk=self.angular_parts.pop(0); q=self.angular_q
+                        sent=self._remember('angular',q) if not self.angular_parts else None
+                        if not self._offer('angular','telemetry/angular',chunk,expiry=3,priority=3,sent=sent,bulk=True):
+                            self.angular_parts=[]; self.angular_abort+=1
+                        else:
+                            parts_next=now+.3
+                            if not self.angular_parts: self.last_angular_q=q
+            except Exception as e:
+                self.bulk_reason='SCHEDULER_'+type(e).__name__.upper()
+            self.stop_event.wait(.05)

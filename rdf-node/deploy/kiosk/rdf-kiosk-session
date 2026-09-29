@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+for name in DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS XDG_SESSION_TYPE; do
+  if printenv "$name" >/dev/null 2>&1; then systemctl --user import-environment "$name"; fi
+done
+systemctl --user daemon-reload
+exec systemctl --user start rdf-kiosk.service

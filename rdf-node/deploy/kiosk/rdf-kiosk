@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+if [ "$(id -u)" -eq 0 ]; then echo 'Kiosk must run as the desktop user, not root.' >&2; exit 1; fi
+if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then echo 'No graphical session. Run from the Raspberry desktop.' >&2; exit 1; fi
+BROWSER=$(command -v chromium || command -v chromium-browser || true)
+if [ -z "$BROWSER" ]; then echo 'Chromium not installed. Install it from your OS repository.' >&2; exit 1; fi
+PROFILE="${XDG_CACHE_HOME:-$HOME/.cache}/rdf-node-kiosk"
+mkdir -p "$PROFILE"
+exec "$BROWSER" --kiosk --no-first-run --noerrdialogs --disable-session-crashed-bubble --window-size=480,320 --force-device-scale-factor=1 --user-data-dir="$PROFILE" "${RDF_NODE_URL:-http://127.0.0.1:8790}"

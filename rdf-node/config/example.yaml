@@ -1,0 +1,61 @@
+schema_version: 2
+node_id: uav-01
+runtime_mode: read_only
+state_dir: /var/lib/rdf-node
+source:
+  share_dir: null
+  output_vfo: 0
+  authority_verified: false
+  angle_verified: false
+  angle_mode: theta_mirror
+  max_record_bytes: 16384
+  poll_ms: 250
+  require_frame_progress: true
+link:
+  serial_alias: /dev/t900
+  expected_vid: '1a86'
+  expected_pid: '7523'
+  expected_usb_path: platform-xhci-hcd.0-usb-0:2:1.0
+  local_ip: 10.90.0.2
+  peer_ip: 10.90.0.1
+  engine_service: null
+mqtt:
+  enabled: false
+  host: 10.90.0.1
+  port: 8883
+  tls: true
+  ca_file: null
+  control_credentials_file: null
+  bulk_credentials_file: null
+  keepalive: 15
+  reconnect_max: 30
+  allow_insecure_loopback: false
+telemetry:
+  profile: balanced
+  resume_stable_seconds: 20
+  require_ground_receipt_for_bulk: true
+  control_budget_bytes_s: 850
+  bulk_budget_bytes_s: 350
+freshness:
+  source_status_ms: 3000
+  doa_ms: 2500
+  frame_progress_ms: 5000
+  receipt_warn_ms: 10000
+  receipt_lost_ms: 15000
+control:
+  config_patch_enabled: false
+  processing_enabled: false
+  restart_enabled: false
+  reboot_enabled: false
+  remote_commands_enabled: false
+  helper_socket: /run/rdf-node-control/control.sock
+  verify_seconds: 12
+  start_timeout_seconds: 180
+api:
+  port: 8790
+  admin_hash_file: /etc/rdf-node/admin-hash.json
+  session_seconds: 600
+  max_clients: 16
+display:
+  theme: dark
+  blank_after_seconds: 0

@@ -1,0 +1,103 @@
+{
+  "method": "DOM injection of actual local assets; managed browser URL navigation is blocked. API tested separately.",
+  "pages": [
+    {
+      "page": "overview",
+      "scrollWidth": 480,
+      "scrollHeight": 320,
+      "nav": [
+        {
+          "w": 120,
+          "h": 48
+        },
+        {
+          "w": 120,
+          "h": 48
+        },
+        {
+          "w": 120,
+          "h": 48
+        },
+        {
+          "w": 120,
+          "h": 48
+        }
+      ],
+      "active": "home"
+    },
+    {
+      "page": "link",
+      "scrollWidth": 480,
+      "scrollHeight": 320,
+      "nav": [
+        {
+          "w": 120,
+          "h": 48
+        },
+        {
+          "w": 120,
+          "h": 48
+        },
+        {
+          "w": 120,
+          "h": 48
+        },
+        {
+          "w": 120,
+          "h": 48
+        }
+      ],
+      "active": "link"
+    },
+    {
+      "page": "system",
+      "scrollWidth": 480,
+      "scrollHeight": 320,
+      "nav": [
+        {
+          "w": 120,
+          "h": 48
+        },
+        {
+          "w": 120,
+          "h": 48
+        },
+        {
+          "w": 120,
+          "h": 48
+        },
+        {
+          "w": 120,
+          "h": 48
+        }
+      ],
+      "active": "system"
+    },
+    {
+      "page": "config",
+      "scrollWidth": 480,
+      "scrollHeight": 320,
+      "nav": [
+        {
+          "w": 120,
+          "h": 48
+        },
+        {
+          "w": 120,
+          "h": 48
+        },
+        {
+          "w": 120,
+          "h": 48
+        },
+        {
+          "w": 120,
+          "h": 48
+        }
+      ],
+      "active": "config"
+    }
+  ],
+  "javascript_errors": [],
+  "frozen_snapshot_alarm_visible": true
+}

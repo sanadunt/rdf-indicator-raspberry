@@ -1,0 +1,11 @@
+[Unit]
+Description=RDF 480x320 status kiosk
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/rdf-kiosk
+Restart=on-failure
+RestartSec=5
+Environment=RDF_NODE_URL=http://127.0.0.1:8790
