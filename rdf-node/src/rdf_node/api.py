@@ -116,6 +116,10 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/v2/session':
                 s=self.server.auth.session(self.headers.get('Cookie'))
                 return self.reply(200,{'authenticated':bool(s),'csrf':s[1] if s else None})
+            if p=='/api/v2/mqtt/settings':
+                if self.server.ground: return self.reply(404,{'error':'NOT_FOUND'})
+                if not self.server.auth.session(self.headers.get('Cookie')): return self.reply(401,{'error':'AUTHENTICATION_REQUIRED'})
+                return self.reply(200,app.mqtt_settings_view())
             snap=app.snapshot()
             if p=='/api/v2/snapshot': return self.reply(200,snap)
             if p=='/api/v2/link': return self.reply(200,snap.get('link',{}))
@@ -172,6 +176,8 @@ class Handler(BaseHTTPRequestHandler):
                 if self.server.ground: result=app.submit_command(obj)
                 else: result=app.commands.submit(obj,'local-admin')
                 return self.reply(400 if result.get('stage')=='REJECTED' else 202,result)
+            if p=='/api/v2/mqtt/settings' and not self.server.ground:
+                return self.reply(200,app.configure_mqtt(obj))
             if p=='/api/v2/display/preferences' and not self.server.ground:
                 if set(obj)-{'theme','accent','font','blank_after_seconds'}: raise ValueError('UNKNOWN_PREFERENCE')
                 prefs=dict(app.cfg['display'])

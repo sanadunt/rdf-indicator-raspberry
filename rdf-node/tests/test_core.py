@@ -1,4 +1,4 @@
-import copy,json,math,os,struct,tempfile,time,unittest
+import copy,json,math,os,shutil,struct,sys,tempfile,time,unittest
 from pathlib import Path
 from unittest import mock
 from rdf_node.config import load_config,validate_config
@@ -8,6 +8,7 @@ from rdf_node.codec import HEADER,CHUNK,encode,decode,split,Assembler
 from rdf_node.journal import Journal
 from rdf_node.helper import DEFAULT_POLICY,Controller,validate_changes,patch_file
 from rdf_node.mqtt import vi,read_vi,Reader,publish_packet,connect_packet,properties,utf,Message,Outbox
+from rdf_node import monitor
 
 def settings():
     return {'center_freq':433.92,'uniform_gain':15.7,'vfo_freq_0':433920000,'vfo_bw_0':12500,
@@ -18,6 +19,42 @@ def csv_bytes(r):return (','.join(map(str,r))+'\n').encode()
 def status(t=None,idx=1):
     return {'timestamp_ms':now_ms() if t is None else t,'daq_ok':True,'daq_num_dropped_frames':2,
             'daq_status':{'data_frame_index':idx,'frame_sync':True,'sample_delay_sync':True,'iq_sync':True}}
+class PppProbeTests(unittest.TestCase):
+    def test_ppp_probe_status_starts_unknown(self):
+        self.assertEqual(monitor.Monitor(load_config()).snapshot().get('ppp_probe'),'UNKNOWN')
+    def test_ppp_probe_without_interface_does_not_claim_reachability(self):
+        with mock.patch.object(monitor.subprocess,'run') as command:
+            self.assertEqual(monitor.probe_peer(None,load_config()['link']['peer_ip']),'NO_INTERFACE')
+        command.assert_not_called()
+    def test_ppp_probe_reports_no_reply(self):
+        result=mock.Mock(returncode=1)
+        with mock.patch.object(monitor.subprocess,'run',return_value=result):
+            self.assertEqual(monitor.probe_peer('ppp0',load_config()['link']['peer_ip']),'NO_REPLY')
+    def test_ppp_probe_no_reply_keeps_interface_status_up(self):
+        host=monitor.Monitor(load_config())
+        host.data.update(ppp='UP',interface='ppp0')
+        with mock.patch.object(monitor.subprocess,'run',return_value=mock.Mock(returncode=1)):
+            host.probe(5)
+        state=host.snapshot()
+        self.assertEqual(state['ppp'],'UP')
+        self.assertEqual(state.get('ppp_probe'),'NO_REPLY')
+    @unittest.skipUnless(sys.platform.startswith('linux') and shutil.which('ping'),'Linux ping is required')
+    def test_ppp_probe_reaches_peer_on_selected_interface(self):
+        self.assertEqual(monitor.probe_peer('lo','127.0.0.1'),'REPLY')
+    @unittest.skipUnless(sys.platform.startswith('linux') and shutil.which('ping'),'Linux ping is required')
+    def test_ppp_probe_does_not_fall_back_when_interface_is_missing(self):
+        self.assertEqual(monitor.probe_peer('rdf-no-such-interface','127.0.0.1'),'ERROR')
+    def test_ppp_monitor_detects_point_to_point_peer(self):
+        host=monitor.Monitor(load_config())
+        ip_json=json.dumps([{'ifname':'ppp0','flags':['POINTOPOINT','MULTICAST','NOARP','UP','LOWER_UP'],
+                             'addr_info':[{'family':'inet','local':'10.90.0.2','address':'10.90.0.1','prefixlen':32}]}])
+        def command(args,timeout=2):
+            return ip_json if args==['ip','-j','addr','show'] else None
+        with mock.patch.object(monitor,'run',side_effect=command):
+            host.probe(2)
+        state=host.snapshot()
+        self.assertEqual(state['ppp'],'UP')
+        self.assertEqual(state['interface'],'ppp0')
 
 class ConfigTests(unittest.TestCase):
     def test_default_config(self): self.assertEqual(load_config()['api']['port'],8790)

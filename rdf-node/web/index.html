@@ -10,7 +10,7 @@
 <div id="alertbox" class="alert"><b id="alerticon">i</b><span id="alert">Memuat status lokal...</span><span id="temp">--</span></div>
 </section>
 <section id="link" class="page details">
-<div class="pagetitle"><b>KONEKSI / DELIVERY</b><button id="linkpage" class="smallbtn">Data &rsaquo;</button></div>
+<div class="pagetitle"><b>KONEKSI / DELIVERY</b><button id="linkpage" class="smallbtn">Rincian &rsaquo;</button></div>
 <div id="linkrows" class="rows"></div>
 </section>
 <section id="system" class="page details">
@@ -23,7 +23,13 @@
 <div class="configbuttons"><button id="profilebtn">Profil</button><button id="controlbtn">Kontrol</button><button id="themebtn">Tampilan</button></div>
 <p id="configreason" class="hint">Read-only; pengaturan sumber melalui setup CLI.</p>
 </section>
-<nav><button data-tab="home" class="selected" aria-label="Utama"><span>&#9673;</span>Utama</button><button data-tab="link" aria-label="Link"><span>&#8644;</span>Link</button><button data-tab="system" aria-label="Sistem"><span>&#9638;</span>Sistem</button><button data-tab="config" aria-label="Config"><span>&#9881;</span>Config</button></nav>
+<section id="data" class="page data-page">
+<div class="pagetitle"><b>DATA / MQTT</b><button id="mqttsettings" class="smallbtn">Login</button></div>
+<div class="data-summary"><div><small>CTRL / BULK</small><b id="mqttclients">DISABLED / DISABLED</b></div><div><small>GROUND RECEIPT</small><b id="mqttreceipt">UNCONFIRMED</b></div></div>
+<div class="topic-heading"><span id="topicprefix"></span><span>TOPIK / PAYLOAD</span></div>
+<div id="topiclist" class="topic-list" tabindex="0" aria-label="Daftar topik MQTT"></div>
+</section>
+<nav><button data-tab="home" class="selected" aria-current="page" aria-label="Utama"><span>&#9673;</span>Utama</button><button data-tab="link" aria-label="Link"><span>&#8644;</span>Link</button><button data-tab="system" aria-label="Sistem"><span>&#9638;</span>Sistem</button><button data-tab="config" aria-label="Config"><span>&#9881;</span>Config</button><button data-tab="data" aria-label="Data"><span>&#9634;</span>Data</button></nav>
 <div id="stale" hidden><b>SUMBER STATUS HILANG</b><span id="stalereason">API lokal tidak merespons.</span><small>Data di belakang bukan status terkini.</small></div>
 <div id="modal" hidden><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="modaltitle"><div class="dialoghead"><b id="modaltitle">Login</b><button id="closemodal" aria-label="Tutup">&times;</button></div><div id="modalbody"></div><div id="modalmsg" class="hint" aria-live="polite"></div></div></div>
 <div id="blank" hidden><span>Ketuk untuk menampilkan indikator</span></div>

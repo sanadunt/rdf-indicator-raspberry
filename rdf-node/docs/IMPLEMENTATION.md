@@ -23,10 +23,16 @@ Authenticated command
 
 ### Isolation
 
-Panel dan MQTT tidak menjalankan receiver SDR kedua. Browser tidak memiliki credential MQTT,
-tidak membaca file native langsung, dan tidak memiliki hak root. Edge tetap hidup bila
-SDR, helper, PPP, atau Ground gagal. Engine GUI lama tidak dihentikan: pada deployment tertentu
-proses tersebut juga menjalankan signal processor.
+Panel dan MQTT tidak menjalankan receiver SDR kedua. Browser tidak membaca file native,
+tidak menyimpan credential MQTT, tidak menerima password tersimpan dari API, dan tidak punya
+hak root. Edge tetap hidup bila SDR, helper, PPP, atau Ground gagal. Engine GUI lama tidak
+dihentikan: pada deployment tertentu proses tersebut juga menjalankan signal processor.
+`Data > Atur` hanya menerima perubahan melalui session admin+CSRF. Broker settings berada di
+`/var/lib/rdf-node/mqtt-ui-settings.json`; control dan bulk credential disimpan terpisah pada
+`/var/lib/rdf-node/mqtt-ui-control.json` dan `mqtt-ui-bulk.json`, mode 0600. TLS/CA tetap dari
+provisioning bundle; UI tidak dapat menonaktifkan verifikasi sertifikat.
+Save mengganti kedua client pada scheduler tanpa restart service, membuang receipt/sequence
+lama, lalu menunggu bukti Ground baru sebelum bulk dapat berjalan.
 
 Runtime menggunakan `/usr/bin/python3`, bukan Conda `base` atau environment SDR.
 Local HTTP server stdlib memiliki client/body caps, Host/Origin checks, cookie admin,
@@ -102,6 +108,15 @@ atomic rename tidak menyelesaikan konflik semua writer otomatis.
 ## Indikator dan cadangan kapasitas
 
 PPP UP diperoleh dari interface/address peer; USB present bukan bukti RF sehat.
+
+Monitor host mengirim satu echo ICMP ke peer terkonfigurasi sekitar tiap 5 detik melalui
+interface PPP yang terdeteksi. Tanpa interface yang cocok, ping tidak dikirim. `REPLY`,
+`NO_REPLY`, `NO_INTERFACE`, dan `ERROR` terpisah dari `link.ppp`: balasan membuktikan
+peer terjangkau; tanpa balasan ICMP bukan bukti PPP mati.
+
+Sandbox systemd RDF edge mengizinkan `AF_NETLINK` agar `ip -j addr` dapat membaca interface.
+
+
 MQTT CONNECTED/READY dibedakan dari Ground receipt. Receipt hq harus pernah terkirim dan
 bertambah; receipt berulang tidak menyegarkan progress. Setelah 10 detik terlambat,
 setelah 15 detik lost, belum pernah receipt berarti unconfirmed.

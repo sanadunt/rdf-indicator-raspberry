@@ -5,6 +5,11 @@
 - Replace local admin passwords with six-digit PIN login and a touch keypad on the Raspberry panel.
 - Add saved accent-color and font preferences to the Config panel.
 - Existing installations must set a new PIN locally with `rdf-node set-pin`.
+- Launch kiosk Chromium with `--disable-gpu`; on the Raspberry, EGL config errors were logged with no `/dev/dri`, and the panel rendered with software rendering.
+- Allow the RDF edge systemd sandbox to use AF_NETLINK for PPP interface discovery.
+- Probe the configured PPP peer with one interface-bound ICMP echo about every five seconds; a missing reply does not mark PPP down.
+- Add a bottom Data page with MQTT broker settings and a read-only topic/payload inventory.
+- Keep control/bulk credentials separate, require TLS validation, and reconfigure clients live after admin save.
 
 
 ## 1.0.0 - 2026-09-29

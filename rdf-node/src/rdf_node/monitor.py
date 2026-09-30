@@ -13,12 +13,22 @@ def run(args,timeout=2):
         return p.stdout[:65536].strip() if p.returncode==0 else None
     except (OSError,subprocess.TimeoutExpired): return None
 
+def probe_peer(interface,target):
+    if not interface: return 'NO_INTERFACE'
+    try:
+        p=subprocess.run(['ping','-n','-I',interface,'-c','1','-W','1',target],
+                         stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=2,check=False)
+    except (OSError,subprocess.TimeoutExpired): return 'ERROR'
+    if p.returncode==0: return 'REPLY'
+    if p.returncode==1: return 'NO_REPLY'
+    return 'ERROR'
+
 class Monitor:
     def __init__(self,cfg):
         self.cfg=cfg; self.lock=threading.Lock(); self.stop_event=threading.Event(); self.thread=None
         self.data=dict(cpu_percent=None,memory_percent=None,temperature_c=None,disk_free_percent=None,
                        uptime_s=None,clock_state='UNTRUSTED',clock_trusted=False,usb='UNKNOWN',usb_count=None,
-                       ppp='DOWN',interface=None,tx_kbit_s=None,rx_kbit_s=None,
+                       ppp='DOWN',interface=None,ppp_probe='UNKNOWN',tx_kbit_s=None,rx_kbit_s=None,
                        service_state='UNKNOWN',substate=None,generation=None,cgroup_empty=None,throttled=None,undervoltage=None)
         self.prev_cpu=None; self.prev_net=None
     def snapshot(self):
@@ -90,7 +100,10 @@ class Monitor:
                             if local==self.cfg['link']['local_ip'] and peer==self.cfg['link']['peer_ip'] and 'UP' in link.get('flags',[]):
                                 d['ppp']='UP'; d['interface']=link['ifname']
                 except (ValueError,AttributeError): pass
-        with self.lock: iface=d.get('interface',self.data['interface'])
+            if d['ppp']!='UP': d['ppp_probe']='NO_INTERFACE'
+        with self.lock:
+            ppp=d.get('ppp',self.data['ppp'])
+            iface=d.get('interface',self.data['interface'])
         if iface:
             try:
                 root=Path('/sys/class/net')/iface/'statistics'
@@ -125,4 +138,5 @@ class Monitor:
                     flags=int(out.split('=')[-1],16)
                     d['undervoltage']=bool(flags&1); d['throttled']=bool(flags&4)
                 except ValueError: pass
+            d['ppp_probe']=probe_peer(iface if ppp=='UP' else None,self.cfg['link']['peer_ip'])
         with self.lock: self.data.update(d)

@@ -20,7 +20,11 @@ watchdog tambahan belum ada. Layar/backlight fisik tetap perlu diperiksa terpisa
 ## File dan izin
 
 Release root-owned read-only untuk service. State aplikasi berada pada /var/lib.
-MQTT credential dan hash PIN admin bukan bagian UI export. Semua assets browser lokal.
+Menu Data memerlukan PIN admin dan CSRF. Pengaturan MQTT tersimpan di
+`/var/lib/rdf-node/mqtt-ui-settings.json`; akun control/bulk tersimpan terpisah dengan mode 0600.
+API hanya melaporkan apakah credential tersedia, tidak mengembalikan username/password. TLS/CA
+tetap mengikuti provisioning bundle; halaman lokal tidak menyediakan bypass verifikasi sertifikat.
+Perubahan broker/credential mengganti kedua client dan menghapus receipt lama; bulk menunggu bukti Ground baru.
 Source permission memakai ACL terbatas pada _share; tidak chmod777 atau recursive home read.
 
 ACL perlu diperiksa kembali jika deployment engine membuat file dengan mode yang menolak
@@ -35,7 +39,7 @@ Redact identifier sensitif sebelum membagikan diagnosis.
 
 Backup yang disarankan pada media aman:
 - /etc/rdf-node (termasuk credentials, harus dianggap rahasia);
-- /var/lib/rdf-node (SQLite journal);
+- /var/lib/rdf-node (SQLite journal, MQTT credential UI mode 0600; perlakukan sebagai rahasia);
 - /etc/rdf-node/helper.yaml dan /var/lib/rdf-node-control (intent/backupsettings);
 - /etc/rdf-ground dan /etc/rdf-ground-mqtt pada Ubuntu;
 - konfigurasi asli unit SDR/watchdog sebelum approval lifecycle.

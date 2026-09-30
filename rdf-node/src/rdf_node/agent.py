@@ -1,13 +1,15 @@
 from __future__ import annotations
 from collections import deque
 import copy
+import ipaddress
 import queue
+import re
 import threading
 import time
 import uuid
 from pathlib import Path
 from . import __version__
-from .util import now_ms, compact, strict_json, read_boot_id, integer
+from .util import now_ms, compact, strict_json, read_boot_id, integer, atomic_write, stable_read
 from .config import PROFILES
 from .journal import Journal
 from .source import Source
@@ -34,24 +36,156 @@ class Agent:
         self.hq=0; self.last_doa_q=0; self.last_angular_q=0; self.angular_parts=[]; self.angular_started=0
         self.angular_q=0; self.angular_abort=0; self.bulk_reason='BOOTSTRAP'; self.helper_status={}
         self.clients={}; self._generation=-1; self.last_config_rev=None; self.last_sent_state=None
-        if cfg['mqtt']['enabled']:
-            m=cfg['mqtt']; subs=[(self.prefix+'/'+suffix,1,True) for suffix in OPS.values()]+[(self.prefix+'/ground/receipt',0,True)]
-            will=(self.prefix+'/availability',compact({'v':2,'sid':self.sid,'online':False,'reason':'CONNECTION_LOST'}))
-            self.clients['control']=Client(cfg=m,client_id=cfg['node_id']+'-control'+('-demo' if demo else ''),
-                credentials_file=m['control_credentials_file'],subscriptions=subs,will=will,on_message=self._incoming,
-                rate=cfg['telemetry']['control_budget_bytes_s'])
-            self.clients['bulk']=Client(cfg=m,client_id=cfg['node_id']+'-bulk'+('-demo' if demo else ''),
-                credentials_file=m['bulk_credentials_file'],rate=cfg['telemetry']['bulk_budget_bytes_s'],bulk=True)
+        self.mqtt_state_path=Path(cfg['state_dir'])/'mqtt-ui-settings.json'
+        self.mqtt_credentials_paths={name:Path(cfg['state_dir'])/f'mqtt-ui-{name}.json' for name in ('control','bulk')}
+        self.mqtt_base_credentials={name:cfg['mqtt'].get(f'{name}_credentials_file') for name in ('control','bulk')}
+        self.mqtt_config_lock=threading.RLock(); self.mqtt_apply_lock=threading.RLock()
+        self.mqtt_reconfigure=threading.Event(); self.mqtt_pending=None; self.mqtt_running=False
+        self.mqtt_desired=self._load_mqtt_settings()
+        self.cfg['mqtt']=self._resolved_mqtt_config(self.mqtt_desired)
+        self.clients=self._new_mqtt_clients(self.mqtt_desired)
         self.threads=[]
+    @staticmethod
+    def _validate_mqtt_endpoint(host,port,client_id):
+        if not isinstance(host,str) or not host or len(host)>253 or not host.isascii() or host!=host.strip() or '%' in host:
+            raise ValueError('INVALID_MQTT_HOST')
+        try: ipaddress.ip_address(host)
+        except ValueError:
+            labels=host.split('.')
+            if not all(len(label)<=63 and re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?',label) for label in labels):
+                raise ValueError('INVALID_MQTT_HOST')
+        if type(port) is not int or not 1<=port<=65535: raise ValueError('INVALID_MQTT_PORT')
+        if not isinstance(client_id,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,47}',client_id):
+            raise ValueError('INVALID_MQTT_CLIENT_ID')
+    @staticmethod
+    def _credentials_ready(path):
+        if not path: return False
+        try:
+            value=strict_json(stable_read(Path(path),4096,nofollow=True))
+            return isinstance(value,dict) and set(value)=={'username','password'} and all(isinstance(x,str) and x for x in value.values())
+        except (OSError,TypeError,ValueError): return False
+    def _mqtt_defaults(self):
+        m=self.cfg['mqtt']
+        return {'enabled':m['enabled'],'host':m['host'],'port':m['port'],
+                'client_id':m.get('client_id') or self.cfg['node_id'],'control_custom':False,'bulk_custom':False}
+    def _mqtt_credentials_path(self,channel,settings):
+        return self.mqtt_credentials_paths[channel] if settings[f'{channel}_custom'] else self.mqtt_base_credentials[channel]
+    def _mqtt_transport_ready(self,settings,replacements=None):
+        m=self.cfg['mqtt']
+        if m.get('tls') is not True or not m.get('ca_file') or not Path(m['ca_file']).is_file(): return False
+        replacements=replacements or {}
+        return all(channel in replacements or self._credentials_ready(self._mqtt_credentials_path(channel,settings))
+                   for channel in ('control','bulk'))
+    def _load_mqtt_settings(self):
+        defaults=self._mqtt_defaults()
+        if self.demo: return defaults
+        try:
+            value=strict_json(stable_read(self.mqtt_state_path,4096,nofollow=True))
+            keys={'schema','enabled','host','port','client_id','control_custom','bulk_custom'}
+            if not isinstance(value,dict) or set(value)!=keys or type(value['schema']) is not int or value['schema']!=1:
+                return defaults
+            if type(value['enabled']) is not bool or type(value['control_custom']) is not bool or type(value['bulk_custom']) is not bool:
+                return defaults
+            self._validate_mqtt_endpoint(value['host'],value['port'],value['client_id'])
+            settings={key:value[key] for key in ('enabled','host','port','client_id','control_custom','bulk_custom')}
+            if settings['enabled'] and not self._mqtt_transport_ready(settings): return defaults
+            return settings
+        except (OSError,KeyError,TypeError,ValueError): return defaults
+    def _resolved_mqtt_config(self,settings):
+        m=dict(self.cfg['mqtt'])
+        m.update(enabled=settings['enabled'],host=settings['host'],port=settings['port'],client_id=settings['client_id'])
+        for channel in ('control','bulk'):
+            path=self._mqtt_credentials_path(channel,settings)
+            m[f'{channel}_credentials_file']=str(path) if path else None
+        return m
+    def _new_mqtt_clients(self,settings):
+        if not self.cfg['mqtt']['enabled']: return {}
+        m=self.cfg['mqtt']; demo_suffix='-demo' if self.demo else ''
+        subs=[(self.prefix+'/'+suffix,1,True) for suffix in OPS.values()]+[(self.prefix+'/ground/receipt',0,True)]
+        will=(self.prefix+'/availability',compact({'v':2,'sid':self.sid,'online':False,'reason':'CONNECTION_LOST'}))
+        return {
+            'control':Client(cfg=m,client_id=settings['client_id']+'-control'+demo_suffix,
+                credentials_file=m['control_credentials_file'],subscriptions=subs,will=will,on_message=self._incoming,
+                rate=self.cfg['telemetry']['control_budget_bytes_s']),
+            'bulk':Client(cfg=m,client_id=settings['client_id']+'-bulk'+demo_suffix,
+                credentials_file=m['bulk_credentials_file'],rate=self.cfg['telemetry']['bulk_budget_bytes_s'],bulk=True)
+        }
+    def mqtt_settings_view(self):
+        with self.mqtt_config_lock:
+            settings=dict(self.mqtt_desired); m=self.cfg['mqtt']
+            ready={channel:self._credentials_ready(self._mqtt_credentials_path(channel,settings)) for channel in ('control','bulk')}
+            ca=bool(m.get('ca_file') and Path(m['ca_file']).is_file())
+            return {'enabled':settings['enabled'],'host':settings['host'],'port':settings['port'],
+                    'client_id':settings['client_id'],'tls':bool(m.get('tls')),'ca_configured':ca,
+                    'control_credentials_set':ready['control'],'bulk_credentials_set':ready['bulk'],
+                    'editable':not self.demo,'apply_pending':self.mqtt_reconfigure.is_set()}
+    def configure_mqtt(self,value):
+        if self.demo or not isinstance(value,dict) or set(value)!={'enabled','host','port','client_id','control','bulk'}:
+            raise ValueError('INVALID_MQTT_SETTINGS')
+        if type(value['enabled']) is not bool: raise ValueError('INVALID_MQTT_SETTINGS')
+        self._validate_mqtt_endpoint(value['host'],value['port'],value['client_id'])
+        replacements={}
+        for channel in ('control','bulk'):
+            account=value[channel]
+            if not isinstance(account,dict) or set(account)!={'username','password'}:
+                raise ValueError('INVALID_MQTT_CREDENTIALS')
+            username=account['username']; password=account['password']
+            if not isinstance(username,str) or not isinstance(password,str): raise ValueError('INVALID_MQTT_CREDENTIALS')
+            if bool(username)!=bool(password): raise ValueError('INCOMPLETE_MQTT_CREDENTIALS')
+            if username:
+                try: username_bytes=username.encode('utf-8'); password_bytes=password.encode('utf-8')
+                except UnicodeEncodeError: raise ValueError('INVALID_MQTT_CREDENTIALS')
+                if len(username_bytes)>512 or len(password_bytes)>512 or '\x00' in username or '\x00' in password:
+                    raise ValueError('INVALID_MQTT_CREDENTIALS')
+                replacements[channel]={'username':username,'password':password}
+        with self.mqtt_config_lock:
+            settings={'enabled':value['enabled'],'host':value['host'],'port':value['port'],'client_id':value['client_id'],
+                      'control_custom':self.mqtt_desired['control_custom'] or 'control' in replacements,
+                      'bulk_custom':self.mqtt_desired['bulk_custom'] or 'bulk' in replacements}
+            if settings['enabled'] and not self._mqtt_transport_ready(settings,replacements):
+                raise ValueError('MQTT_TLS_OR_CREDENTIALS_UNAVAILABLE')
+            for channel,account in replacements.items():
+                atomic_write(self.mqtt_credentials_paths[channel],compact(account),0o600)
+            atomic_write(self.mqtt_state_path,compact({'schema':1,**settings}),0o600)
+            self.mqtt_desired=settings; self.mqtt_pending=settings; self.mqtt_reconfigure.set()
+            return self.mqtt_settings_view()
+    def _apply_pending_mqtt(self):
+        with self.mqtt_apply_lock:
+            with self.mqtt_config_lock:
+                if not self.mqtt_reconfigure.is_set(): return
+                settings=self.mqtt_pending; self.mqtt_pending=None; self.mqtt_reconfigure.clear()
+            if settings is None: return
+            old=self.clients; self.clients={}
+            for client in old.values(): client.stop()
+            self.cfg['mqtt']=self._resolved_mqtt_config(settings)
+            self.clients=self._new_mqtt_clients(settings)
+            if self.mqtt_running:
+                for client in self.clients.values(): client.start()
+            if self.angular_parts: self.angular_abort+=1
+            self.angular_parts=[]
+            while True:
+                try: self.events.get_nowait(); self.events.task_done()
+                except queue.Empty: break
+            with self.lock:
+                self.receipt=None; self.receipt_progress=None; self.receipt_last_seen=None
+                self.sent_health.clear(); self.sent_doa.clear(); self.sent_angular.clear()
+            self._generation=-1; self.last_sent_state=None; self.request_config_report=True
+            self.bulk_resume_after=time.monotonic()+self.cfg['telemetry']['resume_stable_seconds']
+            self.bulk_reason='MQTT_RECONFIGURED'
     def start(self):
-        self.monitor.start(); self.commands.start()
-        for client in self.clients.values(): client.start()
-        for fn,name in ((self._collect,'rdf-collector'),(self._schedule,'rdf-scheduler'),(self._events,'rdf-inbound')):
-            t=threading.Thread(target=fn,name=name,daemon=True); self.threads.append(t); t.start()
+        self._apply_pending_mqtt()
+        with self.mqtt_apply_lock:
+            self.mqtt_running=True
+            self.monitor.start(); self.commands.start()
+            for client in self.clients.values(): client.start()
+            for fn,name in ((self._collect,'rdf-collector'),(self._schedule,'rdf-scheduler'),(self._events,'rdf-inbound')):
+                t=threading.Thread(target=fn,name=name,daemon=True); self.threads.append(t); t.start()
     def stop(self):
         self.stop_event.set()
         self.commands.stop()
-        for c in self.clients.values(): c.stop()
+        with self.mqtt_apply_lock:
+            self.mqtt_running=False
+            for c in self.clients.values(): c.stop()
         self.monitor.stop()
         for t in self.threads: t.join(3)
         # A long lifecycle worker may still be reconciling; daemon exits without replay.
@@ -152,8 +286,9 @@ class Agent:
               'snapshot_seq':self.snapshot_seq,'snapshot_ms':now_ms(),
               'processing':{'observed':processing,'desired':self.helper_status.get('desired'),'scope':'SDR_STACK'},
               'detection':view,'daq':view['daq'],'host':host,
-              'link':{'usb':host['usb'],'ppp':host['ppp'],'interface':host['interface'],'mqtt_control':cs,'mqtt_bulk':bs,
-                      'ground':receipt,'tx_kbit_s':host['tx_kbit_s'],'rx_kbit_s':host['rx_kbit_s'],
+              'link':{'usb':host['usb'],'ppp':host['ppp'],'interface':host['interface'],
+                      'ppp_probe':host['ppp_probe'],'ppp_peer':self.cfg['link']['peer_ip'],
+                      'mqtt_control':cs,'mqtt_bulk':bs,'ground':receipt,'tx_kbit_s':host['tx_kbit_s'],'rx_kbit_s':host['rx_kbit_s'],
                       'traffic_layer':'PPP_IP_COUNTERS','profile':self.profile,'bulk_pause':self.bulk_reason,'angular_aborted':self.angular_abort},
               'config':self.config_view(sync),'capabilities':self.capabilities(),
               'last_operation':self.commands.public(latest[0]) if latest else None,'active_alerts':alerts}
@@ -194,6 +329,7 @@ class Agent:
         due={}; last_bootstrap=0; parts_next=0
         while not self.stop_event.is_set():
             try:
+                self._apply_pending_mqtt()
                 s=self.snapshot(); now=time.monotonic(); ctrl=self.clients.get('control'); bulk=self.clients.get('bulk')
                 if not s or not ctrl or not ctrl.ready:
                     if self.angular_parts: self.angular_abort+=1

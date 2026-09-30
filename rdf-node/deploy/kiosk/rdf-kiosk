@@ -6,4 +6,4 @@ BROWSER=$(command -v chromium || command -v chromium-browser || true)
 if [ -z "$BROWSER" ]; then echo 'Chromium not installed. Install it from your OS repository.' >&2; exit 1; fi
 PROFILE="${XDG_CACHE_HOME:-$HOME/.cache}/rdf-node-kiosk"
 mkdir -p "$PROFILE"
-exec "$BROWSER" --kiosk --no-first-run --noerrdialogs --disable-session-crashed-bubble --window-size=480,320 --force-device-scale-factor=1 --user-data-dir="$PROFILE" "${RDF_NODE_URL:-http://127.0.0.1:8790}"
+exec "$BROWSER" --disable-gpu --kiosk --no-first-run --noerrdialogs --disable-session-crashed-bubble --window-size=480,320 --force-device-scale-factor=1 --user-data-dir="$PROFILE" "${RDF_NODE_URL:-http://127.0.0.1:8790}"

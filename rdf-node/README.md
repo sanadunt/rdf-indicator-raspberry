@@ -17,12 +17,15 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
 
 - Collector file lokal `DOA_value.html` (CSV 377 field), `status.json`, dan subset aman settings.
 - Gate DAQ, kemajuan frame, freshness, konfigurasi, clock, dan verifikasi konvensi sudut.
-- Dua koneksi MQTT: control/health/DoA dan bulk angular; satu broker di Ubuntu.
+- Dua koneksi MQTT: control/health/DoA dan bulk angular; akun/ACL control dan bulk terpisah.
 - Q16 360 titik, dua chunk; alternatif U8 tetap 360 titik. Bukan kurva buatan dari satu DoA.
 - Receipt dari backend Ground; MQTT CONNECTED tidak otomatis berarti Ground menerima data.
-- Panel **Utama | Link | Sistem | Config**, logical viewport **480x320**, login PIN 6 digit dengan keypad layar sentuh.
+- Panel **Utama | Link | Sistem | Config | Data**, logical viewport **480x320**, login PIN 6 digit dengan keypad layar sentuh.
 - API loopback; login PIN dibatasi percobaan, dengan session dan CSRF/Origin checks.
 - `Config > Tampilan` menyimpan mode gelap/terang, aksen warna, dan font lokal.
+- `Data > Atur` mengubah host/port, dua pasangan akun, dan Client ID dasar (akhiran `-control`/`-bulk`); TLS/CA tetap wajib.
+  Pengaturan disimpan lokal, diterapkan tanpa restart layanan, dan perubahan koneksi menghapus bukti receipt lama.
+- Daftar Data memuat topic/payload keluar dan command dari Ground; angular terkompresi, raw IQ tidak dikirim.
 - Jurnal command SQLite, ID dedup, expiry/session/revision validation, satu mutasi aktif.
 - Safe settings patch, Start/Stop seluruh stack SDR yang di-approve, Restart stack,
   serta reboot Raspberry prepare/execute dengan lease maintenance lokal.
@@ -319,11 +322,12 @@ Tidak ada perintah reboot nyata dari test suite. Jalankan tanpa sudo bila tidak 
 | MQTT DISABLED | Provision/import bundle atau set broker TLS |
 | TLS error | CA/SAN/clock broker benar; jangan disable verification |
 | Ground belum terbukti | Jalankan receiver, cek topic v2 dan receipt |
+| Ping peer PPP | Tab Link: satu ping ICMP tiap sekitar 5 detik dipaksa melalui interface PPP; tanpa balasan bukan bukti link mati. |
 | Grafik tidak mulai | Tab Link: source gate, receipt, bootstrap 20 detik, CONTROL profile |
 | CAPABILITY DISABLED | Approval lokal belum diberikan |
 | MAINTENANCE REQUIRED | Buka lease sudo terbatas waktu |
 | PERSISTED_UNVERIFIED | Perlu runtime evidence; bukan masalah ACK MQTT |
-| Browser tidak muncul | Jalankan dari desktop, cek Chromium dan graphical session |
+| Browser tidak muncul | Jalankan `rdf-kiosk-session` dari desktop grafis; launcher memakai `--disable-gpu`. Pastikan `rdf-edge.service` aktif pada `127.0.0.1:8790`. |
 
 Log secukupnya saja, terutama melalui radio:
 

@@ -1,4 +1,4 @@
-import copy,http.client,json,os,tempfile,threading,time,unittest,uuid
+import copy,http.client,json,os,stat,tempfile,threading,time,unittest,uuid
 from pathlib import Path
 from unittest import mock
 from rdf_node.agent import Agent
@@ -90,6 +90,24 @@ class ApplicationTests(unittest.TestCase):
         with mock.patch.object(c,'_run') as run:
             c.reconcile_intent();run.assert_called_once_with(['/usr/bin/systemctl','--no-block','stop','approved-test.service'])
 
+    def test_live_mqtt_reconfiguration_invalidates_old_ground_receipt(self):
+        broker=Broker();self.addCleanup(broker.stop)
+        credentials=self.path/'mqtt.json';credentials.write_bytes(compact({'username':'test','password':'test-password'}))
+        self.a.journal.close();cfg=self.a.cfg
+        cfg['mqtt'].update(enabled=True,host='127.0.0.1',port=broker.port,tls=False,allow_insecure_loopback=True,
+                           control_credentials_file=str(credentials),bulk_credentials_file=str(credentials))
+        agent=Agent(cfg);agent.monitor=FakeMonitor(cfg);self.addCleanup(agent.stop);agent.start()
+        self.assertTrue(wait(lambda:len(broker.clients)==2,8),broker.errors)
+        with agent.lock: agent.sent_health.append(0xfffffffe)
+        agent.accept_receipt({'v':2,'sid':agent.sid,'hq':0xfffffffe})
+        self.assertEqual(agent.receipt_view()['state'],'RECEIVING')
+        agent.configure_mqtt({'enabled':False,'host':'ground.example','port':8883,'client_id':'new-node',
+                              'control':{'username':'','password':''},'bulk':{'username':'','password':''}})
+        self.assertTrue(wait(lambda:not agent.clients and not broker.clients,8),[agent.clients,broker.clients])
+        self.assertFalse(agent.cfg['mqtt']['enabled'])
+        self.assertEqual(agent.cfg['mqtt']['host'],'ground.example')
+        self.assertEqual(agent.receipt_view()['state'],'UNCONFIRMED')
+
 class ApiTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.path=Path(self.tmp.name)
@@ -107,6 +125,11 @@ class ApiTests(unittest.TestCase):
     def login(self):
         code,h,b=self.http('POST','/api/v2/login',{'pin':self.pin});self.assertEqual(code,200)
         self.cookie=h['Set-Cookie'].split(';')[0];self.csrf=json.loads(b)['csrf']
+    def mqtt_payload(self,**changes):
+        body={'enabled':False,'host':'127.0.0.1','port':8883,'client_id':'rdf-pi',
+              'control':{'username':'control-user','password':'control-secret'},
+              'bulk':{'username':'bulk-user','password':'bulk-secret'}}
+        body.update(changes);return body
     def test_snapshot_no_secrets(self):
         code,h,b=self.http('GET','/api/v2/snapshot');self.assertEqual(code,200);self.assertNotIn(self.pin.encode(),b);self.assertNotIn(b'admin_hash_file',b);self.assertEqual(h['Cache-Control'],'no-store')
     def test_host_dns_rebinding_rejected(self):self.assertEqual(self.http('GET','/',headers={'Host':'attacker.invalid'})[0],403)
@@ -149,6 +172,62 @@ class ApiTests(unittest.TestCase):
         code,h,b=self.http('GET','/api/v2/healthz');self.assertEqual(code,200);self.assertTrue(json.loads(b)['daq_health_not_implied'])
     def test_logout_revokes_session(self):
         self.login();self.assertEqual(self.http('POST','/api/v2/logout',{})[0],200);self.assertEqual(self.http('POST','/api/v2/display/preferences',{'theme':'light'})[0],403)
+
+    def test_mqtt_settings_require_admin_session_and_csrf(self):
+        body=self.mqtt_payload()
+        self.assertEqual(self.http('GET','/api/v2/mqtt/settings')[0],401)
+        self.assertEqual(self.http('POST','/api/v2/mqtt/settings',body)[0],403)
+        self.login();self.csrf=''
+        self.assertEqual(self.http('POST','/api/v2/mqtt/settings',body)[0],403)
+    def test_mqtt_settings_persist_separate_secrets_without_exposing_them(self):
+        self.login()
+        code,_,response=self.http('POST','/api/v2/mqtt/settings',self.mqtt_payload())
+        self.assertEqual(code,200)
+        saved=json.loads(response)
+        self.assertEqual((saved['host'],saved['port'],saved['client_id']),('127.0.0.1',8883,'rdf-pi'))
+        self.assertTrue(saved['control_credentials_set']);self.assertTrue(saved['bulk_credentials_set'])
+        self.assertNotIn('username',saved);self.assertNotIn('password',saved)
+        self.assertNotIn(b'control-secret',response);self.assertNotIn(b'bulk-secret',response)
+        state=Path(self.a.cfg['state_dir'])
+        control=state/'mqtt-ui-control.json';bulk=state/'mqtt-ui-bulk.json'
+        self.assertEqual(json.loads(control.read_bytes()),{'username':'control-user','password':'control-secret'})
+        self.assertEqual(json.loads(bulk.read_bytes()),{'username':'bulk-user','password':'bulk-secret'})
+        self.assertEqual(stat.S_IMODE(control.stat().st_mode),0o600)
+        self.assertEqual(stat.S_IMODE(bulk.stat().st_mode),0o600)
+        stored=(state/'mqtt-ui-settings.json').read_bytes()
+        self.assertNotIn(b'control-secret',stored);self.assertNotIn(b'bulk-secret',stored)
+        self.assertNotIn(b'control-secret',compact(self.a.snapshot()))
+        code,_,response=self.http('GET','/api/v2/mqtt/settings')
+        self.assertEqual(code,200);self.assertNotIn(b'control-secret',response);self.assertNotIn(b'bulk-secret',response)
+        self.a.journal.close()
+        restored=Agent(copy.deepcopy(self.a.cfg))
+        try:
+            view=restored.mqtt_settings_view()
+            self.assertEqual((view['host'],view['port'],view['client_id']),('127.0.0.1',8883,'rdf-pi'))
+            self.assertTrue(view['control_credentials_set']);self.assertTrue(view['bulk_credentials_set'])
+            self.assertNotIn('password',view)
+        finally:restored.journal.close()
+    def test_mqtt_settings_preserve_blank_pairs_and_reject_partial_credentials(self):
+        self.login()
+        code,_,_=self.http('POST','/api/v2/mqtt/settings',self.mqtt_payload())
+        self.assertEqual(code,200)
+        control=Path(self.a.cfg['state_dir'])/'mqtt-ui-control.json'
+        original=control.read_bytes()
+        body=self.mqtt_payload(host='ground.local',client_id='node-two',
+                               control={'username':'','password':''},bulk={'username':'','password':''})
+        code,_,_=self.http('POST','/api/v2/mqtt/settings',body)
+        self.assertEqual(code,200);self.assertEqual(control.read_bytes(),original)
+        body=self.mqtt_payload(control={'username':'new-user','password':''})
+        self.assertEqual(self.http('POST','/api/v2/mqtt/settings',body)[0],400)
+        self.assertEqual(control.read_bytes(),original)
+        self.assertEqual(self.a.mqtt_settings_view()['host'],'ground.local')
+    def test_mqtt_settings_validate_host_and_require_tls_bundle_before_enable(self):
+        self.login()
+        self.assertEqual(self.http('POST','/api/v2/mqtt/settings',self.mqtt_payload(host='broker.local/path'))[0],400)
+        self.assertEqual(self.http('POST','/api/v2/mqtt/settings',self.mqtt_payload(enabled=True))[0],400)
+        state=Path(self.a.cfg['state_dir'])
+        self.assertFalse((state/'mqtt-ui-control.json').exists())
+        self.assertFalse((state/'mqtt-ui-bulk.json').exists())
 
 class EndToEndTests(unittest.TestCase):
     def test_agent_graph_receipt_query_and_stopped_health(self):

@@ -25,7 +25,7 @@ ProtectHome=read-only
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 ReadWritePaths=/var/lib/rdf-node /run/rdf-node
 UMask=0027
 
