@@ -182,35 +182,54 @@ async function openMqttSettings(){
  for(const [value,title] of [['off','Nonaktif'],['on','Aktif']]){const option=document.createElement('option');option.value=value;option.textContent=title;enabled.append(option);}
  enabled.value=settings.enabled?'on':'off';statusField.append(statusCaption,enabled);grid.append(statusField);
  const transportField=document.createElement('label');transportField.className='mqtt-settings-field';
- const transportCaption=document.createElement('span');transportCaption.textContent='Transport aman';
- const transport=document.createElement('select');transport.setAttribute('aria-label','Transport aman');
- for(const [value,title] of [['tcp','MQTT/TCP + TLS'],['websocket','WebSocket Secure (WSS)']]){
+ const transportCaption=document.createElement('span');transportCaption.textContent='Transport MQTT';
+ const transport=document.createElement('select');transport.setAttribute('aria-label','Transport MQTT');
+ for(const [value,title] of [['tcp','MQTT/TCP'],['websocket','WebSocket (WS)']]){
   const option=document.createElement('option');option.value=value;option.textContent=title;transport.append(option);
  }
  transport.value=settings.transport||'tcp';transportField.append(transportCaption,transport);grid.append(transportField);
+ const tlsField=document.createElement('label');tlsField.className='mqtt-settings-field';
+ const tlsCaption=document.createElement('span');tlsCaption.textContent='Enkripsi TLS';
+ const tls=document.createElement('select');tls.setAttribute('aria-label','Enkripsi TLS');
+ for(const [value,title] of [['on','Aktif'],['off','Nonaktif']]){
+  const option=document.createElement('option');option.value=value;option.textContent=title;tls.append(option);
+ }
+ tls.value=settings.tls===false?'off':'on';tlsField.append(tlsCaption,tls);grid.append(tlsField);
  const host=mqttField(grid,'IP / host',settings.host,'text','10.90.0.1',253);
  const port=mqttField(grid,'Port',String(settings.port),'number','8883',5);port.min='1';port.max='65535';port.step='1';
  const clientId=mqttField(grid,'Client ID dasar',settings.client_id,'text','rdf-node',48);
- const websocketPath=mqttField(grid,'Path WSS',settings.websocket_path||'/mqtt','text','/mqtt',256);
+ const websocketPath=mqttField(grid,'Path WebSocket',settings.websocket_path||'/mqtt','text','/mqtt',256);
  const websocketPathField=websocketPath.closest('label');
- const updateWebsocketPath=()=>{websocketPathField.hidden=transport.value!=='websocket';};
- transport.addEventListener('change',updateWebsocketPath);updateWebsocketPath();
- const controlUser=mqttField(grid,'User CTRL','', 'text',settings.control_credentials_set?'Tersimpan; kosong = tetap':'Belum diatur',128);controlUser.autocomplete='off';
+ const controlUser=mqttField(grid,'User CTRL','','text',settings.control_credentials_set?'Tersimpan; kosong = tetap':'Belum diatur',128);controlUser.autocomplete='off';
  const controlPassword=mqttField(grid,'Pass CTRL','','password',settings.control_credentials_set?'Isi hanya untuk mengganti':'Belum diatur',512);controlPassword.autocomplete='new-password';
  const bulkUser=mqttField(grid,'User BULK','','text',settings.bulk_credentials_set?'Tersimpan; kosong = tetap':'Belum diatur',128);bulkUser.autocomplete='off';
  const bulkPassword=mqttField(grid,'Pass BULK','','password',settings.bulk_credentials_set?'Isi hanya untuk mengganti':'Belum diatur',512);bulkPassword.autocomplete='new-password';
  box.append(grid);
+ const securityNote=text(box,'');securityNote.className='mqtt-security-note';
+ securityNote.setAttribute('role','status');securityNote.setAttribute('aria-live','polite');
  text(box,'CTRL dan BULK memakai akun/ACL terpisah. Kosong mempertahankan credential; isi User dan Pass berpasangan untuk mengganti.');
- text(box,'TCP/TLS dan WSS selalu memverifikasi sertifikat serta nama host. WSS memakai subprotocol mqtt; koneksi ws:// ke broker remote tidak didukung.');
- text(box,settings.trust_mode==='system'?'Sertifikat publik dapat memakai trust store OS tanpa bundle tambahan. CA privat/self-signed tetap memerlukan CA bundle Ground.':
-  settings.trust_mode==='custom'?'Validasi memakai CA bundle terpasang dan tetap mencocokkan nama host.':
-  settings.trust_mode==='unavailable'?'CA yang dikonfigurasi tidak tersedia; pulihkan bundle sebelum mengaktifkan MQTT.':
-  'TLS nonaktif pada config; MQTT aktif ditolak sampai TLS diperbaiki.');
+ const trustNote=text(box,'');
+ function updateTransportDetails(){
+  const secure=tls.value==='on';
+  websocketPathField.hidden=transport.value!=='websocket';
+  securityNote.classList.toggle('plaintext',!secure);
+  securityNote.textContent=secure?
+   (transport.value==='websocket'?'WebSocket Secure (WSS) memverifikasi sertifikat dan nama host.':
+    'MQTT/TCP memakai TLS 1.2+ dan memverifikasi sertifikat serta nama host.'):
+   'TLS nonaktif: username, password, dan payload MQTT tidak dienkripsi. Gunakan hanya pada jaringan tepercaya; hindari jaringan publik.';
+  trustNote.hidden=!secure;
+  if(!secure)return;
+  trustNote.textContent=settings.trust_mode==='system'?'Sertifikat publik dapat memakai trust store OS tanpa bundle tambahan.':
+   settings.trust_mode==='custom'?'Validasi memakai CA bundle terpasang dan tetap mencocokkan nama host.':
+   settings.trust_mode==='unavailable'?'CA yang dikonfigurasi tidak tersedia; pulihkan bundle sebelum mengaktifkan MQTT.':'';
+ }
+ transport.addEventListener('change',updateTransportDetails);tls.addEventListener('change',updateTransportDetails);
+ updateTransportDetails();
  text(box,'Client ID dasar akan memakai akhiran -control dan -bulk.');
  action(box,'Simpan',async()=>{
   const saved=await post('/api/v2/mqtt/settings',{
    enabled:enabled.value==='on',host:host.value,port:Number(port.value),client_id:clientId.value,
-   transport:transport.value,websocket_path:websocketPath.value,
+   transport:transport.value,tls:tls.value==='on',websocket_path:websocketPath.value,
    control:{username:controlUser.value,password:controlPassword.value},
    bulk:{username:bulkUser.value,password:bulkPassword.value}
   });
@@ -224,7 +243,7 @@ async function openMqttSettings(){
   {key:'host',name:'IP / host',input:host,field:host.closest('label')},
   {key:'port',name:'Port',input:port,field:port.closest('label')},
   {key:'client-id',name:'Client ID dasar',input:clientId,field:clientId.closest('label')},
-  {key:'websocket-path',name:'Path WSS',input:websocketPath,field:websocketPathField},
+  {key:'websocket-path',name:'Path WebSocket',input:websocketPath,field:websocketPathField},
   {key:'control-user',name:'User CTRL',input:controlUser,field:controlUser.closest('label')},
   {key:'control-password',name:'Pass CTRL',input:controlPassword,field:controlPassword.closest('label')},
   {key:'bulk-user',name:'User BULK',input:bulkUser,field:bulkUser.closest('label')},

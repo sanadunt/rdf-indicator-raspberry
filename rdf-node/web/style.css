@@ -67,3 +67,5 @@ nav{grid-template-columns:repeat(5,1fr)}
 .mqtt-numeric-keyboard .mqtt-keyboard-row{display:grid;grid-template-columns:repeat(3,44px);justify-content:center;gap:2px}
 .dialog input:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}
 .mqtt-key:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.mqtt-security-note{margin:4px 0;color:var(--dim);line-height:1.3}
+.mqtt-security-note.plaintext{color:var(--warn);border-left:3px solid var(--warn);padding:3px 7px}

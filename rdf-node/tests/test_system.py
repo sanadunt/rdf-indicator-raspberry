@@ -102,7 +102,7 @@ class ApplicationTests(unittest.TestCase):
         agent.accept_receipt({'v':2,'sid':agent.sid,'hq':0xfffffffe})
         self.assertEqual(agent.receipt_view()['state'],'RECEIVING')
         agent.configure_mqtt({'enabled':False,'host':'ground.example','port':8883,'client_id':'new-node',
-                              'transport':'tcp','websocket_path':'/mqtt',
+                              'transport':'tcp','tls':True,'websocket_path':'/mqtt',
                               'control':{'username':'','password':''},'bulk':{'username':'','password':''}})
         self.assertTrue(wait(lambda:not agent.clients and not broker.clients,8),[agent.clients,broker.clients])
         self.assertFalse(agent.cfg['mqtt']['enabled'])
@@ -127,10 +127,31 @@ class ApiTests(unittest.TestCase):
         code,h,b=self.http('POST','/api/v2/login',{'pin':self.pin});self.assertEqual(code,200)
         self.cookie=h['Set-Cookie'].split(';')[0];self.csrf=json.loads(b)['csrf']
     def mqtt_payload(self,**changes):
-        body={'enabled':False,'host':'127.0.0.1','port':8883,'client_id':'rdf-pi','transport':'tcp','websocket_path':'/mqtt',
+        body={'enabled':False,'host':'127.0.0.1','port':8883,'client_id':'rdf-pi','transport':'tcp','tls':True,'websocket_path':'/mqtt',
               'control':{'username':'control-user','password':'control-secret'},
               'bulk':{'username':'bulk-user','password':'bulk-secret'}}
         body.update(changes);return body
+    def assert_plain_mqtt_settings_connect(self,transport):
+        broker=Broker(auth={'control-user':'control-secret','bulk-user':'bulk-secret'},
+                      websocket=transport=='websocket')
+        self.addCleanup(broker.stop)
+        self.a.monitor=FakeMonitor(self.a.cfg);self.a.start();self.addCleanup(self.a.stop)
+        self.login()
+        body=self.mqtt_payload(enabled=True,host='127.0.0.1',port=broker.port,tls=False,transport=transport)
+        code,_,response=self.http('POST','/api/v2/mqtt/settings',body)
+        self.assertEqual(code,200,response)
+        saved=json.loads(response)
+        self.assertEqual((saved['transport'],saved['tls'],saved['trust_mode']),(transport,False,'plaintext'))
+        stored=json.loads((Path(self.a.cfg['state_dir'])/'mqtt-ui-settings.json').read_bytes())
+        self.assertEqual((stored['schema'],stored['tls']),(3,False))
+        self.assertTrue(wait(lambda:len(broker.clients)==2 and all(c.ready for c in self.a.clients.values()),8),
+                        [broker.errors,{k:v.status() for k,v in self.a.clients.items()}])
+        self.assertEqual(broker.mqtt_connect_count,2)
+        self.assertFalse(broker.errors)
+    def test_plain_tcp_settings_connect_with_username_password(self):
+        self.assert_plain_mqtt_settings_connect('tcp')
+    def test_plain_websocket_settings_connect_with_username_password(self):
+        self.assert_plain_mqtt_settings_connect('websocket')
     def test_snapshot_no_secrets(self):
         code,h,b=self.http('GET','/api/v2/snapshot');self.assertEqual(code,200);self.assertNotIn(self.pin.encode(),b);self.assertNotIn(b'admin_hash_file',b);self.assertEqual(h['Cache-Control'],'no-store')
     def test_host_dns_rebinding_rejected(self):self.assertEqual(self.http('GET','/',headers={'Host':'attacker.invalid'})[0],403)
@@ -213,7 +234,14 @@ class ApiTests(unittest.TestCase):
                 'control_custom':False,'bulk_custom':False}
         self.a.mqtt_state_path.write_bytes(compact(legacy))
         settings=self.a._load_mqtt_settings()
-        self.assertEqual((settings['transport'],settings['websocket_path']),('tcp','/mqtt'))
+        self.assertEqual((settings['transport'],settings['websocket_path'],settings['tls']),('tcp','/mqtt',True))
+    def test_mqtt_settings_schema2_migrates_tls_from_config(self):
+        previous={'schema':2,'enabled':False,'host':'ground.local','port':8883,'client_id':'legacy-node',
+                  'transport':'websocket','websocket_path':'/mqtt','control_custom':False,'bulk_custom':False}
+        self.a.mqtt_state_path.write_bytes(compact(previous))
+        settings=self.a._load_mqtt_settings()
+        self.assertEqual((settings['transport'],settings['websocket_path'],settings['tls']),
+                         ('websocket','/mqtt',True))
     def test_mqtt_settings_preserve_blank_pairs_and_reject_partial_credentials(self):
         self.login()
         code,_,_=self.http('POST','/api/v2/mqtt/settings',self.mqtt_payload())

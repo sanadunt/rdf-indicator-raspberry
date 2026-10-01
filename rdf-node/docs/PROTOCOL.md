@@ -26,15 +26,16 @@ Jangan memperlakukan retained state sebagai heartbeat. Freshness menggunakan hea
 
 ## MQTT network transport
 
-The client supports MQTT 5 over TCP/TLS and MQTT over WSS. TLS verification requires a valid
-certificate chain and a hostname/IP match; TLS 1.2 is the minimum. If `ca_file` is unset, the
-system CA store is used with verification still enabled. Private/self-signed broker roots need an
-explicit CA file.
+The client supports MQTT 5 over TCP or WebSocket. `tls: true` (the default) selects TCP/TLS or
+WSS, requires TLS 1.2+, and verifies the certificate chain and hostname/IP. If `ca_file` is unset,
+the system CA store is used; private/self-signed broker roots need an explicit CA file.
+`tls: false` selects plain TCP or `ws://`; broker credentials and MQTT payloads are unencrypted.
+Use plaintext only on an approved trusted link. There is no TLS mode that disables verification.
 
-WSS uses RFC 6455 with the `mqtt` subprotocol. MQTT Control Packets travel only in WebSocket
-binary frames; the parser treats the payload as a byte stream, not frame-aligned packets. Client
-frames are masked, server frames must be unmasked, and fragmentation/control frames are handled.
-Plain remote `ws://` is rejected; the UI only exposes TLS transports.
+WebSocket uses RFC 6455 and the `mqtt` subprotocol at `mqtt.websocket_path` (default `/mqtt`).
+MQTT Control Packets travel only in WebSocket binary frames; the parser treats the payload as a
+byte stream, not frame-aligned packets. Client frames are masked, server frames must be unmasked,
+and fragmentation/control frames are handled.
 
 ## DoA compact
 

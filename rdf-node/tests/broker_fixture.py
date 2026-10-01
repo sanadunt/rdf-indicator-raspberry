@@ -97,7 +97,6 @@ class WebSocketSocket:
                         if trailing:self.events.append(('after-close',trailing))
                     break
                 else:raise ValueError('unexpected client websocket opcode')
-                if self.data:break
         out=bytes(self.data[:size]);del self.data[:size];return out
 
     

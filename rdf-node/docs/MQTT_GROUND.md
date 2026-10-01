@@ -54,8 +54,9 @@ mqtt:
 
 Ini potongan dalam schema config penuh, bukan pengganti seluruh file. Unknown keys ditolak.
 Setiap credential JSON berisi `username` dan `password` nyata yang hanya disimpan di perangkat.
-Folder root:rdf-edge0750, files root:rdf-edge0640. Certificate CA public boleh dibaca service,
-private key CA tetap di mesin provisioning, tidak disalin ke Raspberry.
+`allow_insecure_loopback` hanya diperlukan untuk tes plaintext pada loopback; `tls: false`
+secara eksplisit memilih plaintext untuk endpoint lain. Folder root:rdf-edge0750, files root:rdf-edge0640.
+CA public boleh dibaca service; private key CA tetap di mesin provisioning, tidak disalin ke Raspberry.
 
 Pada receiver Ubuntu, gunakan `/etc/rdf-ground/config.yaml`, MQTT endpoint loopback8883,
 CA yang sama dan credential controller sendiri. Start:
@@ -64,16 +65,19 @@ CA yang sama dan credential controller sendiri. Start:
 sudo systemctl enable --now rdf-ground.service
 ```
 
-TLS CA trust, SAN hostname/IP dan waktu mesin harus valid. Plaintext hanya diperbolehkan
-secara eksplisit pada loopback untuk test, bukan10.90.0.1 atau LAN. Tidak ada insecure TLS.
+TLS mode mewajibkan certificate chain, SAN hostname/IP, dan waktu mesin valid. `tls: false`
+memilih MQTT/TCP atau `ws://` tanpa enkripsi; credential dan payload dapat dibaca di jaringan.
+Gunakan hanya pada link privat/tepercaya yang disetujui. `allow_insecure_loopback` tetap mewajibkan
+opt-in eksplisit untuk tujuan loopback plaintext, tetapi bukan untuk endpoint remote yang dipilih
+secara eksplisit. Tidak ada mode TLS yang mematikan verifikasi.
 
 ## Transport and certificate trust
 
-The Edge and Ground clients support `mqtt.transport: tcp` (default) and `mqtt.transport: websocket`
-with `mqtt.websocket_path` (default `/mqtt`). WebSocket mode is WSS only: TLS certificate-chain
-and hostname verification happen before the MQTT CONNECT credentials are sent. Plain `ws://` is
-not supported for remote brokers. The Ground provisioner still creates the TCP/TLS listener on
-8883; a WSS connection requires a separate TLS-enabled broker listener and its configured path.
+The Edge and Ground clients support `mqtt.transport: tcp` (default) or `websocket`, with
+`mqtt.websocket_path` (default `/mqtt`). `tls: true` (the default) uses verified TLS for either
+transport: TCP/TLS or WSS. `tls: false` uses plaintext TCP or `ws://`. The Ground provisioner
+still creates only the TCP/TLS listener on 8883; configure a matching plaintext TCP or WebSocket
+listener, path, and ACL separately when that is the required deployment.
 
 With `tls: true` and `ca_file: null`, Python uses the OS default CA store and keeps certificate
 and hostname verification enabled. A broker certificate issued by a public CA can therefore work

@@ -24,18 +24,20 @@ Authenticated command
 ### Isolation
 
 Panel dan MQTT tidak menjalankan receiver SDR kedua. Browser tidak membaca file native,
-tidak menyimpan credential MQTT, tidak menerima password tersimpan dari API, dan tidak punya
-hak root. Edge tetap hidup bila SDR, helper, PPP, atau Ground gagal. Engine GUI lama tidak
-dihentikan: pada deployment tertentu proses tersebut juga menjalankan signal processor.
-hak root. `Data > Atur` hanya menerima perubahan melalui session admin+CSRF. Broker settings berada di
-`/var/lib/rdf-node/mqtt-ui-settings.json`; control dan bulk credential disimpan terpisah pada
-`/var/lib/rdf-node/mqtt-ui-control.json` dan `mqtt-ui-bulk.json`, mode 0600. MQTT mendukung TCP/TLS
-atau WSS; verifikasi certificate/hostname selalu aktif. Tanpa CA file khusus, trust store OS
-digunakan; CA privat/self-signed tetap memerlukan provisioning. UI tidak dapat menonaktifkan TLS.
-`Data > Atur` menyediakan keyboard layar sentuh untuk host, port, client ID, Path WSS,
-username, dan password CTRL/BULK; penyimpanan tetap memakai field dan API yang sama.
-Save mengganti kedua client pada scheduler tanpa restart service, membuang receipt/sequence lama,
-lalu menunggu bukti Ground baru sebelum bulk dapat berjalan.
+tidak menerima password tersimpan dari API, dan tidak memiliki hak root. Edge tetap hidup bila
+SDR, helper, PPP, atau Ground gagal. Engine GUI lama tidak dihentikan: pada deployment tertentu
+proses itu juga menjalankan signal processor.
+`Data > Atur` hanya menerima perubahan melalui session admin+CSRF. Broker settings disimpan di
+`/var/lib/rdf-node/mqtt-ui-settings.json`; credential CTRL/BULK disimpan terpisah pada
+`/var/lib/rdf-node/mqtt-ui-control.json` dan `mqtt-ui-bulk.json`, mode 0600.
+MQTT mendukung TCP/TLS, TCP biasa, WSS, dan WebSocket biasa. TLS aktif secara default serta
+memverifikasi rantai sertifikat dan hostname; tanpa CA khusus, trust store OS digunakan.
+Transport tanpa TLS mengirim credential dan payload tanpa enkripsi; gunakan hanya pada link privat
+yang disetujui dan tepercaya.
+`Data > Atur` menyediakan pilihan transport/TLS, host, port, path WebSocket, serta username dan
+password CTRL/BULK terpisah. Keyboard sentuh melayani kolom teks; selector native tetap dapat
+dioperasikan dengan keyboard. Save mengganti kedua client tanpa restart service, menghapus bukti
+receipt/sequence lama, lalu menunggu bukti Ground baru sebelum bulk berjalan kembali.
 
 Runtime menggunakan `/usr/bin/python3`, bukan Conda `base` atau environment SDR.
 Local HTTP server stdlib memiliki client/body caps, Host/Origin checks, cookie admin,
@@ -45,16 +47,16 @@ CSRF, no-store dan CSP. Tidak boleh dibind ke LAN melalui perubahan tidak terkon
 
 Perubahan berikut eksplisit, bukan klaim bahwa semuanya identik dengan contoh planning:
 
-1. **MQTT:** client subset MQTT 5 buatan project (`mqtt.py`) menghindari pip saat install offline.
-   Ia mendukung verified TLS pada TCP atau WebSocket Secure (WSS), QoS 0/1, clean sessions,
-   SUBACK readiness, message expiry, retained state/LWT, reconnect, dan bounded outbox. WSS memakai
-   RFC 6455, subprotocol `mqtt`, binary data frames, fragment/control-frame handling dan bounded
-   input. Trust default memakai CA store OS; `ca_file` mengizinkan CA privat. Plain `ws://` dan
-   remote plaintext ditolak. Ini BUKAN implementasi MQTT universal tersertifikasi; tidak ada QoS 2,
-   enhanced auth, persistent offline session, topic alias atau MQTT 3 fallback. Fixture broker
-   independen menguji protokol; interoperability dengan Mosquitto actual tetap acceptance gate
-   perangkat. Untuk penggunaan operasional kritis, audit client ini atau ganti adapter dengan
-   library MQTT mapan sesudah dependency dapat diprovisioning dan diuji.
+1. **MQTT:** client project (`mqtt.py`) menghindari pip untuk instalasi offline. Ia mendukung TLS
+   terverifikasi pada TCP atau WebSocket, serta TCP/WebSocket tanpa TLS bila `tls: false` dipilih.
+   Plaintext mengirim credential dan payload tanpa enkripsi; gunakan hanya pada link privat tepercaya.
+   TLS memakai minimum 1.2, verifikasi rantai sertifikat dan hostname, trust store OS secara default,
+   atau `ca_file` untuk CA privat. WebSocket memakai RFC 6455, subprotocol `mqtt`, binary frames,
+   penanganan fragment/control frame, dan batas input. Ini BUKAN implementasi MQTT universal
+   tersertifikasi; tidak ada QoS 2, enhanced auth, persistent offline session, topic alias, atau
+   fallback MQTT 3. Fixture independen menguji protokol; interoperabilitas Mosquitto tetap acceptance
+   gate perangkat. Untuk penggunaan kritis, audit client atau ganti dengan library terpelihara setelah
+   dependency tersebut dapat diprovisioning dan diuji.
 2. **API/UI:** stdlib HTTP + HTML/CSS/JavaScript lokal, bukan FastAPI/TypeScript build.
    Ini alternatif library setara yang dibolehkan rencana. Tidak ada development server.
 3. **In-flight:** satu publish aktif per koneksi, lebih konservatif dari plafon rencana 4.

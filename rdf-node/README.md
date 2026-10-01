@@ -23,7 +23,8 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
 - Panel **Utama | Link | Sistem | Config | Data**, logical viewport **480x320**, login PIN 6 digit dengan keypad layar sentuh.
 - API loopback; login PIN dibatasi percobaan, dengan session dan CSRF/Origin checks.
 - `Config > Tampilan` menyimpan mode gelap/terang, aksen warna, dan font lokal.
-- `Data > Atur` mengubah host/port, dua pasangan akun, dan Client ID dasar (akhiran `-control`/`-bulk`); TLS/CA tetap wajib.
+- `Data > Atur` mengubah host/port, transport MQTT/TCP atau WebSocket, pilihan TLS, dua pasangan akun, dan Client ID dasar (akhiran `-control`/`-bulk`).
+  TLS aktif memverifikasi sertifikat/nama host; TLS nonaktif mengirim kredensial dan payload tanpa enkripsi—gunakan hanya pada link tepercaya.
   Pengaturan disimpan lokal, diterapkan tanpa restart layanan, dan perubahan koneksi menghapus bukti receipt lama.
 - Daftar Data memuat topic/payload keluar dan command dari Ground; angular terkompresi, raw IQ tidak dikirim.
 - Jurnal command SQLite, ID dedup, expiry/session/revision validation, satu mutasi aktif.
@@ -215,9 +216,11 @@ pengganti source aplikasi dashboard lama yang tidak disertakan pada project ini.
 Integrasi dashboard lama dapat membaca API receiver lokal atau memakai decoder yang disediakan.
 Jangan menjalankan dua publisher receipt dengan client ID Ground yang sama.
 
-Menggunakan broker yang sudah ada juga didukung: atur CA, credential, host, dan port pada
-`/etc/rdf-node/config.yaml` mengikuti [MQTT_GROUND.md](docs/MQTT_GROUND.md).
-TLS certificate harus cocok dengan hostname/IP; **tidak ada opsi mematikan verifikasi TLS**.
+Menggunakan broker yang sudah ada juga didukung: atur host, port, transport, credential, dan CA
+(bila TLS aktif) pada `/etc/rdf-node/config.yaml` mengikuti [MQTT_GROUND.md](docs/MQTT_GROUND.md).
+`tls` tetap aktif secara default dan verifikasi sertifikat/nama host tidak dapat dimatikan saat TLS
+digunakan. `tls: false` memilih TCP atau `ws://` biasa; credential dan payload tidak terenkripsi,
+jadi gunakan hanya melalui link privat/tepercaya dengan listener broker plaintext yang cocok.
 
 ## 5. Mengizinkan data RDF asli menjadi LIVE
 

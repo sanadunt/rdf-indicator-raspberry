@@ -1,10 +1,11 @@
-"""Small MQTT 5 TCP/TLS and WSS client for the bounded RDF transport profile.
+"""Small MQTT 5 TCP/WebSocket client with optional verified TLS for the bounded RDF profile.
 
 Implemented: Clean Start, Session Expiry 0, QoS 0/1, subscriptions + SUBACK,
 retained state, LWT, Message Expiry, PING, verified TLS, and MQTT binary frames
-over WebSocket Secure. Not implemented: QoS 2, persistent broker sessions,
+over WebSocket. Not implemented: QoS 2, persistent broker sessions,
 topic aliases, enhanced authentication or a broker. Only one outbound publish
 is in flight. No offline replay: each reconnect creates a fresh protocol session.
+Plaintext transports do not encrypt credentials or MQTT payloads.
 """
 from __future__ import annotations
 from collections import OrderedDict
@@ -251,10 +252,6 @@ class Client:
             ctx=ssl.create_default_context(cafile=self.cfg.get('ca_file'))
             ctx.minimum_version=ssl.TLSVersion.TLSv1_2
             s=ctx.wrap_socket(s,server_hostname=self.cfg['host']); self._socket=s
-        else:
-            import ipaddress
-            if not self.cfg.get('allow_insecure_loopback') or not ipaddress.ip_address(s.getpeername()[0]).is_loopback:
-                raise ValueError('PLAINTEXT_NONLOOPBACK_REJECTED')
         s.settimeout(5)
         ws_reader=WebSocketReader() if websocket else None
         early=client_handshake(s,self.cfg['host'],self.cfg['port'],path) if websocket else b''

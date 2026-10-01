@@ -74,11 +74,18 @@ class ConfigTests(unittest.TestCase):
         for key,value in (('accent','ultraviolet'),('font','comic-sans')):
             c=load_config();c['display'][key]=value
             with self.assertRaises(ValueError):validate_config(c)
-    def test_plaintext_remote_rejected(self):
-        c=load_config();c['mqtt']['tls']=False
+    def test_plaintext_remote_transport_can_use_tcp_or_websocket(self):
+        for transport in ('tcp','websocket'):
+            c=load_config()
+            c['mqtt'].update(enabled=True,host='10.90.0.1',tls=False,transport=transport,
+                             control_credentials_file='/etc/rdf-node/control.json',
+                             bulk_credentials_file='/etc/rdf-node/bulk.json')
+            validate_config(c)
+    def test_plaintext_loopback_requires_explicit_test_opt_in(self):
+        c=load_config();c['mqtt'].update(tls=False,host='127.0.0.1')
         with self.assertRaises(ValueError):validate_config(c)
-    def test_explicit_loopback_test_allowed(self):
-        c=load_config();c['mqtt'].update(tls=False,host='127.0.0.1',allow_insecure_loopback=True);validate_config(c)
+        c['mqtt']['allow_insecure_loopback']=True
+        validate_config(c)
     def test_unknown_yaml_key_rejected(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)/'c.yaml';p.write_text('dangerous_new_key: true\n')

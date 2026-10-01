@@ -95,7 +95,7 @@ def validate_config(c: dict) -> None:
             is_local = ipaddress.ip_address(c['mqtt']['host']).is_loopback
         except ValueError:
             is_local = c['mqtt']['host'] == 'localhost'
-        if not is_local or not c['mqtt']['allow_insecure_loopback']:
+        if is_local and not c['mqtt']['allow_insecure_loopback']:
             raise ValueError('PLAINTEXT_ONLY_EXPLICIT_LOOPBACK_TEST')
     if c['mqtt']['enabled']:
         if not c['mqtt']['control_credentials_file'] or not c['mqtt']['bulk_credentials_file']:
