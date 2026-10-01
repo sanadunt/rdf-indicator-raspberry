@@ -146,7 +146,7 @@ class Broker:
                     b=text(topic)+(mid.to_bytes(2,'big') if q else b'')+b'\x00'+payload
                     self._send(c,pkt(0x30|(q<<1)|int(ret),b));break
     def _client(self,s):
-        c={'sock':s,'subs':{},'lock':threading.Lock(),'ws_events':[]}
+        c={'sock':s,'subs':{},'lock':threading.Lock(),'ws_events':[],'connect_flags':None}
         with self.lock:self.connections.append(c)
         graceful=False;will=None
         try:
@@ -171,6 +171,7 @@ class Broker:
                         protocol,p=string(b,0)
                         assert protocol=='MQTT' and b[p]==5
                         flags=b[p+1];assert flags&2
+                        c['connect_flags']=flags
                         p+=4;p=props(b,p);client_id,p=string(b,p)
                         if flags&4:
                             p=props(b,p);wt,p=string(b,p);wp,p=string(b,p);will=(wt,wp.encode())

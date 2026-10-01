@@ -1,8 +1,9 @@
 'use strict';
 const $=id=>document.getElementById(id);
-let snapshot={}, csrf=null, authenticated=false, lastSeq=null, lastProgress=0, lastApi=0, linkData=false, hostPage=false, lastTouch=Date.now(), pinKeyHandler=null, modalReturnFocus=null, mqttKeyboardDismiss=null;
+let snapshot={}, csrf=null, authenticated=false, lastSeq=null, lastProgress=0, lastApi=0, linkData=false, hostPage=false, lastTouch=Date.now(), lastAdminSessionRefresh=0, adminSessionRefreshPending=false, pinKeyHandler=null, modalReturnFocus=null, mqttKeyboardDismiss=null;
 const good=['UP','CONNECTED','RECEIVING','HEALTHY','SYNCED','APPLIED','REPLY'];
 const bad=['ERROR','LOST','DEGRADED','FAILED','UNAVAILABLE'];
+const ADMIN_SESSION_REFRESH_MS=20000, ADMIN_SESSION_ACTIVITY_MS=30000, ADMIN_SESSION_CHECK_MS=10000;
 const pppProbeNames={UNKNOWN:'BELUM DICEK',NO_INTERFACE:'TANPA INTERFACE',REPLY:'BALASAN',NO_REPLY:'TANPA BALASAN',ERROR:'ERROR PROBE'};
 function label(id,text,code){const el=$(id);if(!el)return;el.textContent=text;el.classList.remove('good','warn','bad','neutral');el.classList.add(good.includes(code)?'good':bad.includes(code)?'bad':code?'warn':'neutral');}
 function fmt(v,dec=1){return typeof v==='number'&&Number.isFinite(v)?v.toFixed(dec):'--';}
@@ -97,6 +98,18 @@ function render(s){
 async function get(path){const response=await fetch(path,{cache:'no-store',signal:AbortSignal.timeout(1200)});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json();}
 async function post(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf||''},body:JSON.stringify(body),signal:AbortSignal.timeout(6000)});let j=await response.json();if(!response.ok)throw new Error(j.error||j.result?.error||j.stage||'Permintaan gagal');return j;}
 async function poll(){try{const s=await get('/api/v2/snapshot');lastApi=Date.now();if(s.snapshot_seq!==lastSeq&&s.snapshot_seq!=null){lastSeq=s.snapshot_seq;lastProgress=Date.now();}snapshot=s;render(s);}catch(e){/* local watchdog displays staleness independently */}finally{setTimeout(poll,500);}}
+async function keepAdminSessionAlive(){
+ const now=Date.now();
+ if(!authenticated||adminSessionRefreshPending||now-lastTouch>ADMIN_SESSION_ACTIVITY_MS||now-lastAdminSessionRefresh<ADMIN_SESSION_REFRESH_MS)return;
+ adminSessionRefreshPending=true;lastAdminSessionRefresh=now;
+ try{
+  const session=await get('/api/v2/session');
+  if(!session.authenticated){authenticated=false;csrf=null;render(snapshot);}
+  else csrf=session.csrf;
+ }catch{lastAdminSessionRefresh=Date.now()-ADMIN_SESSION_REFRESH_MS+5000;}
+ finally{adminSessionRefreshPending=false;}
+}
+setInterval(keepAdminSessionAlive,ADMIN_SESSION_CHECK_MS);
 setInterval(()=>{const stale=Date.now()-lastProgress>5000;$('stale').hidden=!stale;if(stale)$('stalereason').textContent=Date.now()-lastApi>5000?'API lokal tidak merespons.':'API hidup, snapshot tidak bergerak.';const sec=snapshot.config?.preferences?.blank_after_seconds||0;if(sec>0&&Date.now()-lastTouch>sec*1000&&!snapshot.active_alerts?.some(x=>x.severity==='error'))$('blank').hidden=false;},250);
 for(const button of document.querySelectorAll('nav button'))button.addEventListener('click',()=>{for(const e of document.querySelectorAll('.page'))e.classList.toggle('active',e.id===button.dataset.tab);for(const e of document.querySelectorAll('nav button')){const active=e===button;e.classList.toggle('selected',active);if(active)e.setAttribute('aria-current','page');else e.removeAttribute('aria-current');}});
  $('linkpage').onclick=()=>{linkData=!linkData;$('linkpage').textContent=linkData?'Koneksi \u203a':'Rincian \u203a';render(snapshot);};
@@ -119,7 +132,7 @@ function modalKeydown(event){
 }
 document.addEventListener('keydown',modalKeydown);
 function text(parent,s){const p=document.createElement('p');p.textContent=s;parent.append(p);return p;}
-function action(parent,label,fn,danger=false){let wrap=parent.querySelector('.actions');if(!wrap){wrap=document.createElement('div');wrap.className='actions';parent.append(wrap);}let b=document.createElement('button');b.textContent=label;if(danger)b.className='danger';b.onclick=async()=>{b.disabled=true;try{await fn();}catch(e){$('modalmsg').textContent=e.message;}finally{b.disabled=false;}};wrap.append(b);return b;}
+function action(parent,label,fn,danger=false){let wrap=parent.querySelector('.actions');if(!wrap){wrap=document.createElement('div');wrap.className='actions';parent.append(wrap);}let b=document.createElement('button');b.textContent=label;if(danger)b.className='danger';b.onclick=async()=>{b.disabled=true;try{await fn();}catch(e){if(e.message==='AUTHENTICATION_AND_CSRF_REQUIRED'){authenticated=false;csrf=null;lastAdminSessionRefresh=0;render(snapshot);login();}else $('modalmsg').textContent=e.message;}finally{b.disabled=false;}};wrap.append(b);return b;}
 function needLogin(){if(authenticated)return false;login();return true;}
 function login(){
  let pin='',pending=false;
@@ -149,7 +162,7 @@ function login(){
  async function submitPin(){
   if(pending||pin.length!==6)return;
   pending=true;refresh();
-  try{const result=await post('/api/v2/login',{pin});csrf=result.csrf;authenticated=true;dismissModal();render(snapshot);}
+  try{const result=await post('/api/v2/login',{pin});csrf=result.csrf;authenticated=true;lastAdminSessionRefresh=Date.now();dismissModal();render(snapshot);}
   catch(e){$('modalmsg').textContent=e.message==='LOGIN_FAILED_OR_RATE_LIMITED'?'PIN salah atau percobaan dibatasi.':e.message;pin='';pending=false;refresh();pad.querySelector('button')?.focus();return;}
   pending=false;refresh();
  }
@@ -161,7 +174,15 @@ function login(){
  };
  refresh();pad.querySelector('button')?.focus();
 }
-$('admin').onclick=async()=>{if(!authenticated)return login();await post('/api/v2/logout',{});authenticated=false;csrf=null;render(snapshot);};
+$('admin').onclick=async()=>{
+ if(!authenticated)return login();
+ try{await post('/api/v2/logout',{});}
+ catch(e){
+  if(e.message!=='AUTHENTICATION_AND_CSRF_REQUIRED')throw e;
+  authenticated=false;csrf=null;lastAdminSessionRefresh=0;render(snapshot);login();return;
+ }
+ authenticated=false;csrf=null;lastAdminSessionRefresh=0;render(snapshot);
+};
 function mqttField(grid,title,value,type='text',placeholder='',maxLength=253){
  const field=document.createElement('label');field.className='mqtt-settings-field';
  const caption=document.createElement('span');caption.textContent=title;
@@ -172,7 +193,7 @@ async function openMqttSettings(){
  if(needLogin())return;
  const box=modal('Pengaturan MQTT');text(box,'Memuat pengaturan MQTT...');let settings;
  try{settings=await get('/api/v2/mqtt/settings');}
- catch(e){box.replaceChildren();text(box,e.message==='HTTP 401'?'Sesi admin berakhir. Tutup lalu login ulang.':`Pengaturan tidak termuat: ${e.message}. Tutup lalu coba lagi.`);return;}
+ catch(e){if(e.message==='HTTP 401'){authenticated=false;csrf=null;lastAdminSessionRefresh=0;render(snapshot);login();return;}box.replaceChildren();text(box,`Pengaturan tidak termuat: ${e.message}. Tutup lalu coba lagi.`);return;}
  box.replaceChildren();
  if(!settings.editable){text(box,'Pengaturan MQTT tidak tersedia pada mode demo.');return;}
  const grid=document.createElement('div');grid.className='mqtt-settings-fields';
@@ -200,32 +221,14 @@ async function openMqttSettings(){
  const clientId=mqttField(grid,'Client ID dasar',settings.client_id,'text','rdf-node',48);
  const websocketPath=mqttField(grid,'Path WebSocket',settings.websocket_path||'/mqtt','text','/mqtt',256);
  const websocketPathField=websocketPath.closest('label');
- const controlUser=mqttField(grid,'User CTRL','','text',settings.control_credentials_set?'Tersimpan; kosong = tetap':'Belum diatur',128);controlUser.autocomplete='off';
- const controlPassword=mqttField(grid,'Pass CTRL','','password',settings.control_credentials_set?'Isi hanya untuk mengganti':'Belum diatur',512);controlPassword.autocomplete='new-password';
- const bulkUser=mqttField(grid,'User BULK','','text',settings.bulk_credentials_set?'Tersimpan; kosong = tetap':'Belum diatur',128);bulkUser.autocomplete='off';
- const bulkPassword=mqttField(grid,'Pass BULK','','password',settings.bulk_credentials_set?'Isi hanya untuk mengganti':'Belum diatur',512);bulkPassword.autocomplete='new-password';
+ const controlUser=mqttField(grid,'User CTRL','','text','',128);controlUser.autocomplete='off';
+ const controlPassword=mqttField(grid,'Pass CTRL','','password','',512);controlPassword.autocomplete='new-password';
+ const bulkUser=mqttField(grid,'User BULK','','text','',128);bulkUser.autocomplete='off';
+ const bulkPassword=mqttField(grid,'Pass BULK','','password','',512);bulkPassword.autocomplete='new-password';
  box.append(grid);
- const securityNote=text(box,'');securityNote.className='mqtt-security-note';
- securityNote.setAttribute('role','status');securityNote.setAttribute('aria-live','polite');
- text(box,'CTRL dan BULK memakai akun/ACL terpisah. Kosong mempertahankan credential; isi User dan Pass berpasangan untuk mengganti.');
- const trustNote=text(box,'');
- function updateTransportDetails(){
-  const secure=tls.value==='on';
-  websocketPathField.hidden=transport.value!=='websocket';
-  securityNote.classList.toggle('plaintext',!secure);
-  securityNote.textContent=secure?
-   (transport.value==='websocket'?'WebSocket Secure (WSS) memverifikasi sertifikat dan nama host.':
-    'MQTT/TCP memakai TLS 1.2+ dan memverifikasi sertifikat serta nama host.'):
-   'TLS nonaktif: username, password, dan payload MQTT tidak dienkripsi. Gunakan hanya pada jaringan tepercaya; hindari jaringan publik.';
-  trustNote.hidden=!secure;
-  if(!secure)return;
-  trustNote.textContent=settings.trust_mode==='system'?'Sertifikat publik dapat memakai trust store OS tanpa bundle tambahan.':
-   settings.trust_mode==='custom'?'Validasi memakai CA bundle terpasang dan tetap mencocokkan nama host.':
-   settings.trust_mode==='unavailable'?'CA yang dikonfigurasi tidak tersedia; pulihkan bundle sebelum mengaktifkan MQTT.':'';
- }
- transport.addEventListener('change',updateTransportDetails);tls.addEventListener('change',updateTransportDetails);
- updateTransportDetails();
- text(box,'Client ID dasar akan memakai akhiran -control dan -bulk.');
+ function updateTransportVisibility(){websocketPathField.hidden=transport.value!=='websocket';}
+ transport.addEventListener('change',updateTransportVisibility);
+ updateTransportVisibility();
  action(box,'Simpan',async()=>{
   const saved=await post('/api/v2/mqtt/settings',{
    enabled:enabled.value==='on',host:host.value,port:Number(port.value),client_id:clientId.value,
@@ -234,8 +237,6 @@ async function openMqttSettings(){
    bulk:{username:bulkUser.value,password:bulkPassword.value}
   });
   controlUser.value='';controlPassword.value='';bulkUser.value='';bulkPassword.value='';
-  controlUser.placeholder='Tersimpan; kosong = tetap';controlPassword.placeholder='Isi hanya untuk mengganti';
-  bulkUser.placeholder='Tersimpan; kosong = tetap';bulkPassword.placeholder='Isi hanya untuk mengganti';
   $('modalmsg').textContent=saved.apply_pending?'Tersimpan; koneksi MQTT diperbarui. Ground receipt harus terbukti lagi.':'Tersimpan.';
   renderData(snapshot);
  });
@@ -431,4 +432,4 @@ async function prepareReboot(){const box=modal('Reboot Raspberry');text(box,'Nod
  const cbox=modal('Konfirmasi reboot OS');text(cbox,'Konfirmasi dalam 30 detik. Reboot mulai setelah hasil dijurnal.');action(cbox,'REBOOT SEKARANG',()=>command('system.reboot.execute',{prepare_id:r.id,challenge:result.result.challenge}),true);
  });}
 document.addEventListener('pointerdown',()=>{lastTouch=Date.now();$('blank').hidden=true;});document.addEventListener('keydown',()=>{lastTouch=Date.now();$('blank').hidden=true;});
-get('/api/v2/session').then(s=>{authenticated=s.authenticated;csrf=s.csrf;}).catch(()=>{});poll();
+get('/api/v2/session').then(s=>{if(authenticated)return;authenticated=s.authenticated;csrf=s.csrf;lastAdminSessionRefresh=Date.now();render(snapshot);}).catch(()=>{});poll();

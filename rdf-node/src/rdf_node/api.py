@@ -52,8 +52,9 @@ class Auth:
         for part in (cookie or '').split(';'):
             if part.strip().startswith('rdf_session='): token=part.strip().split('=',1)[1]
         with self.lock:
-            item=self.sessions.get(token)
-            if not item or item[0]<=time.monotonic(): return None
+            now=time.monotonic();item=self.sessions.get(token)
+            if not item or item[0]<=now:return None
+            self.sessions[token]=(now+self.seconds,item[1])
             return token,item[1]
 
 class Server(ThreadingHTTPServer):
@@ -81,7 +82,7 @@ class Handler(BaseHTTPRequestHandler):
     sys_version=''
     protocol_version='HTTP/1.0'
     def setup(self):
-        super().setup(); self.connection.settimeout(4)
+        super().setup(); self.connection.settimeout(4); self.session_cookie=None
     def log_message(self,fmt,*args):
         # Do not log command bodies, authentication material or connection URLs.
         pass
@@ -92,6 +93,12 @@ class Handler(BaseHTTPRequestHandler):
     def _origin(self):
         origin=self.headers.get('Origin','')
         return origin in (f'http://127.0.0.1:{self.server.server_port}',f'http://localhost:{self.server.server_port}')
+    def _admin_session(self):
+        session=self.server.auth.session(self.headers.get('Cookie'))
+        if session:
+            self.session_cookie=(f'rdf_session={session[0]}; HttpOnly; SameSite=Strict; Path=/; '
+                                 f'Max-Age={self.server.cfg["api"]["session_seconds"]}')
+        return session
     def reply(self,status,obj,kind='application/json; charset=utf-8',extra=None):
         data=obj if isinstance(obj,bytes) else compact(obj)
         self.send_response(status)
@@ -100,6 +107,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('X-Frame-Options','DENY'); self.send_header('Referrer-Policy','no-referrer')
         self.send_header('Content-Security-Policy',"default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
         for k,v in (extra or {}).items(): self.send_header(k,v)
+        if self.session_cookie and (not extra or 'Set-Cookie' not in extra):
+            self.send_header('Set-Cookie',self.session_cookie)
         self.end_headers()
         try: self.wfile.write(data)
         except (BrokenPipeError,ConnectionResetError,TimeoutError): pass
@@ -114,11 +123,11 @@ class Handler(BaseHTTPRequestHandler):
                 kind='text/html; charset=utf-8' if file.suffix=='.html' else 'text/javascript; charset=utf-8' if file.suffix=='.js' else 'text/css; charset=utf-8'
                 return self.reply(200,file.read_bytes(),kind)
             if p=='/api/v2/session':
-                s=self.server.auth.session(self.headers.get('Cookie'))
+                s=self._admin_session()
                 return self.reply(200,{'authenticated':bool(s),'csrf':s[1] if s else None})
             if p=='/api/v2/mqtt/settings':
                 if self.server.ground: return self.reply(404,{'error':'NOT_FOUND'})
-                if not self.server.auth.session(self.headers.get('Cookie')): return self.reply(401,{'error':'AUTHENTICATION_REQUIRED'})
+                if not self._admin_session(): return self.reply(401,{'error':'AUTHENTICATION_REQUIRED'})
                 return self.reply(200,app.mqtt_settings_view())
             snap=app.snapshot()
             if p=='/api/v2/snapshot': return self.reply(200,snap)
@@ -160,7 +169,7 @@ class Handler(BaseHTTPRequestHandler):
             if not result: return self.reply(401,{'error':'LOGIN_FAILED_OR_RATE_LIMITED'})
             token,csrf=result
             return self.reply(200,{'authenticated':True,'csrf':csrf},extra={'Set-Cookie':f'rdf_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={self.server.cfg["api"]["session_seconds"]}'})
-        session=self.server.auth.session(self.headers.get('Cookie'))
+        session=self._admin_session()
         if not session or not secrets.compare_digest(self.headers.get('X-CSRF-Token',''),session[1]):
             return self.reply(403,{'error':'AUTHENTICATION_AND_CSRF_REQUIRED'})
         app=self.server.provider

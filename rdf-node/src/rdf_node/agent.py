@@ -70,8 +70,10 @@ class Agent:
         m=self.cfg['mqtt'];tls=settings.get('tls',m.get('tls',True));ca_file=m.get('ca_file')
         if type(tls) is not bool or (tls and ca_file and not Path(ca_file).is_file()): return False
         replacements=replacements or {}
-        return all(channel in replacements or self._credentials_ready(self._mqtt_credentials_path(channel,settings))
-                   for channel in ('control','bulk'))
+        for channel in ('control','bulk'):
+            path=self._mqtt_credentials_path(channel,settings)
+            if channel not in replacements and path and not self._credentials_ready(path): return False
+        return True
     def _load_mqtt_settings(self):
         defaults=self._mqtt_defaults()
         if self.demo: return defaults

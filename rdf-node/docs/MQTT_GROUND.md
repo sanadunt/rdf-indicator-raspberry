@@ -53,7 +53,7 @@ mqtt:
 ```
 
 Ini potongan dalam schema config penuh, bukan pengganti seluruh file. Unknown keys ditolak.
-Setiap credential JSON berisi `username` dan `password` nyata yang hanya disimpan di perangkat.
+Jika autentikasi broker dipakai, setiap credential JSON berisi `username` dan `password` nyata yang hanya disimpan di perangkat. Pada panel, pasangan kosong mempertahankan credential per-channel yang sudah ada; tanpa kredensial terkonfigurasi, client memakai anonymous CONNECT.
 `allow_insecure_loopback` hanya diperlukan untuk tes plaintext pada loopback; `tls: false`
 secara eksplisit memilih plaintext untuk endpoint lain. Folder root:rdf-edge0750, files root:rdf-edge0640.
 CA public boleh dibaca service; private key CA tetap di mesin provisioning, tidak disalin ke Raspberry.

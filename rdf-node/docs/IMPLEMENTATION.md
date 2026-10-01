@@ -32,6 +32,7 @@ proses itu juga menjalankan signal processor.
 `/var/lib/rdf-node/mqtt-ui-control.json` dan `mqtt-ui-bulk.json`, mode 0600.
 MQTT mendukung TCP/TLS, TCP biasa, WSS, dan WebSocket biasa. TLS aktif secara default serta
 memverifikasi rantai sertifikat dan hostname; tanpa CA khusus, trust store OS digunakan.
+Tanpa kredensial terkonfigurasi, client memakai anonymous CONNECT; pasangan kolom kosong mempertahankan kredensial per-channel yang sudah tersimpan.
 Transport tanpa TLS mengirim credential dan payload tanpa enkripsi; gunakan hanya pada link privat
 yang disetujui dan tepercaya.
 `Data > Atur` menyediakan pilihan transport/TLS, host, port, path WebSocket, serta username dan
@@ -42,6 +43,7 @@ receipt/sequence lama, lalu menunggu bukti Ground baru sebelum bulk berjalan kem
 Runtime menggunakan `/usr/bin/python3`, bukan Conda `base` atau environment SDR.
 Local HTTP server stdlib memiliki client/body caps, Host/Origin checks, cookie admin,
 CSRF, no-store dan CSP. Tidak boleh dibind ke LAN melalui perubahan tidak terkontrol.
+Admin PIN session memakai idle timeout rolling (default 600 detik). Request dengan session valid dan ping panel saat ada interaksi baru memperpanjang sesi; polling snapshot publik tidak.
 
 ## Perbedaan implementasi terhadap dokumen planning
 

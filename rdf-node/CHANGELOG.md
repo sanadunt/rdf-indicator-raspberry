@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Replace local admin passwords with six-digit PIN login and a touch keypad on the Raspberry panel.
+- Keep admin PIN sessions alive while the panel is actively used; the rolling inactivity timeout remains enabled.
 - Add saved accent-color and font preferences to the Config panel.
 - Existing installations must set a new PIN locally with `rdf-node set-pin`.
 - Launch kiosk Chromium with `--disable-gpu`; on the Raspberry, EGL config errors were logged with no `/dev/dri`, and the panel rendered with software rendering.
@@ -10,7 +11,7 @@
 - Probe the configured PPP peer with one interface-bound ICMP echo about every five seconds; a missing reply does not mark PPP down.
 - Add a bottom Data page with MQTT broker settings and a read-only topic/payload inventory.
 - Add a touch keyboard for MQTT host, port, client ID, WebSocket path, and CTRL/BULK credentials.
-- Support optional plaintext MQTT/TCP and `ws://` with broker username/password; TLS remains enabled by default.
+- Support plaintext MQTT/TCP and `ws://` with either anonymous broker access or per-channel credentials; TLS remains enabled by default.
 - Keep CTRL/BULK credentials separate and reconfigure clients live after admin save. Plaintext exposes credentials and payloads; use only on a trusted link.
 - Retain verified TCP/TLS and WSS, including MQTT binary frames and the `mqtt` WebSocket subprotocol.
 - Use OS CA roots by default or a configured CA bundle for private/self-signed certificates; migrate MQTT UI settings schemas 1 and 2 to schema 3.
