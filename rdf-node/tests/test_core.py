@@ -58,6 +58,18 @@ class PppProbeTests(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def test_default_config(self): self.assertEqual(load_config()['api']['port'],8790)
+
+    def test_enabled_tls_can_use_system_ca_trust(self):
+        c=load_config()
+        c['mqtt'].update(enabled=True,control_credentials_file='/etc/rdf-node/control.json',
+                         bulk_credentials_file='/etc/rdf-node/bulk.json')
+        validate_config(c)
+
+    def test_mqtt_transport_and_websocket_path_are_validated(self):
+        c=load_config();c['mqtt']['transport']='udp'
+        with self.assertRaises(ValueError):validate_config(c)
+        c=load_config();c['mqtt']['websocket_path']='/mqtt\r\nHost:attacker'
+        with self.assertRaises(ValueError):validate_config(c)
     def test_display_accent_and_font_are_allowlisted(self):
         for key,value in (('accent','ultraviolet'),('font','comic-sans')):
             c=load_config();c['display'][key]=value

@@ -1,6 +1,6 @@
 'use strict';
 const $=id=>document.getElementById(id);
-let snapshot={}, csrf=null, authenticated=false, lastSeq=null, lastProgress=0, lastApi=0, linkData=false, hostPage=false, lastTouch=Date.now(), pinKeyHandler=null, modalReturnFocus=null;
+let snapshot={}, csrf=null, authenticated=false, lastSeq=null, lastProgress=0, lastApi=0, linkData=false, hostPage=false, lastTouch=Date.now(), pinKeyHandler=null, modalReturnFocus=null, mqttKeyboardDismiss=null;
 const good=['UP','CONNECTED','RECEIVING','HEALTHY','SYNCED','APPLIED','REPLY'];
 const bad=['ERROR','LOST','DEGRADED','FAILED','UNAVAILABLE'];
 const pppProbeNames={UNKNOWN:'BELUM DICEK',NO_INTERFACE:'TANPA INTERFACE',REPLY:'BALASAN',NO_REPLY:'TANPA BALASAN',ERROR:'ERROR PROBE'};
@@ -101,14 +101,14 @@ setInterval(()=>{const stale=Date.now()-lastProgress>5000;$('stale').hidden=!sta
 for(const button of document.querySelectorAll('nav button'))button.addEventListener('click',()=>{for(const e of document.querySelectorAll('.page'))e.classList.toggle('active',e.id===button.dataset.tab);for(const e of document.querySelectorAll('nav button')){const active=e===button;e.classList.toggle('selected',active);if(active)e.setAttribute('aria-current','page');else e.removeAttribute('aria-current');}});
  $('linkpage').onclick=()=>{linkData=!linkData;$('linkpage').textContent=linkData?'Koneksi \u203a':'Rincian \u203a';render(snapshot);};
 $('syspage').onclick=()=>{hostPage=!hostPage;$('syspage').textContent=hostPage?'DAQ \u203a':'Host \u203a';$('systitle').textContent=hostPage?'RASPBERRY / HOST':'RDF / DAQ';render(snapshot);};
-function modal(title){modalReturnFocus=document.activeElement;pinKeyHandler=null;$('modaltitle').textContent=title;$('modalbody').replaceChildren();$('modalmsg').textContent='';$('modal').hidden=false;return $('modalbody');}
-function dismissModal(){$('modal').hidden=true;pinKeyHandler=null;const target=modalReturnFocus;modalReturnFocus=null;if(target&&typeof target.focus==='function')target.focus();}
+function modal(title){if(mqttKeyboardDismiss){mqttKeyboardDismiss(false);mqttKeyboardDismiss=null;}const dialog=$('modal').querySelector('.dialog');dialog.querySelector('.dialoghead').append($('closemodal'));dialog.classList.remove('keyboard-open');$('modalbody').classList.remove('keyboard-open');modalReturnFocus=document.activeElement;pinKeyHandler=null;$('modaltitle').textContent=title;$('modalbody').replaceChildren();$('modalmsg').textContent='';$('modal').hidden=false;return $('modalbody');}
+function dismissModal(){if(mqttKeyboardDismiss)mqttKeyboardDismiss(false);$('modal').hidden=true;pinKeyHandler=null;const target=modalReturnFocus;modalReturnFocus=null;if(target&&typeof target.focus==='function')target.focus();}
 $('closemodal').onclick=dismissModal;
 function modalKeydown(event){
  if($('modal').hidden)return;
- if(event.key==='Escape'){event.preventDefault();dismissModal();return;}
+ if(event.key==='Escape'){event.preventDefault();if(mqttKeyboardDismiss){mqttKeyboardDismiss(true);return;}dismissModal();return;}
  if(event.key==='Tab'){
-  const items=Array.from(document.querySelectorAll('#modal .dialog button:not(:disabled),#modal .dialog select:not(:disabled),#modal .dialog input:not(:disabled)'));
+  const items=Array.from(document.querySelectorAll('#modal .dialog button:not(:disabled),#modal .dialog select:not(:disabled),#modal .dialog input:not(:disabled)')).filter(e=>e.getClientRects().length);
   const first=items[0],last=items[items.length-1];
   if(!first){event.preventDefault();return;}
   if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus();}
@@ -181,20 +181,36 @@ async function openMqttSettings(){
  const enabled=document.createElement('select');enabled.setAttribute('aria-label','Status MQTT');
  for(const [value,title] of [['off','Nonaktif'],['on','Aktif']]){const option=document.createElement('option');option.value=value;option.textContent=title;enabled.append(option);}
  enabled.value=settings.enabled?'on':'off';statusField.append(statusCaption,enabled);grid.append(statusField);
+ const transportField=document.createElement('label');transportField.className='mqtt-settings-field';
+ const transportCaption=document.createElement('span');transportCaption.textContent='Transport aman';
+ const transport=document.createElement('select');transport.setAttribute('aria-label','Transport aman');
+ for(const [value,title] of [['tcp','MQTT/TCP + TLS'],['websocket','WebSocket Secure (WSS)']]){
+  const option=document.createElement('option');option.value=value;option.textContent=title;transport.append(option);
+ }
+ transport.value=settings.transport||'tcp';transportField.append(transportCaption,transport);grid.append(transportField);
  const host=mqttField(grid,'IP / host',settings.host,'text','10.90.0.1',253);
  const port=mqttField(grid,'Port',String(settings.port),'number','8883',5);port.min='1';port.max='65535';port.step='1';
  const clientId=mqttField(grid,'Client ID dasar',settings.client_id,'text','rdf-node',48);
+ const websocketPath=mqttField(grid,'Path WSS',settings.websocket_path||'/mqtt','text','/mqtt',256);
+ const websocketPathField=websocketPath.closest('label');
+ const updateWebsocketPath=()=>{websocketPathField.hidden=transport.value!=='websocket';};
+ transport.addEventListener('change',updateWebsocketPath);updateWebsocketPath();
  const controlUser=mqttField(grid,'User CTRL','', 'text',settings.control_credentials_set?'Tersimpan; kosong = tetap':'Belum diatur',128);controlUser.autocomplete='off';
  const controlPassword=mqttField(grid,'Pass CTRL','','password',settings.control_credentials_set?'Isi hanya untuk mengganti':'Belum diatur',512);controlPassword.autocomplete='new-password';
  const bulkUser=mqttField(grid,'User BULK','','text',settings.bulk_credentials_set?'Tersimpan; kosong = tetap':'Belum diatur',128);bulkUser.autocomplete='off';
  const bulkPassword=mqttField(grid,'Pass BULK','','password',settings.bulk_credentials_set?'Isi hanya untuk mengganti':'Belum diatur',512);bulkPassword.autocomplete='new-password';
  box.append(grid);
  text(box,'CTRL dan BULK memakai akun/ACL terpisah. Kosong mempertahankan credential; isi User dan Pass berpasangan untuk mengganti.');
- text(box,settings.tls?(settings.ca_configured?'TLS aktif; validasi wajib, host harus cocok dengan sertifikat broker.':'TLS aktif; CA belum diprovisikan, MQTT tidak dapat diaktifkan.'):'TLS nonaktif pada config; MQTT aktif ditolak sampai TLS diperbaiki.');
+ text(box,'TCP/TLS dan WSS selalu memverifikasi sertifikat serta nama host. WSS memakai subprotocol mqtt; koneksi ws:// ke broker remote tidak didukung.');
+ text(box,settings.trust_mode==='system'?'Sertifikat publik dapat memakai trust store OS tanpa bundle tambahan. CA privat/self-signed tetap memerlukan CA bundle Ground.':
+  settings.trust_mode==='custom'?'Validasi memakai CA bundle terpasang dan tetap mencocokkan nama host.':
+  settings.trust_mode==='unavailable'?'CA yang dikonfigurasi tidak tersedia; pulihkan bundle sebelum mengaktifkan MQTT.':
+  'TLS nonaktif pada config; MQTT aktif ditolak sampai TLS diperbaiki.');
  text(box,'Client ID dasar akan memakai akhiran -control dan -bulk.');
  action(box,'Simpan',async()=>{
   const saved=await post('/api/v2/mqtt/settings',{
    enabled:enabled.value==='on',host:host.value,port:Number(port.value),client_id:clientId.value,
+   transport:transport.value,websocket_path:websocketPath.value,
    control:{username:controlUser.value,password:controlPassword.value},
    bulk:{username:bulkUser.value,password:bulkPassword.value}
   });
@@ -204,7 +220,149 @@ async function openMqttSettings(){
   $('modalmsg').textContent=saved.apply_pending?'Tersimpan; koneksi MQTT diperbarui. Ground receipt harus terbukti lagi.':'Tersimpan.';
   renderData(snapshot);
  });
- host.focus();
+ const entries=[
+  {key:'host',name:'IP / host',input:host,field:host.closest('label')},
+  {key:'port',name:'Port',input:port,field:port.closest('label')},
+  {key:'client-id',name:'Client ID dasar',input:clientId,field:clientId.closest('label')},
+  {key:'websocket-path',name:'Path WSS',input:websocketPath,field:websocketPathField},
+  {key:'control-user',name:'User CTRL',input:controlUser,field:controlUser.closest('label')},
+  {key:'control-password',name:'Pass CTRL',input:controlPassword,field:controlPassword.closest('label')},
+  {key:'bulk-user',name:'User BULK',input:bulkUser,field:bulkUser.closest('label')},
+  {key:'bulk-password',name:'Pass BULK',input:bulkPassword,field:bulkPassword.closest('label')}
+ ];
+ const keyboard=document.createElement('section');keyboard.id='mqtt-keyboard';keyboard.hidden=true;
+ keyboard.setAttribute('role','group');keyboard.setAttribute('aria-label','Keyboard layar sentuh');
+ const bar=document.createElement('div');bar.className='mqtt-keyboard-bar';
+ const fieldPicker=document.createElement('select');fieldPicker.setAttribute('aria-label','Pilih kolom pengaturan');
+ const keyboardAction=document.createElement('button');keyboardAction.type='button';keyboardAction.setAttribute('aria-label','Pilih semua teks');
+ const done=document.createElement('button');done.type='button';done.textContent='Selesai';
+ bar.append(fieldPicker,keyboardAction,done);
+ const editor=document.createElement('div');editor.id='mqtt-keyboard-editor';
+ const keyboardRows=document.createElement('div');keyboardRows.className='mqtt-keyboard-rows';
+ const keyboardStatus=document.createElement('span');keyboardStatus.className='sr-only';keyboardStatus.setAttribute('role','status');keyboardStatus.setAttribute('aria-live','polite');
+ keyboard.append(bar,editor,keyboardRows,keyboardStatus);box.append(keyboard);
+ let active=null,mode='letters',shifted=false,pointerField=null,suppressKeyboardFocus=false;
+ const dialog=box.closest('.dialog'),closeButton=$('closemodal'),dialogHead=dialog.querySelector('.dialoghead');
+ function restoreField(entry){
+  if(entry.field.parentNode===editor)grid.insertBefore(entry.field,entry.next&&entry.next.parentNode===grid?entry.next:null);
+ }
+ function updateKeyboardAction(){
+  if(!active)return;
+  const number=active.input.type==='number',symbols=mode==='symbols';
+  keyboardAction.textContent=number?'Kosong':symbols?'ABC':'Semua';
+  keyboardAction.setAttribute('aria-label',number?'Kosongkan angka':symbols?'Kembali ke huruf':'Pilih semua teks');
+ }
+ function updatePicker(){
+  fieldPicker.replaceChildren();
+  for(const entry of entries){
+   if(entry.field.hidden)continue;
+   const option=document.createElement('option');option.value=entry.key;option.textContent=entry.name;fieldPicker.append(option);
+  }
+  if(active){fieldPicker.value=active.key;updateKeyboardAction();}
+ }
+ function replaceInput(input,insert='',remove=false){
+  const value=input.value;let start=value.length,end=start;
+  if(input.type!=='number'){start=input.selectionStart??value.length;end=input.selectionEnd??start;}
+  if(remove){if(start===end&&start>0)start--;insert='';}
+  const max=input.maxLength>0?input.maxLength:Infinity;
+  const next=(value.slice(0,start)+insert+value.slice(end)).slice(0,max);
+  input.value=next;
+  const caret=Math.min(start+insert.length,next.length);
+  if(input.type!=='number')try{input.setSelectionRange(caret,caret);}catch(_){}
+  input.dispatchEvent(new Event('input',{bubbles:true}));
+ }
+ function renderKeyboard(){
+  if(!active)return;
+  keyboardRows.replaceChildren();
+  const key=(label,value=label,action='',klass='',aria=label)=>({label,value,action,klass,aria});
+  const addRow=defs=>{
+   const row=document.createElement('div');row.className='mqtt-keyboard-row';
+   for(const def of defs){
+    const button=document.createElement('button');button.type='button';button.className=`mqtt-key ${def.klass||''}`.trim();
+    button.textContent=def.label;button.setAttribute('aria-label',def.aria||def.label);button.dataset.keyAction=def.action||'input';
+    if(def.action==='shift')button.setAttribute('aria-pressed',String(shifted));
+    button.addEventListener('click',event=>{
+     const input=active?.input;if(!input)return;
+     if(def.action==='shift'){
+      shifted=!shifted;renderKeyboard();
+      if(event.detail===0)keyboardRows.querySelector('[data-key-action="shift"]')?.focus();else input.focus({preventScroll:true});
+      return;
+     }
+     if(def.action==='symbols'||def.action==='letters'){
+      mode=def.action;shifted=false;keyboardStatus.textContent=mode==='symbols'?'Mode simbol aktif':'Mode huruf aktif';updateKeyboardAction();renderKeyboard();
+      if(event.detail===0){if(mode==='symbols')keyboardAction.focus();else keyboardRows.querySelector('[data-key-action="symbols"]')?.focus();}else input.focus({preventScroll:true});
+      return;
+     }
+     if(def.action==='backspace')replaceInput(input,'',true);
+     else if(def.action==='clear'){input.value='';input.dispatchEvent(new Event('input',{bubbles:true}));}
+     else if(def.action==='space')replaceInput(input,' ');
+     else replaceInput(input,def.value);
+     if(event.detail>0)input.focus({preventScroll:true});
+    });
+    row.append(button);
+   }
+   keyboardRows.append(row);
+  };
+  if(active.input.type==='number'){
+   keyboardRows.classList.add('mqtt-numeric-keyboard');
+   addRow(['1','2','3'].map(value=>key(value)));
+   addRow(['4','5','6'].map(value=>key(value)));
+   addRow(['7','8','9'].map(value=>key(value)));
+   addRow([key('⌫','', 'backspace','','Hapus angka terakhir'),key('0'),key('C','', 'clear','','Kosongkan kolom')]);
+   return;
+  }
+  keyboardRows.classList.remove('mqtt-numeric-keyboard');
+  const letters=['qwertyuiop','asdfghjkl'];
+  if(mode==='letters'){
+   for(const line of letters)addRow(Array.from(line,char=>{const shown=shifted?char.toUpperCase():char;return key(shown,shown,'','',`Huruf ${shown}`);}));
+   addRow([key('⇧','', 'shift','mqtt-key-wide','Shift huruf besar'),...Array.from('zxcvbnm',char=>key(shifted?char.toUpperCase():char,shifted?char.toUpperCase():char,'','',`Huruf ${shifted?char.toUpperCase():char}`)),key('⌫','', 'backspace','mqtt-key-wide','Hapus karakter terakhir')]);
+   addRow([key('?123','', 'symbols','mqtt-key-mode','Angka dan simbol'),key('@'),key('Spasi','', 'space','mqtt-key-space'),key('.'),key('/')]);
+  }else{
+   addRow(['1','2','3','4','5','6','7','8','9','0'].map(value=>key(value)));
+   addRow(['@','#','$','%','&','-','+','(',')','='].map(value=>key(value)));
+   addRow(['!','?','*',':',';','_',"'",',','.','/'].map(value=>key(value)));
+   addRow(['[',']','{','}','<','>','^',String.fromCharCode(96),'|','"'].map(value=>key(value)));
+   addRow([key('~'),key('Spasi','', 'space','mqtt-key-space'),key(String.fromCharCode(92)),key('⌫','', 'backspace','mqtt-key-wide','Hapus karakter terakhir')]);
+  }
+ }
+ function activate(entry,refocus=true){
+  if(active===entry)return;
+  let selection=null;
+  if(entry.input.type!=='number')selection=[entry.input.selectionStart,entry.input.selectionEnd];
+  if(active)restoreField(active);
+  entry.next=entry.field.nextSibling;editor.append(entry.field);active=entry;mqttKeyboardDismiss=hideKeyboard;bar.append(closeButton);
+  keyboard.hidden=false;box.classList.add('keyboard-open');dialog.classList.add('keyboard-open');
+  mode=entry.input.type==='number'?'numeric':'letters';shifted=false;updatePicker();renderKeyboard();
+  keyboardStatus.textContent=`Keyboard layar sentuh untuk ${entry.name}`;
+  box.scrollTop=0;
+  if(refocus){entry.input.focus({preventScroll:true});if(selection&&selection[0]!==null)try{entry.input.setSelectionRange(...selection);}catch(_){}}
+ }
+ function hideKeyboard(refocus=true){
+  if(!active)return;
+  const entry=active;restoreField(entry);active=null;keyboard.hidden=true;dialogHead.append(closeButton);
+  box.classList.remove('keyboard-open');dialog.classList.remove('keyboard-open');mqttKeyboardDismiss=null;
+  if(refocus){suppressKeyboardFocus=true;try{entry.input.focus({preventScroll:true});}finally{suppressKeyboardFocus=false;}}
+ }
+ fieldPicker.addEventListener('change',()=>{const entry=entries.find(value=>value.key===fieldPicker.value);if(entry)activate(entry);});
+ keyboardAction.addEventListener('click',event=>{
+  if(!active)return;
+  if(active.input.type!=='number'&&mode==='symbols'){
+   mode='letters';shifted=false;keyboardStatus.textContent='Mode huruf aktif';updateKeyboardAction();renderKeyboard();
+   if(event.detail>0)active.input.focus({preventScroll:true});
+   return;
+  }
+  if(active.input.type==='number')active.input.value='';else active.input.select();
+  active.input.dispatchEvent(new Event('input',{bubbles:true}));
+  if(event.detail>0)active.input.focus({preventScroll:true});
+ });
+ done.addEventListener('click',()=>hideKeyboard(true));
+ for(const entry of entries){
+  entry.input.inputMode='none';
+  entry.input.addEventListener('pointerdown',()=>{pointerField=entry.input;setTimeout(()=>{if(pointerField===entry.input)pointerField=null;},0);});
+  entry.input.addEventListener('focus',event=>{if(event.isTrusted&&!suppressKeyboardFocus&&pointerField!==entry.input)activate(entry);});
+  entry.input.addEventListener('click',event=>{if(event.isTrusted)activate(entry);});
+ }
+ enabled.focus({preventScroll:true});
 }
 $('mqttsettings').onclick=openMqttSettings;
 async function command(op,extras={}){const r={v:2,id:`local-${Date.now()}-${crypto.randomUUID().slice(0,8)}`,sid:snapshot.sid,boot:snapshot.boot_id,issued_ms:Date.now(),expires_ms:Date.now()+15000,base_rev:snapshot.config?.sdr_revision??null,op,...extras};const result=await post('/api/v2/commands',r);$('modalmsg').textContent=`${result.stage}: ${result.id||''}`;return result;}

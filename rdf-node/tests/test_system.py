@@ -102,6 +102,7 @@ class ApplicationTests(unittest.TestCase):
         agent.accept_receipt({'v':2,'sid':agent.sid,'hq':0xfffffffe})
         self.assertEqual(agent.receipt_view()['state'],'RECEIVING')
         agent.configure_mqtt({'enabled':False,'host':'ground.example','port':8883,'client_id':'new-node',
+                              'transport':'tcp','websocket_path':'/mqtt',
                               'control':{'username':'','password':''},'bulk':{'username':'','password':''}})
         self.assertTrue(wait(lambda:not agent.clients and not broker.clients,8),[agent.clients,broker.clients])
         self.assertFalse(agent.cfg['mqtt']['enabled'])
@@ -126,7 +127,7 @@ class ApiTests(unittest.TestCase):
         code,h,b=self.http('POST','/api/v2/login',{'pin':self.pin});self.assertEqual(code,200)
         self.cookie=h['Set-Cookie'].split(';')[0];self.csrf=json.loads(b)['csrf']
     def mqtt_payload(self,**changes):
-        body={'enabled':False,'host':'127.0.0.1','port':8883,'client_id':'rdf-pi',
+        body={'enabled':False,'host':'127.0.0.1','port':8883,'client_id':'rdf-pi','transport':'tcp','websocket_path':'/mqtt',
               'control':{'username':'control-user','password':'control-secret'},
               'bulk':{'username':'bulk-user','password':'bulk-secret'}}
         body.update(changes);return body
@@ -181,12 +182,11 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.http('POST','/api/v2/mqtt/settings',body)[0],403)
     def test_mqtt_settings_persist_separate_secrets_without_exposing_them(self):
         self.login()
-        code,_,response=self.http('POST','/api/v2/mqtt/settings',self.mqtt_payload())
+        code,_,response=self.http('POST','/api/v2/mqtt/settings',self.mqtt_payload(transport='websocket',websocket_path='/mqtt?node=uav'))
         self.assertEqual(code,200)
         saved=json.loads(response)
         self.assertEqual((saved['host'],saved['port'],saved['client_id']),('127.0.0.1',8883,'rdf-pi'))
-        self.assertTrue(saved['control_credentials_set']);self.assertTrue(saved['bulk_credentials_set'])
-        self.assertNotIn('username',saved);self.assertNotIn('password',saved)
+        self.assertEqual((saved['transport'],saved['websocket_path']),('websocket','/mqtt?node=uav'))
         self.assertNotIn(b'control-secret',response);self.assertNotIn(b'bulk-secret',response)
         state=Path(self.a.cfg['state_dir'])
         control=state/'mqtt-ui-control.json';bulk=state/'mqtt-ui-bulk.json'
@@ -207,6 +207,13 @@ class ApiTests(unittest.TestCase):
             self.assertTrue(view['control_credentials_set']);self.assertTrue(view['bulk_credentials_set'])
             self.assertNotIn('password',view)
         finally:restored.journal.close()
+
+    def test_mqtt_settings_schema1_migrates_to_tcp_defaults(self):
+        legacy={'schema':1,'enabled':False,'host':'ground.local','port':8883,'client_id':'legacy-node',
+                'control_custom':False,'bulk_custom':False}
+        self.a.mqtt_state_path.write_bytes(compact(legacy))
+        settings=self.a._load_mqtt_settings()
+        self.assertEqual((settings['transport'],settings['websocket_path']),('tcp','/mqtt'))
     def test_mqtt_settings_preserve_blank_pairs_and_reject_partial_credentials(self):
         self.login()
         code,_,_=self.http('POST','/api/v2/mqtt/settings',self.mqtt_payload())
@@ -221,13 +228,24 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.http('POST','/api/v2/mqtt/settings',body)[0],400)
         self.assertEqual(control.read_bytes(),original)
         self.assertEqual(self.a.mqtt_settings_view()['host'],'ground.local')
-    def test_mqtt_settings_validate_host_and_require_tls_bundle_before_enable(self):
+    def test_mqtt_settings_validate_host_and_allow_system_ca_trust(self):
         self.login()
         self.assertEqual(self.http('POST','/api/v2/mqtt/settings',self.mqtt_payload(host='broker.local/path'))[0],400)
-        self.assertEqual(self.http('POST','/api/v2/mqtt/settings',self.mqtt_payload(enabled=True))[0],400)
+        empty=self.mqtt_payload(enabled=True,control={'username':'','password':''},bulk={'username':'','password':''})
+        self.assertEqual(self.http('POST','/api/v2/mqtt/settings',empty)[0],400)
         state=Path(self.a.cfg['state_dir'])
         self.assertFalse((state/'mqtt-ui-control.json').exists())
-        self.assertFalse((state/'mqtt-ui-bulk.json').exists())
+        code,_,response=self.http('POST','/api/v2/mqtt/settings',self.mqtt_payload(enabled=True))
+        self.assertEqual(code,200)
+        saved=json.loads(response)
+        self.assertFalse(saved['ca_configured'])
+        self.assertEqual(saved['trust_mode'],'system')
+    def test_mqtt_settings_reject_websocket_path_injection(self):
+        self.login()
+        body=self.mqtt_payload(transport='websocket',websocket_path='/mqtt\r\nHost:attacker')
+        code,_,response=self.http('POST','/api/v2/mqtt/settings',body)
+        self.assertEqual(code,400)
+        self.assertEqual(json.loads(response)['error'],'INVALID_MQTT_WEBSOCKET_PATH')
 
 class EndToEndTests(unittest.TestCase):
     def test_agent_graph_receipt_query_and_stopped_health(self):

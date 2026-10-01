@@ -4,6 +4,7 @@ import ipaddress
 import re
 from pathlib import Path
 import yaml
+from .mqtt_ws import validate_mqtt_host,validate_websocket_path
 from .util import finite
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -64,6 +65,9 @@ def validate_config(c: dict) -> None:
                              (c['telemetry'],'resume_stable_seconds',0,120),
                              (c['control'],'verify_seconds',1,60),(c['control'],'start_timeout_seconds',5,600)]:
         finite(obj[key],lo,hi)
+    validate_mqtt_host(c['mqtt']['host'])
+    if c['mqtt']['transport'] not in ('tcp','websocket'): raise ValueError('INVALID_MQTT_TRANSPORT')
+    validate_websocket_path(c['mqtt']['websocket_path'])
     if c['telemetry']['control_budget_bytes_s']+c['telemetry']['bulk_budget_bytes_s']>1500:
         raise ValueError('AGGREGATE_BUDGET_TOO_HIGH')
     for k,v in c['freshness'].items():
@@ -94,8 +98,6 @@ def validate_config(c: dict) -> None:
         if not is_local or not c['mqtt']['allow_insecure_loopback']:
             raise ValueError('PLAINTEXT_ONLY_EXPLICIT_LOOPBACK_TEST')
     if c['mqtt']['enabled']:
-        if c['mqtt']['tls'] and not c['mqtt']['ca_file']:
-            raise ValueError('MQTT_CA_REQUIRED')
         if not c['mqtt']['control_credentials_file'] or not c['mqtt']['bulk_credentials_file']:
             raise ValueError('MQTT_CREDENTIALS_REQUIRED')
     if c['runtime_mode'] == 'read_only' and any(c['control'][k] for k in ('config_patch_enabled','processing_enabled','restart_enabled','reboot_enabled')):

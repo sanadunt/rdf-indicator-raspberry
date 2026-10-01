@@ -1,10 +1,10 @@
-"""Small MQTT 5 TCP/TLS client for the bounded RDF transport profile.
+"""Small MQTT 5 TCP/TLS and WSS client for the bounded RDF transport profile.
 
 Implemented: Clean Start, Session Expiry 0, QoS 0/1, subscriptions + SUBACK,
-retained state, LWT, Message Expiry, PING, TLS certificate/hostname verification.
-Not implemented: QoS 2, persistent broker sessions, topic aliases, WebSockets,
-enhanced authentication or a broker. Only one outbound publish is in flight.
-No offline replay: each reconnect creates a fresh socket/protocol session.
+retained state, LWT, Message Expiry, PING, verified TLS, and MQTT binary frames
+over WebSocket Secure. Not implemented: QoS 2, persistent broker sessions,
+topic aliases, enhanced authentication or a broker. Only one outbound publish
+is in flight. No offline replay: each reconnect creates a fresh protocol session.
 """
 from __future__ import annotations
 from collections import OrderedDict
@@ -19,6 +19,7 @@ import threading
 import time
 from pathlib import Path
 from .util import compact, strict_json, stable_read
+from .mqtt_ws import WebSocketReader,client_handshake,encode_client_frame,validate_websocket_path
 
 MAX_PACKET = 16384
 
@@ -238,6 +239,10 @@ class Client:
             if self.last_success is not None and time.monotonic()-self.last_success<20:
                 delay=1
     def _session(self):
+        transport=self.cfg.get('transport','tcp')
+        if transport not in ('tcp','websocket'):raise ValueError('UNSUPPORTED_MQTT_TRANSPORT')
+        websocket=transport=='websocket'
+        path=validate_websocket_path(self.cfg.get('websocket_path','/mqtt')) if websocket else None
         u,p=self._credentials()
         s=socket.create_connection((self.cfg['host'],self.cfg['port']),timeout=5)
         self._socket=s
@@ -251,23 +256,49 @@ class Client:
             if not self.cfg.get('allow_insecure_loopback') or not ipaddress.ip_address(s.getpeername()[0]).is_loopback:
                 raise ValueError('PLAINTEXT_NONLOOPBACK_REJECTED')
         s.settimeout(5)
+        ws_reader=WebSocketReader() if websocket else None
+        early=client_handshake(s,self.cfg['host'],self.cfg['port'],path) if websocket else b''
+        if early:
+            for kind,payload in ws_reader.feed(early):
+                if kind=='ping':
+                    response=encode_client_frame(payload,10);s.sendall(response);self.tx_bytes+=len(response)
+                elif kind=='close':
+                    response=encode_client_frame(payload,8);s.sendall(response);self.tx_bytes+=len(response)
+                    raise ValueError('WEBSOCKET_CLOSED')
+                elif kind=='data':raise ValueError('WEBSOCKET_EARLY_MQTT_DATA')
         first=connect_packet(self.client_id,u,p,self.cfg.get('keepalive',15),self.will)
-        s.sendall(first); self.tx_bytes+=len(first); s.setblocking(False)
+        wire=encode_client_frame(first) if websocket else first
+        s.sendall(wire); self.tx_bytes+=len(wire); s.setblocking(False)
         reader=Reader(); self._pub_result=None; self._publish=None
         pending_sub=set(); writes=[]; current=None; sent_start=None
-        last_tx=time.monotonic(); last_rx=last_tx; handshake_deadline=last_tx+10; ping_at=None
+        last_mqtt_tx=time.monotonic(); last_rx=last_mqtt_tx; handshake_deadline=last_mqtt_tx+10; ping_at=None
         self._server_max_packet=MAX_PACKET; keepalive=self.cfg.get('keepalive',15)
+        websocket_closing=False;websocket_close_sent=False;websocket_close_received=False;websocket_close_deadline=None
         def queue_wire(data):
+            if websocket and websocket_closing:return
             if len(writes)>20: raise ValueError('MQTT_CONTROL_QUEUE_LIMIT')
-            writes.append([data,0,None])
+            writes.append([data,0,None,False,True])
+        def queue_ws_control(opcode,payload):
+            nonlocal websocket_close_sent,websocket_close_deadline
+            if opcode==10 and websocket_closing:return
+            if opcode==8:
+                if websocket_close_sent:return
+                websocket_close_sent=True;websocket_close_deadline=time.monotonic()+0.5
+            if len(writes)>20: raise ValueError('MQTT_CONTROL_QUEUE_LIMIT')
+            writes.insert(0,[encode_client_frame(payload,opcode),0,None,True,False])
         while not self.stop_event.is_set() and not self.reset_event.is_set():
             now=time.monotonic()
+            if websocket_close_received and current is None and not writes: raise ValueError('WEBSOCKET_CLOSED')
+            if websocket_close_sent and not websocket_close_received and now>websocket_close_deadline:
+                raise ValueError('WEBSOCKET_CLOSE_TIMEOUT')
             if not self.connected and now>handshake_deadline: raise ValueError('CONNACK_TIMEOUT')
             if self.connected and pending_sub and now>handshake_deadline: raise ValueError('SUBACK_TIMEOUT')
             if keepalive>0 and ping_at and now-ping_at>keepalive: raise ValueError('PING_TIMEOUT')
-            if self.connected and keepalive>0 and now-last_tx>=keepalive and ping_at is None:
+            if not websocket_closing and self.connected and keepalive>0 and now-last_mqtt_tx>=keepalive and ping_at is None:
                 queue_wire(b'\xc0\x00'); ping_at=now
-            if current is None and writes: current=writes.pop(0)
+            if current is None and writes:
+                current=writes.pop(0)
+                if websocket and not current[3]:current[0]=encode_client_frame(current[0]);current[3]=True
             if self._publish:
                 m,mid,started=self._publish
                 self.pending_age_ms=int((now-started)*1000)
@@ -289,7 +320,8 @@ class Client:
                     if len(data)>self._server_max_packet: raise ValueError('SERVER_PACKET_LIMIT')
                     cost=len(data)+142+(144 if m.qos else 0)
                     if self.bucket.ready(cost):
-                        self._publish=(m,mid,now); current=[data,0,m]
+                        self._publish=(m,mid,now)
+                        current=[encode_client_frame(data) if websocket else data,0,m,True,True]
                     else:
                         # Do not overwrite a newer value offered during the pop.
                         with self.outbox.lock:
@@ -301,7 +333,8 @@ class Client:
             if isinstance(s,ssl.SSLSocket) and s.pending(): readable=[s]
             if writable and current:
                 try:
-                    n=s.send(current[0][current[1]:]); current[1]+=n; self.tx_bytes+=n; last_tx=time.monotonic()
+                    n=s.send(current[0][current[1]:]); current[1]+=n; self.tx_bytes+=n
+                    if current[4]:last_mqtt_tx=time.monotonic()
                     if not n: raise OSError('socket closed')
                     if current[1]==len(current[0]):
                         if current[2] is not None and current[2].qos==0: self._pub_result=0
@@ -312,7 +345,21 @@ class Client:
                 except (ssl.SSLWantReadError,ssl.SSLWantWriteError,BlockingIOError): continue
                 if not chunk: raise OSError('socket closed')
                 self.rx_bytes+=len(chunk); last_rx=time.monotonic()
-                for header,body in reader.feed(chunk):
+                packets=[]
+                if websocket:
+                    for event,payload in ws_reader.feed(chunk):
+                        if event=='data':
+                            for offset in range(0,len(payload),8192):
+                                packets.extend(reader.feed(payload[offset:offset+8192]))
+                        elif event=='ping':queue_ws_control(10,payload)
+                        elif event=='close':
+                            websocket_closing=True;websocket_close_received=True
+                            if current is not None and current[1]==0:
+                                if current[2] is not None:self._publish=None;self._pub_result=None
+                                current=None
+                            writes.clear();queue_ws_control(8,payload)
+                else:packets=reader.feed(chunk)
+                for header,body in packets:
                     kind=header>>4
                     if kind==2:
                         if self.connected or header!=0x20 or len(body)<3: raise ValueError('BAD_CONNACK')
@@ -363,10 +410,31 @@ class Client:
                         if header!=0xd0 or body: raise ValueError('BAD_PINGRESP')
                         ping_at=None
                     elif kind==14:
+                        if websocket:
+                            websocket_closing=True
+                            if current is not None and current[1]==0:
+                                if current[2] is not None:self._publish=None;self._pub_result=None
+                                current=None
+                            writes.clear();queue_ws_control(8,b'')
+                            break
                         raise ValueError('BROKER_DISCONNECT')
                     else:
                         raise ValueError('UNSUPPORTED_MQTT_PACKET')
-        if self.stop_event.is_set():
+        can_close= current is None or current[1]==0
+        if self.stop_event.is_set() and can_close:
             try:
-                s.settimeout(0.5); s.sendall(b'\xe0\x00')
+                disconnect=encode_client_frame(b'\xe0\x00') if websocket else b'\xe0\x00'
+                s.settimeout(0.5);s.sendall(disconnect)
             except OSError: pass
+        if websocket and can_close:
+            try:
+                s.settimeout(0.5);s.sendall(encode_client_frame(b'',8))
+                close_reader=WebSocketReader();deadline=time.monotonic()+0.5
+                while time.monotonic()<deadline:
+                    chunk=s.recv(8192)
+                    if not chunk:break
+                    events=close_reader.feed(chunk)
+                    for kind,payload in events:
+                        if kind=='ping':s.sendall(encode_client_frame(payload,10))
+                    if any(kind=='close' for kind,_ in events):break
+            except (OSError,ssl.SSLError,ValueError): pass

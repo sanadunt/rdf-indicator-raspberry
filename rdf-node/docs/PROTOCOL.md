@@ -19,9 +19,22 @@ Demo CLI tidak membuka koneksi MQTT. Prefix demo tersedia hanya bagi integration
 | cmd/operation/get, cmd/stream/set | Ground -> UAV | 1 | tidak |
 | ack/config, ack/operation | UAV -> Ground | 1 | tidak |
 
+
 Session expiry nol, clean start selalu. State/capabilities mengaitkan alias sid 8 hex dengan
 boot UUID dan instance UUID. Alias yang belum dikenal atau bentrok tidak menjadi authority.
 Jangan memperlakukan retained state sebagai heartbeat. Freshness menggunakan health/sumber.
+
+## MQTT network transport
+
+The client supports MQTT 5 over TCP/TLS and MQTT over WSS. TLS verification requires a valid
+certificate chain and a hostname/IP match; TLS 1.2 is the minimum. If `ca_file` is unset, the
+system CA store is used with verification still enabled. Private/self-signed broker roots need an
+explicit CA file.
+
+WSS uses RFC 6455 with the `mqtt` subprotocol. MQTT Control Packets travel only in WebSocket
+binary frames; the parser treats the payload as a byte stream, not frame-aligned packets. Client
+frames are masked, server frames must be unmasked, and fragmentation/control frames are handled.
+Plain remote `ws://` is rejected; the UI only exposes TLS transports.
 
 ## DoA compact
 

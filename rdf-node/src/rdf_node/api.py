@@ -177,7 +177,9 @@ class Handler(BaseHTTPRequestHandler):
                 else: result=app.commands.submit(obj,'local-admin')
                 return self.reply(400 if result.get('stage')=='REJECTED' else 202,result)
             if p=='/api/v2/mqtt/settings' and not self.server.ground:
-                return self.reply(200,app.configure_mqtt(obj))
+                try: result=app.configure_mqtt(obj)
+                except ValueError as e: return self.reply(400,{'error':str(e) or 'INVALID_MQTT_SETTINGS'})
+                return self.reply(200,result)
             if p=='/api/v2/display/preferences' and not self.server.ground:
                 if set(obj)-{'theme','accent','font','blank_after_seconds'}: raise ValueError('UNKNOWN_PREFERENCE')
                 prefs=dict(app.cfg['display'])

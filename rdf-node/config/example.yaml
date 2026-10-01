@@ -25,6 +25,8 @@ mqtt:
   port: 8883
   tls: true
   ca_file: null
+  transport: tcp
+  websocket_path: /mqtt
   control_credentials_file: null
   bulk_credentials_file: null
   keepalive: 15

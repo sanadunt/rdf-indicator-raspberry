@@ -9,7 +9,11 @@
 - Allow the RDF edge systemd sandbox to use AF_NETLINK for PPP interface discovery.
 - Probe the configured PPP peer with one interface-bound ICMP echo about every five seconds; a missing reply does not mark PPP down.
 - Add a bottom Data page with MQTT broker settings and a read-only topic/payload inventory.
+- Add an integrated touch keyboard for MQTT host, port, client ID, WSS path, and CTRL/BULK credentials.
 - Keep control/bulk credentials separate, require TLS validation, and reconfigure clients live after admin save.
+- Support MQTT over verified TCP/TLS or WSS, with MQTT binary frames and the required `mqtt` subprotocol.
+- Use OS CA trust roots when no custom CA file is configured; private/self-signed broker certificates still require their CA bundle.
+- Add transport/path settings, schema-1 migration, and specific safe validation errors to the MQTT admin API.
 
 
 ## 1.0.0 - 2026-09-29

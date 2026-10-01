@@ -45,3 +45,25 @@ nav{grid-template-columns:repeat(5,1fr)}
 .dialog .mqtt-settings-fields input,.dialog .mqtt-settings-fields select{border-color:var(--dim)}
 .dialog input::placeholder{color:var(--dim);opacity:1}
 .topic-list summary:focus-visible,#topiclist:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.dialog.keyboard-open{max-height:100%;padding:4px}
+.dialog.keyboard-open .dialoghead{height:24px;margin-bottom:0}
+#modalbody.keyboard-open>:not(#mqtt-keyboard){display:none!important}
+.dialog.keyboard-open #modalmsg{display:none}
+#mqtt-keyboard{display:grid;gap:2px;min-width:0}
+.mqtt-keyboard-bar{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:2px;background:var(--bg)}
+.mqtt-keyboard-bar select{flex:1;min-width:0;height:44px;margin:0;padding:4px}
+.mqtt-keyboard-bar button:not(#closemodal){height:44px;min-height:44px;margin:0;padding:0 7px;white-space:nowrap}
+.mqtt-keyboard-bar #closemodal{flex:0 0 44px;width:44px;height:44px;min-height:44px;margin:0;padding:0;font-size:22px}
+#mqtt-keyboard-editor{min-width:0}
+#mqtt-keyboard-editor .mqtt-settings-field{gap:0}
+#mqtt-keyboard-editor .mqtt-settings-field span{display:none}
+.dialog #mqtt-keyboard-editor .mqtt-settings-field input{height:44px;margin:0;padding:5px 8px}
+.mqtt-keyboard-rows{display:flex;flex-direction:column;gap:2px;min-width:0}
+.mqtt-keyboard-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:2px;min-width:0}
+.mqtt-key{flex:0 0 44px;width:44px;height:44px;min-height:44px;margin:0;padding:0;font-size:15px;touch-action:manipulation}
+.mqtt-key-wide{flex-basis:52px;width:52px}
+.mqtt-key-mode{flex-basis:56px;width:56px;font-size:12px}
+.mqtt-key-space{flex:1 0 100px;width:auto;max-width:140px}
+.mqtt-numeric-keyboard .mqtt-keyboard-row{display:grid;grid-template-columns:repeat(3,44px);justify-content:center;gap:2px}
+.dialog input:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}
+.mqtt-key:focus-visible{outline:2px solid var(--accent);outline-offset:1px}

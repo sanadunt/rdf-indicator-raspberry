@@ -1,7 +1,7 @@
 import json,os,ssl,subprocess,tempfile,time,unittest
 from pathlib import Path
 from rdf_node.mqtt import Client
-from broker_fixture import Broker,wait
+from broker_fixture import Broker,wait,pkt,text,server_frame
 
 class NetworkTests(unittest.TestCase):
     def setUp(self):
@@ -49,3 +49,94 @@ class NetworkTests(unittest.TestCase):
         subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.load_cert_chain(cert,key)
         b=self.broker(tls_context=ctx);c=self.client(b,tls=True,ca_file=None);self.assertTrue(wait(lambda:c.error=='TLS_CERTIFICATE_VERIFY_FAILED',6))
+
+    def test_wss_mqtt_round_trip(self):
+        if not __import__('shutil').which('openssl'):self.skipTest('openssl unavailable')
+        cert=self.path/'cert.pem';key=self.path/'key.pem'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.load_cert_chain(cert,key)
+        b=self.broker(tls_context=ctx,websocket=True)
+        c=self.client(b,tls=True,ca_file=str(cert),transport='websocket',websocket_path='/mqtt')
+        self.assertTrue(wait(lambda:c.ready,6),c.status())
+        self.assertTrue(c.offer('wss','rdf/wss',b'payload'))
+        self.assertTrue(wait(lambda:any(m['topic']=='rdf/wss' for m in b.messages)))
+        self.assertFalse(b.errors)
+
+    def test_wss_echoes_upgrade_close_without_mqtt_connect(self):
+        if not __import__('shutil').which('openssl'):self.skipTest('openssl unavailable')
+        cert=self.path/'cert.pem';key=self.path/'key.pem'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.load_cert_chain(cert,key)
+        b=self.broker(tls_context=ctx,websocket=True,websocket_early_close=True)
+        c=self.client(b,tls=True,ca_file=str(cert),transport='websocket',websocket_path='/mqtt')
+        self.assertTrue(wait(lambda:any(any(event[0]==8 for event in connection['ws_events']) for connection in b.connections),6),b.errors)
+        self.assertEqual(b.mqtt_connect_count,0)
+        self.assertFalse(b.clients)
+
+    def test_wss_mqtt_keepalive_survives_websocket_pings(self):
+        if not __import__('shutil').which('openssl'):self.skipTest('openssl unavailable')
+        cert=self.path/'cert.pem';key=self.path/'key.pem'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.load_cert_chain(cert,key)
+        b=self.broker(tls_context=ctx,websocket=True)
+        c=self.client(b,tls=True,ca_file=str(cert),transport='websocket',websocket_path='/mqtt')
+        self.assertTrue(wait(lambda:c.ready,6),c.status())
+        connection=b.clients[0];started=time.monotonic()
+        while time.monotonic()-started<6.2:
+            b.send_control(connection,9,b'keepalive')
+            time.sleep(.1)
+        self.assertGreaterEqual(b.mqtt_pingreq_count,1)
+
+    def test_wss_close_does_not_send_mqtt_after_close(self):
+        if not __import__('shutil').which('openssl'):self.skipTest('openssl unavailable')
+        cert=self.path/'cert.pem';key=self.path/'key.pem'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.load_cert_chain(cert,key)
+        b=self.broker(tls_context=ctx,websocket=True);received=[]
+        c=self.client(b,[('rdf/inbound',1,True)],lambda *args:received.append(args),
+                      tls=True,ca_file=str(cert),transport='websocket',websocket_path='/mqtt')
+        self.assertTrue(wait(lambda:c.ready,6),c.status())
+        connection=b.clients[0];message=pkt(0x32,text('rdf/inbound')+bytes([0,1,0])+b'payload')
+        b.send_frames(connection,[server_frame(message),server_frame(b'',8)])
+        self.assertTrue(wait(lambda:received,3))
+        self.assertTrue(wait(lambda:any(event[0]=='server-close' for event in connection['ws_events']),3))
+        self.assertFalse(any(event[0]=='after-close' for event in connection['ws_events']))
+
+    def test_wss_mqtt_disconnect_completes_websocket_close(self):
+        if not __import__('shutil').which('openssl'):self.skipTest('openssl unavailable')
+        cert=self.path/'cert.pem';key=self.path/'key.pem'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.load_cert_chain(cert,key)
+        b=self.broker(tls_context=ctx,websocket=True)
+        c=self.client(b,tls=True,ca_file=str(cert),transport='websocket',websocket_path='/mqtt')
+        self.assertTrue(wait(lambda:c.ready,6),c.status())
+        connection=b.clients[0];b.send_packet(connection,pkt(0xe0))
+        self.assertTrue(wait(lambda:any(event[0]=='server-close' for event in connection['ws_events']),3))
+
+    def test_wss_uses_default_ca_store_without_custom_file(self):
+        if not __import__('shutil').which('openssl'):self.skipTest('openssl unavailable')
+        cert=self.path/'cert.pem';key=self.path/'key.pem'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.load_cert_chain(cert,key)
+        b=self.broker(tls_context=ctx,websocket=True)
+        previous=os.environ.get('SSL_CERT_FILE');os.environ['SSL_CERT_FILE']=str(cert)
+        c=None
+        try:
+            c=self.client(b,tls=True,ca_file=None,transport='websocket',websocket_path='/mqtt')
+            self.assertTrue(wait(lambda:c.ready,6),c.status())
+            self.assertTrue(c.offer('system-trust','rdf/system-trust',b'payload'))
+            self.assertTrue(wait(lambda:any(m['topic']=='rdf/system-trust' for m in b.messages)))
+        finally:
+            if c:c.stop()
+            if previous is None:os.environ.pop('SSL_CERT_FILE',None)
+            else:os.environ['SSL_CERT_FILE']=previous
+
+    def test_wss_system_trust_rejects_unknown_ca_before_mqtt(self):
+        if not __import__('shutil').which('openssl'):self.skipTest('openssl unavailable')
+        cert=self.path/'cert.pem';key=self.path/'key.pem'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.load_cert_chain(cert,key)
+        b=self.broker(tls_context=ctx,websocket=True)
+        c=self.client(b,tls=True,ca_file=None,transport='websocket',websocket_path='/mqtt')
+        self.assertTrue(wait(lambda:c.error=='TLS_CERTIFICATE_VERIFY_FAILED',6),c.status())
+        self.assertFalse(b.clients)

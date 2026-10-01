@@ -1,7 +1,6 @@
 from __future__ import annotations
 from collections import deque
 import copy
-import ipaddress
 import queue
 import re
 import threading
@@ -17,6 +16,7 @@ from .monitor import Monitor
 from .control import CommandManager, OPS
 from .helper import call_helper
 from .mqtt import Client
+from .mqtt_ws import validate_mqtt_host,validate_websocket_path
 from .codec import encode, split
 
 class Agent:
@@ -47,13 +47,7 @@ class Agent:
         self.threads=[]
     @staticmethod
     def _validate_mqtt_endpoint(host,port,client_id):
-        if not isinstance(host,str) or not host or len(host)>253 or not host.isascii() or host!=host.strip() or '%' in host:
-            raise ValueError('INVALID_MQTT_HOST')
-        try: ipaddress.ip_address(host)
-        except ValueError:
-            labels=host.split('.')
-            if not all(len(label)<=63 and re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?',label) for label in labels):
-                raise ValueError('INVALID_MQTT_HOST')
+        validate_mqtt_host(host)
         if type(port) is not int or not 1<=port<=65535: raise ValueError('INVALID_MQTT_PORT')
         if not isinstance(client_id,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,47}',client_id):
             raise ValueError('INVALID_MQTT_CLIENT_ID')
@@ -67,12 +61,13 @@ class Agent:
     def _mqtt_defaults(self):
         m=self.cfg['mqtt']
         return {'enabled':m['enabled'],'host':m['host'],'port':m['port'],
-                'client_id':m.get('client_id') or self.cfg['node_id'],'control_custom':False,'bulk_custom':False}
+                'client_id':m.get('client_id') or self.cfg['node_id'],'transport':m.get('transport','tcp'),
+                'websocket_path':m.get('websocket_path','/mqtt'),'control_custom':False,'bulk_custom':False}
     def _mqtt_credentials_path(self,channel,settings):
         return self.mqtt_credentials_paths[channel] if settings[f'{channel}_custom'] else self.mqtt_base_credentials[channel]
     def _mqtt_transport_ready(self,settings,replacements=None):
-        m=self.cfg['mqtt']
-        if m.get('tls') is not True or not m.get('ca_file') or not Path(m['ca_file']).is_file(): return False
+        m=self.cfg['mqtt'];ca_file=m.get('ca_file')
+        if m.get('tls') is not True or (ca_file and not Path(ca_file).is_file()): return False
         replacements=replacements or {}
         return all(channel in replacements or self._credentials_ready(self._mqtt_credentials_path(channel,settings))
                    for channel in ('control','bulk'))
@@ -81,19 +76,29 @@ class Agent:
         if self.demo: return defaults
         try:
             value=strict_json(stable_read(self.mqtt_state_path,4096,nofollow=True))
-            keys={'schema','enabled','host','port','client_id','control_custom','bulk_custom'}
-            if not isinstance(value,dict) or set(value)!=keys or type(value['schema']) is not int or value['schema']!=1:
+            legacy={'schema','enabled','host','port','client_id','control_custom','bulk_custom'}
+            current=legacy|{'transport','websocket_path'}
+            if not isinstance(value,dict) or type(value.get('schema')) is not int:
                 return defaults
-            if type(value['enabled']) is not bool or type(value['control_custom']) is not bool or type(value['bulk_custom']) is not bool:
+            if value['schema']==1 and set(value)==legacy:
+                settings={key:value[key] for key in ('enabled','host','port','client_id','control_custom','bulk_custom')}
+                settings.update(transport='tcp',websocket_path='/mqtt')
+            elif value['schema']==2 and set(value)==current:
+                settings={key:value[key] for key in ('enabled','host','port','client_id','transport','websocket_path',
+                                                      'control_custom','bulk_custom')}
+            else:return defaults
+            if (type(settings['enabled']) is not bool or type(settings['control_custom']) is not bool or
+                type(settings['bulk_custom']) is not bool or settings['transport'] not in ('tcp','websocket')):
                 return defaults
-            self._validate_mqtt_endpoint(value['host'],value['port'],value['client_id'])
-            settings={key:value[key] for key in ('enabled','host','port','client_id','control_custom','bulk_custom')}
+            self._validate_mqtt_endpoint(settings['host'],settings['port'],settings['client_id'])
+            validate_websocket_path(settings['websocket_path'])
             if settings['enabled'] and not self._mqtt_transport_ready(settings): return defaults
             return settings
         except (OSError,KeyError,TypeError,ValueError): return defaults
     def _resolved_mqtt_config(self,settings):
         m=dict(self.cfg['mqtt'])
-        m.update(enabled=settings['enabled'],host=settings['host'],port=settings['port'],client_id=settings['client_id'])
+        m.update(enabled=settings['enabled'],host=settings['host'],port=settings['port'],client_id=settings['client_id'],
+                 transport=settings['transport'],websocket_path=settings['websocket_path'])
         for channel in ('control','bulk'):
             path=self._mqtt_credentials_path(channel,settings)
             m[f'{channel}_credentials_file']=str(path) if path else None
@@ -115,14 +120,18 @@ class Agent:
             settings=dict(self.mqtt_desired); m=self.cfg['mqtt']
             ready={channel:self._credentials_ready(self._mqtt_credentials_path(channel,settings)) for channel in ('control','bulk')}
             ca=bool(m.get('ca_file') and Path(m['ca_file']).is_file())
+            trust='disabled' if not m.get('tls') else 'custom' if ca else 'unavailable' if m.get('ca_file') else 'system'
             return {'enabled':settings['enabled'],'host':settings['host'],'port':settings['port'],
-                    'client_id':settings['client_id'],'tls':bool(m.get('tls')),'ca_configured':ca,
-                    'control_credentials_set':ready['control'],'bulk_credentials_set':ready['bulk'],
+                    'client_id':settings['client_id'],'transport':settings['transport'],
+                    'websocket_path':settings['websocket_path'],'tls':bool(m.get('tls')),'ca_configured':ca,
+                    'trust_mode':trust,'control_credentials_set':ready['control'],'bulk_credentials_set':ready['bulk'],
                     'editable':not self.demo,'apply_pending':self.mqtt_reconfigure.is_set()}
     def configure_mqtt(self,value):
-        if self.demo or not isinstance(value,dict) or set(value)!={'enabled','host','port','client_id','control','bulk'}:
+        if self.demo or not isinstance(value,dict) or set(value)!={'enabled','host','port','client_id','transport','websocket_path','control','bulk'}:
             raise ValueError('INVALID_MQTT_SETTINGS')
         if type(value['enabled']) is not bool: raise ValueError('INVALID_MQTT_SETTINGS')
+        if value['transport'] not in ('tcp','websocket'): raise ValueError('INVALID_MQTT_TRANSPORT')
+        validate_websocket_path(value['websocket_path'])
         self._validate_mqtt_endpoint(value['host'],value['port'],value['client_id'])
         replacements={}
         for channel in ('control','bulk'):
@@ -140,13 +149,14 @@ class Agent:
                 replacements[channel]={'username':username,'password':password}
         with self.mqtt_config_lock:
             settings={'enabled':value['enabled'],'host':value['host'],'port':value['port'],'client_id':value['client_id'],
+                      'transport':value['transport'],'websocket_path':value['websocket_path'],
                       'control_custom':self.mqtt_desired['control_custom'] or 'control' in replacements,
                       'bulk_custom':self.mqtt_desired['bulk_custom'] or 'bulk' in replacements}
             if settings['enabled'] and not self._mqtt_transport_ready(settings,replacements):
                 raise ValueError('MQTT_TLS_OR_CREDENTIALS_UNAVAILABLE')
             for channel,account in replacements.items():
                 atomic_write(self.mqtt_credentials_paths[channel],compact(account),0o600)
-            atomic_write(self.mqtt_state_path,compact({'schema':1,**settings}),0o600)
+            atomic_write(self.mqtt_state_path,compact({'schema':2,**settings}),0o600)
             self.mqtt_desired=settings; self.mqtt_pending=settings; self.mqtt_reconfigure.set()
             return self.mqtt_settings_view()
     def _apply_pending_mqtt(self):

@@ -67,6 +67,19 @@ sudo systemctl enable --now rdf-ground.service
 TLS CA trust, SAN hostname/IP dan waktu mesin harus valid. Plaintext hanya diperbolehkan
 secara eksplisit pada loopback untuk test, bukan10.90.0.1 atau LAN. Tidak ada insecure TLS.
 
+## Transport and certificate trust
+
+The Edge and Ground clients support `mqtt.transport: tcp` (default) and `mqtt.transport: websocket`
+with `mqtt.websocket_path` (default `/mqtt`). WebSocket mode is WSS only: TLS certificate-chain
+and hostname verification happen before the MQTT CONNECT credentials are sent. Plain `ws://` is
+not supported for remote brokers. The Ground provisioner still creates the TCP/TLS listener on
+8883; a WSS connection requires a separate TLS-enabled broker listener and its configured path.
+
+With `tls: true` and `ca_file: null`, Python uses the OS default CA store and keeps certificate
+and hostname verification enabled. A broker certificate issued by a public CA can therefore work
+without installing a private CA bundle. Set `ca_file` to the provisioned CA bundle for a private
+or self-signed broker certificate. Trusting system CAs does not make a private certificate trusted.
+
 ## Readiness dan assurance
 
 CONNECTED setelah CONNACK; READY sesudah semua subscription SUBACK diterima. Penolakan
