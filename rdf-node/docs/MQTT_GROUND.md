@@ -1,4 +1,5 @@
 # MQTT dan Ground companion
+Ringkasan lengkap topic, payload, ACK, receipt, dan contoh Ground: [MQTT_TOPIC_SUMMARY.md](MQTT_TOPIC_SUMMARY.md).
 
 ## Pilihan yang paling mudah
 
