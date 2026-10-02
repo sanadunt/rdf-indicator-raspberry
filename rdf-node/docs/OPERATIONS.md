@@ -91,10 +91,29 @@ Kiosk: dari desktop `systemctl --user stop rdf-kiosk.service`, hapus user unit d
 `~/.config/autostart/rdf-node.desktop`; hapus baris yang berlabel RDF_NODE_KIOSK pada
 `~/.config/labwc/autostart` bila installer menambahkannya. Jangan menghapus entry aplikasi lain.
 
+## Memulihkan intent shutdown yang belum pasti
+
+Shutdown yang dijadwalkan menulis intent lokal pada helper sebelum pemanggilan systemd. Intent ini
+memblokir shutdown kedua pada boot yang sama. Bila UI menampilkan `OUTCOME_UNKNOWN`, periksa
+status Raspberry secara lokal; jangan kirim ulang hanya karena ACK tidak diterima. Jika unit
+shutdown lama sudah tidak aktif, bersihkan intent dengan:
+
+```bash
+sudo rdf-node controls shutdown-reconcile
+```
+
+CLI meminta teks tepat `SHUTDOWN RECONCILED`. Helper root memeriksa unit timer dan service tetap
+yang tersimpan lewat `systemctl show`; ia menghapus marker hanya bila keduanya `not-found/inactive`
+atau `loaded/inactive|failed`. Unit aktif dan kegagalan/hasil systemd yang tidak diketahui
+mempertahankan marker dan menolak rekonsiliasi. Boot ID baru juga mengizinkan pembersihan intent
+lama pada pemeriksaan berikutnya. Prosedur ini hanya merekonsiliasi intent lokal; tidak menguji
+poweroff hardware, tidak membatalkan unit aktif, dan tidak menjadwalkan aksi apa pun. Tes mock
+systemd dan tidak mematikan mesin.
+
 ## Hal yang belum dibuktikan di perangkat
 
 Cold boot, autologin/compositor, touchscreen, PSU/thermal, receiver performance dengan
 Chromium, native config semantics, detached child process scope, callback convergence,
-latency radio, Mosquitto interoperability, old dashboard adapter dan reboot asli belum
- diuji pada perangkat pengguna. Ini acceptance lapangan, bukan hal yang bisa disimpulkan
- hanya dari lulus unit test.
+latency radio, Mosquitto interoperability, old dashboard adapter, reboot/shutdown asli belum
+diuji pada perangkat pengguna. Ini acceptance lapangan, bukan hal yang bisa disimpulkan
+hanya dari lulus unit test.

@@ -16,6 +16,7 @@ Demo CLI tidak membuka koneksi MQTT. Prefix demo tersedia hanya bagi integration
 | cmd/config/get, cmd/config/patch | Ground -> UAV | 1 | tidak |
 | cmd/processing/set, cmd/service/restart | Ground -> UAV | 1 | tidak |
 | cmd/system/reboot/prepare, cmd/system/reboot/execute | Ground -> UAV | 1 | tidak |
+| cmd/system/shutdown/prepare, cmd/system/shutdown/execute | Ground -> UAV | 1 | tidak |
 | cmd/operation/get, cmd/stream/set | Ground -> UAV | 1 | tidak |
 | ack/config, ack/operation | UAV -> Ground | 1 | tidak |
 
@@ -133,10 +134,13 @@ Receiver Ubuntu: `http://127.0.0.1:8791`.
 - `GET /api/v2/angular/latest`: array360, metadata dan `stale`.
 - `GET /api/v2/config`: safe report/proof.
 - `GET /api/v2/operations/latest`: public results, challenge disensor.
+- `GET /api/v2/operations/pending-shutdowns`: ringkasan publik `{"pending":true|false}` dari seluruh jurnal operasi shutdown yang belum gagal pasti; tidak dibatasi 20 record terbaru dan tidak memuat ID.
 - `GET /api/v2/capabilities`: capability yang dilaporkan node.
 - `POST /api/v2/login`: PIN lokal enam digit, field JSON `pin`, HttpOnly cookie+CSRF.
-- `POST /api/v2/commands`: authenticated intent, tidak perlu membangun envelope di frontend.
+- `POST /api/v2/commands`: authenticated intent, tidak perlu membangun envelope di frontend. Ground API menerima `id` klien opsional agar dapat query operation yang sama bila respons execute hilang; bila tidak diberikan, server membuat ID.
 - `POST /api/v2/operation/result`: private result, membutuhkan auth+CSRF.
+
+Saat Ground mengubah sesi node, ia merekonsiliasi seluruh shutdown pending dari jurnal, bukan hanya window latest. Backend Ground hanya menyimpan/mengirim command dengan ID klien yang sudah tervalidasi; browser tidak memilih hasil operasi lain untuk menggantikan ID tersebut.
 
 Gunakan backend Ground lama untuk mengakses API pendamping secara server-to-server lokal.
 Browser frontend pada origin berbeda tidak diberi CORS wildcard. Jangan expose port8791 ke

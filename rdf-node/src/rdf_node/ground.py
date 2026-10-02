@@ -8,6 +8,7 @@ from pathlib import Path
 import queue
 import threading
 import time
+import re
 import uuid
 from .util import now_ms, strict_json, integer, finite, compact
 from .mqtt import Client
@@ -83,6 +84,8 @@ class Ground:
                 if len(self.sid_map)>256: self.sid_map.clear()
                 self.sid_map[sid]=identity
                 if self.node_state.get('sid')!=sid:
+                    for old in self.journal.pending_shutdowns():
+                        self.journal.update(old['id'],'OUTCOME_UNKNOWN',{'reason':'SHUTDOWN_COMPLETION_UNVERIFIED','boot':j['boot']})
                     self.health={}; self.doa={}; self.angular=None; self.node_config={}; self.assembler.clear()
                 self.node_state=j; self.state_seen=time.monotonic(); return
             if suffix=='capabilities': self.caps=j; return
@@ -110,8 +113,14 @@ class Ground:
             elif suffix=='telemetry/health/detail': self.detail=j
             elif suffix in ('ack/config','ack/operation'):
                 old=self.journal.lookup(str(j.get('id','')))
-                stages=TERMINAL|{'ACCEPTED','APPLYING','VERIFYING','REBOOT_SCHEDULED'}
+                stages=TERMINAL|{'ACCEPTED','APPLYING','VERIFYING','REBOOT_SCHEDULED','SHUTDOWN_SCHEDULED'}
                 stage=j.get('status')
+                if not isinstance(stage,str): return
+                if old and old['request'].get('op')=='system.shutdown.execute':
+                    if old['stage']=='SHUTDOWN_SCHEDULED' and stage not in ('SHUTDOWN_SCHEDULED','OUTCOME_UNKNOWN'): return
+                    if old['stage']=='OUTCOME_UNKNOWN' and stage!='OUTCOME_UNKNOWN': return
+                if old and old['request'].get('op')=='system.shutdown.execute' and stage in {
+                        'APPLIED','PERSISTED_UNVERIFIED','REBOOT_SCHEDULED'}: return
                 if old and old['request'].get('sid')==sid and stage in stages:
                     if old['stage'] in TERMINAL and stage not in TERMINAL: return
                     result=j.get('result',{})
@@ -155,11 +164,14 @@ class Ground:
         if not self.client.ready or not self.health or time.monotonic()-self.health_seen>8:
             return {'stage':'REJECTED','error':'NODE_NOT_FRESH'}
         # UI sends an intent; controller creates the envelope from known identity.
-        allowed={'op','changes','desired','profile','target_id','prepare_id','challenge','base_rev'}
+        allowed={'id','op','changes','desired','profile','target_id','prepare_id','challenge','base_rev'}
         if set(obj)-allowed: return {'stage':'REJECTED','error':'UNKNOWN_INTENT_FIELD'}
+        command_id=obj.get('id')
+        if 'id' in obj and (not isinstance(command_id,str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,80}',command_id)):
+            return {'stage':'REJECTED','error':'INVALID_COMMAND_ID'}
         with self.lock:
             request=dict(obj)
-            request.update(v=2,id='ground-'+uuid.uuid4().hex[:20],sid=self.node_state['sid'],boot=self.node_state['boot'],
+            request.update(v=2,id=command_id or 'ground-'+uuid.uuid4().hex[:20],sid=self.node_state['sid'],boot=self.node_state['boot'],
                            issued_ms=now_ms(),expires_ms=now_ms()+15000)
             request.setdefault('base_rev',self.node_config.get('rev'))
             self.journal.accept(request,'ground-local-admin'); self.journal.update(request['id'],'REQUESTED',{})

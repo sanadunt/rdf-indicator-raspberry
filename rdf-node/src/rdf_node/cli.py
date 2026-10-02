@@ -157,13 +157,23 @@ def controls(args):
         if args.reboot:
             if input('Izinkan fitur reboot terproteksi (tetap memerlukan lease sudo)? ketik REBOOT: ').strip()!='REBOOT': raise SystemExit('Tidak diubah.')
             policy['allow_reboot']=True; cfg['control']['reboot_enabled']=True
+        if args.shutdown:
+            if input('Izinkan fitur shutdown terproteksi (tetap memerlukan lease sudo)? ketik SHUTDOWN: ').strip()!='SHUTDOWN': raise SystemExit('Tidak diubah.')
+            policy['allow_shutdown']=True; cfg['control']['shutdown_enabled']=True
         cfg['runtime_mode']='controlled'
         cfg['control']['remote_commands_enabled']=args.remote
         atomic_write(path,yaml.safe_dump(policy,sort_keys=False).encode(),0o600)
         save_config(Path(args.config),cfg); chown_config(args.config)
         subprocess.run(['systemctl','daemon-reload'],check=True)
         subprocess.run(['systemctl','restart','rdf-control-helper.service','rdf-edge.service'],check=True)
-        print('Approval tersimpan. Buka lease maintenance terpisah untuk lifecycle/reboot.')
+        print('Approval tersimpan. Buka lease maintenance terpisah untuk lifecycle, reboot, atau shutdown.')
+    elif args.action=='shutdown-reconcile':
+        from .helper import call_helper
+        print('Helper hanya menghapus intent setelah systemd melaporkan unit timer/service shutdown tidak aktif.')
+        if input('Ketik SHUTDOWN RECONCILED setelah memeriksa status Pi lokal: ').strip()!='SHUTDOWN RECONCILED':
+            raise SystemExit('Tidak diubah.')
+        result=call_helper(cfg['control']['helper_socket'],{'op':'system.shutdown.reconcile'})
+        print(json.dumps(result))
     elif args.action in ('maintenance-open','maintenance-close'):
         from .helper import call_helper
         result=call_helper(cfg['control']['helper_socket'],{'op':'maintenance.open','seconds':args.seconds} if args.action.endswith('open') else {'op':'maintenance.close'})
@@ -231,8 +241,8 @@ def main():
         if name=='set-pin': s.add_argument('--pin-file')
         if name=='import-bundle': s.add_argument('directory')
         if name=='controls':
-            s.add_argument('action',choices=['approve','maintenance-open','maintenance-close']);s.add_argument('--settings',action='store_true')
-            s.add_argument('--lifecycle',action='store_true');s.add_argument('--reboot',action='store_true');s.add_argument('--remote',action='store_true')
+            s.add_argument('action',choices=['approve','maintenance-open','maintenance-close','shutdown-reconcile']);s.add_argument('--settings',action='store_true')
+            s.add_argument('--lifecycle',action='store_true');s.add_argument('--reboot',action='store_true');s.add_argument('--shutdown',action='store_true');s.add_argument('--remote',action='store_true')
             s.add_argument('--seconds',type=int,default=300)
     s=sub.add_parser('demo');s.add_argument('--port',type=int,default=8790);s.add_argument('--state-dir')
     s=sub.add_parser('helper');s.add_argument('--policy',default='/etc/rdf-node/helper.yaml')

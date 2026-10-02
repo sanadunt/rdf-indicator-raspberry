@@ -23,7 +23,7 @@ DEFAULT_POLICY={
     'allowed_user':'rdf-edge', 'socket':'/run/rdf-node-control/control.sock',
     'state_dir':'/var/lib/rdf-node-control', 'settings_path':None,
     'engine_service':None, 'allow_config':False, 'single_writer_confirmed':False,
-    'allow_lifecycle':False, 'lifecycle_audited':False, 'allow_reboot':False,
+    'allow_lifecycle':False, 'lifecycle_audited':False, 'allow_reboot':False, 'allow_shutdown':False,
     'frequency_min_hz':24000000, 'frequency_max_hz':1766000000,
     'bandwidth_max_hz':2400000,
     'gain_values_db':[0.0,0.9,1.4,2.7,3.7,7.7,8.7,12.5,14.4,15.7,16.6,19.7,20.7,22.9,25.4,28.0,29.7,32.8,33.8,36.4,37.2,38.6,40.2,42.1,43.4,43.9,44.5,48.0,49.6],
@@ -116,7 +116,10 @@ def call_helper(sock_path,request,timeout=8):
             buf+=b
             if len(buf)>16384: raise HelperError('HELPER_RESPONSE_LIMIT')
         result=strict_json(buf.split(b'\n',1)[0])
-        if not result.get('ok'): raise HelperError(result.get('error','HELPER_FAILED'))
+        if not result.get('ok'):
+            error=result.get('error','HELPER_FAILED')
+            if error=='SYSTEMD_ACTION_OUTCOME_UNKNOWN': raise TimeoutError(error)
+            raise HelperError(error)
         return result['result']
 
 class Controller:
@@ -133,6 +136,54 @@ class Controller:
             j=strict_json((self.state/'maintenance.json').read_bytes())
             return j.get('boot')==self.boot and time.monotonic()<j.get('until',0)
         except (ValueError,OSError): return False
+    def _remove_state_file(self,path):
+        try: path.unlink()
+        except FileNotFoundError: return False
+        fd=os.open(self.state,os.O_RDONLY|os.O_DIRECTORY)
+        try: os.fsync(fd)
+        finally: os.close(fd)
+        return True
+    def _shutdown_scheduled(self):
+        path=self.state/'shutdown-intent.json'
+        try: intent=strict_json(path.read_bytes())
+        except FileNotFoundError: return False
+        except (OSError,ValueError): return True
+        if not isinstance(intent,dict) or not isinstance(intent.get('boot'),str) or not intent['boot']: return True
+        if intent['boot']==self.boot: return True
+        self._remove_state_file(path)
+        return False
+    def _reconcile_shutdown(self):
+        path=self.state/'shutdown-intent.json'
+        try: intent=strict_json(path.read_bytes())
+        except FileNotFoundError: return {'cleared':False,'reason':'NO_PENDING_SHUTDOWN'}
+        except (OSError,ValueError): raise HelperError('SHUTDOWN_INTENT_INVALID')
+        if not isinstance(intent,dict) or not isinstance(intent.get('boot'),str) or not intent['boot']:
+            raise HelperError('SHUTDOWN_INTENT_INVALID')
+        if intent['boot']!=self.boot:
+            self._remove_state_file(path)
+            return {'cleared':True,'reason':'NEW_BOOT','boot':self.boot}
+        import re
+        unit=intent.get('unit')
+        if not isinstance(unit,str) or not re.fullmatch(r'rdf-node-shutdown-[0-9a-f]{10}',unit):
+            raise HelperError('SHUTDOWN_INTENT_INVALID')
+        for suffix in ('.timer','.service'):
+            try:
+                result=subprocess.run(['/usr/bin/systemctl','show','--no-pager',
+                    '--property=LoadState,ActiveState',unit+suffix],timeout=5,
+                    stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+            except (OSError,subprocess.TimeoutExpired) as error:
+                raise HelperError('SHUTDOWN_UNIT_STATUS_UNKNOWN') from error
+            if result.returncode:
+                raise HelperError('SHUTDOWN_UNIT_STATUS_UNKNOWN')
+            state=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
+            load=state.get('LoadState'); active=state.get('ActiveState')
+            if load=='not-found' and active=='inactive': continue
+            if load=='loaded' and active in ('inactive','failed'): continue
+            if load=='loaded' and active in ('active','activating','reloading','deactivating'):
+                raise HelperError('SHUTDOWN_UNIT_ACTIVE')
+            raise HelperError('SHUTDOWN_UNIT_STATUS_UNKNOWN')
+        self._remove_state_file(path)
+        return {'cleared':True,'reason':'NO_ACTIVE_SHUTDOWN_UNIT','boot':self.boot}
     def _run(self,args):
         # Only called with argument arrays constructed below, never shell=True.
         p=subprocess.run(args,timeout=10,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
@@ -145,7 +196,7 @@ class Controller:
         return dict(maintenance=self.maintenance(),desired=desired,
                     allow_config=self.policy['allow_config'] and self.policy['single_writer_confirmed'],
                     allow_lifecycle=self.policy['allow_lifecycle'] and self.policy['lifecycle_audited'],
-                    allow_reboot=self.policy['allow_reboot'])
+                    allow_reboot=self.policy['allow_reboot'],allow_shutdown=self.policy['allow_shutdown'])
     def reconcile_intent(self):
         if not (self.policy['allow_lifecycle'] and self.policy['lifecycle_audited'] and self.policy['engine_service']):
             return
@@ -160,13 +211,16 @@ class Controller:
         self._run(['/usr/bin/systemctl','--no-block','start' if desired=='RUNNING' else 'stop',self.policy['engine_service']])
     def dispatch(self,req,uid):
         if uid not in (0,self.uid): raise HelperError('PEER_UID_DENIED')
-        if not isinstance(req,dict) or 'op' not in req: raise HelperError('INVALID_RPC')
+        if not isinstance(req,dict) or not isinstance(req.get('op'),str): raise HelperError('INVALID_RPC')
         op=req['op']
         keys={'status':{'op'},'maintenance.open':{'op','seconds'},'maintenance.close':{'op'},
               'config.patch':{'op','changes','expected_digest'},'processing.set':{'op','desired'},
               'service.restart':{'op'},'system.reboot.prepare':{'op','id'},
-              'system.reboot.execute':{'op','id','challenge'}}
-        if op not in keys or set(req)-keys[op]: raise HelperError('UNKNOWN_RPC_FIELD_OR_OPERATION')
+              'system.reboot.execute':{'op','id','challenge'},
+              'system.shutdown.prepare':{'op','id'},'system.shutdown.execute':{'op','id','challenge'},
+              'system.shutdown.reconcile':{'op'}}
+        if op not in keys: raise HelperError('UNSUPPORTED_RPC')
+        if set(req)-keys[op]: raise HelperError('INVALID_RPC_ARGUMENT')
         if op=='status': return self.state_info()
         if op.startswith('maintenance.'):
             if uid!=0: raise HelperError('MAINTENANCE_REQUIRES_LOCAL_SUDO')
@@ -174,6 +228,9 @@ class Controller:
             atomic_write(self.state/'maintenance.json',compact({'boot':self.boot,'until':time.monotonic()+sec}))
             return {'maintenance':sec>0,'seconds':sec}
         with self.lock:
+            if op=='system.shutdown.reconcile':
+                if uid!=0: raise HelperError('SHUTDOWN_RECONCILE_REQUIRES_ROOT')
+                return self._reconcile_shutdown()
             if op=='config.patch':
                 if not self.policy['allow_config'] or not self.policy['single_writer_confirmed'] or not self.policy['settings_path']:
                     raise HelperError('CONFIG_ADAPTER_NOT_APPROVED')
@@ -200,22 +257,47 @@ class Controller:
                 action='restart' if op=='service.restart' else 'start' if desired=='RUNNING' else 'stop'
                 self._run(['/usr/bin/systemctl','--no-block',action,self.policy['engine_service']])
                 return {'requested':desired,'action':action,'accepted':True}
-            if op.startswith('system.reboot.'):
-                if not self.policy['allow_reboot']: raise HelperError('REBOOT_DISABLED')
+            if op.startswith(('system.reboot.','system.shutdown.')):
+                shutdown=op.startswith('system.shutdown.')
+                action='shutdown' if shutdown else 'reboot'
+                if not self.policy['allow_shutdown' if shutdown else 'allow_reboot']:
+                    raise HelperError('SHUTDOWN_DISABLED' if shutdown else 'REBOOT_DISABLED')
                 if not self.maintenance(): raise HelperError('MAINTENANCE_REQUIRED')
                 id=req.get('id')
-                if not isinstance(id,str) or not 1<=len(id)<=80: raise HelperError('INVALID_REBOOT_ID')
+                if not isinstance(id,str) or not 1<=len(id)<=80:
+                    raise HelperError('INVALID_SHUTDOWN_ID' if shutdown else 'INVALID_REBOOT_ID')
                 if op.endswith('prepare'):
+                    if shutdown and self._shutdown_scheduled():
+                        raise HelperError('SHUTDOWN_ALREADY_SCHEDULED')
+                    now=time.monotonic()
+                    for challenge_id in tuple(self.challenges):
+                        if now>self.challenges[challenge_id][1]:
+                            del self.challenges[challenge_id]
+                    if id not in self.challenges and len(self.challenges)>=32:
+                        raise HelperError('TOO_MANY_ACTIVE_CHALLENGES')
                     token=secrets.token_urlsafe(24)
-                    self.challenges={id:(hashlib.sha256(token.encode()).digest(),time.monotonic()+30)}
+                    self.challenges[id]=(hashlib.sha256(token.encode()).digest(),now+30,action)
                     return {'challenge':token,'valid_seconds':30,'prepare_id':id}
                 previous=self.challenges.pop(id,None)
                 token=req.get('challenge','')
-                if not isinstance(token,str) or not previous or time.monotonic()>previous[1] or not secrets.compare_digest(hashlib.sha256(token.encode()).digest(),previous[0]):
-                    raise HelperError('REBOOT_CHALLENGE_INVALID')
-                atomic_write(self.state/'reboot-intent.json',compact({'id':id,'boot':self.boot}))
-                self._run(['/usr/bin/systemd-run','--quiet','--unit=rdf-node-reboot-'+secrets.token_hex(5),'--on-active=5s','/usr/bin/systemctl','reboot'])
-                return {'scheduled':True,'delay_seconds':5,'boot_before':self.boot}
+                valid=(isinstance(token,str) and previous is not None and previous[2]==action
+                       and time.monotonic()<=previous[1]
+                       and secrets.compare_digest(hashlib.sha256(token.encode()).digest(),previous[0]))
+                if not valid:
+                    raise HelperError('SHUTDOWN_CHALLENGE_INVALID' if shutdown else 'REBOOT_CHALLENGE_INVALID')
+                if shutdown and self._shutdown_scheduled():
+                    raise HelperError('SHUTDOWN_ALREADY_SCHEDULED')
+                unit='rdf-node-'+action+'-'+secrets.token_hex(5)
+                atomic_write(self.state/f'{action}-intent.json',compact({'id':id,'boot':self.boot,**({'unit':unit} if shutdown else {})}))
+                command=['/usr/bin/systemd-run','--quiet','--unit='+unit,'--on-active=5s',
+                         '/usr/bin/systemctl','poweroff' if shutdown else 'reboot']
+                try:
+                    self._run(command)
+                except HelperError as error:
+                    if str(error)=='SYSTEMD_ACTION_FAILED':
+                        raise TimeoutError('SYSTEMD_ACTION_OUTCOME_UNKNOWN') from error
+                    raise
+                return {'scheduled':True,'delay_seconds':5,'action':action}
         raise HelperError('UNSUPPORTED_RPC')
 
 class Handler(socketserver.StreamRequestHandler):
@@ -230,7 +312,8 @@ class Handler(socketserver.StreamRequestHandler):
             result=self.server.controller.dispatch(req,uid)
             self.wfile.write(compact({'ok':True,'result':result})+b'\n')
         except Exception as e:
-            msg=str(e) if isinstance(e,ValueError) and str(e).isupper() else type(e).__name__.upper()
+            msg='SYSTEMD_ACTION_OUTCOME_UNKNOWN' if isinstance(e,(subprocess.TimeoutExpired,TimeoutError)) else (
+                str(e) if isinstance(e,ValueError) and str(e).isupper() else type(e).__name__.upper())
             try: self.wfile.write(compact({'ok':False,'error':msg})+b'\n')
             except OSError: pass
 
@@ -242,7 +325,7 @@ def serve(policy_file):
     policy=dict(DEFAULT_POLICY)
     if not isinstance(value,dict) or set(value)-set(policy): raise SystemExit('Unknown helper policy key.')
     policy.update(value)
-    for k in ('allow_config','single_writer_confirmed','allow_lifecycle','lifecycle_audited','allow_reboot'):
+    for k in ('allow_config','single_writer_confirmed','allow_lifecycle','lifecycle_audited','allow_reboot','allow_shutdown'):
         if type(policy[k]) is not bool: raise SystemExit('Boolean policy required.')
     c=Controller(policy)
     c.reconcile_intent()

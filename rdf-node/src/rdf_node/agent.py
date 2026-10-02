@@ -331,7 +331,8 @@ class Agent:
                 'config_patch':c['config_patch_enabled'] and self.helper_status.get('allow_config',False),
                 'processing':c['processing_enabled'] and self.helper_status.get('allow_lifecycle',False),
                 'restart':c['restart_enabled'] and self.helper_status.get('allow_lifecycle',False),
-                'reboot':c['reboot_enabled'] and self.helper_status.get('allow_reboot',False)}
+                'reboot':c['reboot_enabled'] and self.helper_status.get('allow_reboot',False),
+                'shutdown':c['shutdown_enabled'] and self.helper_status.get('allow_shutdown',False)}
     def _offer(self,key,suffix,payload,qos=0,retain=False,expiry=None,priority=2,sent=None,bulk=False):
         client=self.clients.get('bulk' if bulk else 'control')
         if not client: return False

@@ -1,4 +1,4 @@
-# Kontrol RF, lifecycle dan reboot
+# Kontrol RF, lifecycle, reboot dan shutdown
 
 ## Default dan approval
 
@@ -13,12 +13,22 @@ Approval dari terminal Raspberry yang dipercaya:
 sudo rdf-node controls approve --settings --remote
 ```
 
-Pilih flags sesuai kebutuhan. Lifecycle/reboot terpisah:
+Pilih flags sesuai kebutuhan. Lifecycle dan reboot tetap terpisah:
 
 ```bash
 sudo rdf-node controls approve --lifecycle --reboot --remote
 sudo rdf-node controls maintenance-open --seconds 300
 ```
+
+Shutdown OS memerlukan opt-in terpisah:
+
+```bash
+sudo rdf-node controls approve --shutdown --remote
+```
+
+Wizard meminta ketikan `SHUTDOWN`; `allow_shutdown` dan `shutdown_enabled` default false.
+Ground hanya dapat mengirimnya bila `remote_commands_enabled` juga aktif. Shutdown tidak
+memerlukan atau mengubah ownership unit SDR.
 
 Catatan: flags approval menambah capability yang disetujui; remote flag mengatur apakah
 permintaan mutating dari Ground boleh diterima. Untuk mencabut capability, edit
@@ -102,6 +112,19 @@ manual. Release ini tidak menambahkan recovery loop DSP otomatis yang kedua.
 Lease maintenance hanya dapat dibuka melalui sudo lokal/trusted management, 30..900 detik,
 terikat boot dan monotonic deadline. Remote Ground tidak bisa membuka lease dengan klaim
 role di payload. Jika Raspberry tidak kembali, outcome tetap belum diketahui.
+
+## Shutdown Raspberry
+
+1. `system.shutdown.prepare` hanya berhasil bila approval helper/config dan maintenance lease lokal aktif; Ground juga memerlukan `remote_commands_enabled`.
+2. Prepare menghasilkan challenge sekali pakai, terikat operation ID, hanya berlaku 30 detik dan tidak dapat dipakai untuk reboot.
+3. UI meminta konfirmasi akhir. `system.shutdown.execute` menulis jurnal durable `SHUTDOWN_SCHEDULED` sebelum helper dipanggil.
+4. Helper menyimpan intent root-only, lalu menjadwalkan `/usr/bin/systemctl poweroff` melalui unit transient tetap setelah 5 detik. Tidak ada shell, nama unit dari payload, atau restart SDR/bridge.
+5. Intent current-boot memblokir prepare dan execute berikutnya di semua sesi/ID, mencegah jadwal poweroff duplikat; pemeriksaan setelah boot baru membuang intent lama.
+6. `SHUTDOWN_SCHEDULED` bukan `APPLIED`: tidak ada bukti host telah mati. Timeout, kehilangan ACK, restart agent/Ground, atau node kembali membuat hasil `OUTCOME_UNKNOWN`. UI tidak mengulang otomatis dan mempertahankan hasil yang belum pasti.
+7. `GET /api/v2/operations/pending-shutdowns` merangkum semua shutdown yang belum berstatus gagal pasti, bukan hanya halaman operasi terbaru. Ground juga merekonsiliasi seluruh operation ID pending saat sesi node berubah.
+8. Setelah memeriksa Pi secara lokal, operator dapat menjalankan `sudo rdf-node controls shutdown-reconcile`. CLI root meminta teks `SHUTDOWN RECONCILED`; helper memeriksa timer dan service unit tersimpan lewat `systemctl show`, lalu menghapus intent hanya bila keduanya tidak aktif/tidak ada. Unit aktif atau status yang tidak diketahui tetap memblokir shutdown baru.
+
+Perintah rekonsiliasi hanya membersihkan intent setelah bukti systemd lokal; ia tidak membatalkan unit aktif dan tidak membuktikan host sebelumnya telah mati. Untuk menyalakan Raspberry lagi diperlukan akses lokal/power-cycle. Tes mem-mock helper/systemd action dan tidak menjalankan poweroff nyata.
 
 ## Jurnal dan query
 

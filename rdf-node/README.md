@@ -6,9 +6,9 @@ Paket ini berisi source aplikasi, installer, service systemd, UI lokal, codec gr
 MQTT 5/TLS, command manager, helper kontrol terbatas, pengujian, dan panduan operasi.
 Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Conda SDR.
 
-> Mulai dengan mode read-only. Kontrol RF/start/stop/restart/reboot sudah memiliki jalur
-> implementasi, tetapi harus diaktifkan dengan approval lokal setelah path, unit SDR,
-> writer settings, dan watchdog perangkat diverifikasi. Installer tidak menebaknya.
+> Mulai dengan mode read-only. Kontrol RF, lifecycle SDR, reboot, dan shutdown memiliki
+> jalur terproteksi, tetapi perlu approval lokal dan maintenance lease; shutdown juga
+> memerlukan opt-in terpisah. Installer tidak menebak kebijakan perangkat.
 >
 > Pengujian lokal paket bukan bukti uji pada Raspberry/layar/T900 milik Anda.
 > Baca [TEST_REPORT.md](docs/TEST_REPORT.md) dan [batas implementasi](docs/IMPLEMENTATION.md).
@@ -29,9 +29,10 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
 - Daftar Data memuat topic/payload keluar dan command dari Ground; angular terkompresi, raw IQ tidak dikirim.
 - Jurnal command SQLite, ID dedup, expiry/session/revision validation, satu mutasi aktif.
 - Safe settings patch, Start/Stop seluruh stack SDR yang di-approve, Restart stack,
-  serta reboot Raspberry prepare/execute dengan lease maintenance lokal.
+  reboot Raspberry prepare/execute, serta shutdown Pi dengan approval terpisah.
 - Receiver Ground dan preview grafik/API di port **8791**, terpisah dari dashboard lama.
 - Mode DEMO yang tidak mengirim MQTT dan tidak menulis hardware.
+- Kedua panel mempertahankan snapshot terakhir sebagai STALE saat API gagal; Retry melakukan fetch segera, polling rutin tetap berjalan, dan tidak ada recovery mutatif otomatis.
 
 **Tidak dikirim:** raw IQ, waterfall, audio, video, logs panjang, atau full settings rutin.
 **Tidak dipasang:** driver layar, autopilot, engine KrakenSDR, atau konfigurasi radio/PPP baru.
@@ -275,12 +276,20 @@ Jangan memberi helper kewenangan unit yang belum diaudit.
 sudo rdf-node controls approve --settings --lifecycle --reboot --remote
 ```
 
-Wizard meminta konfirmasi terpisah. Anda boleh memilih hanya `--settings --remote` terlebih
- dahulu. Pengambilalihan lifecycle mendeteksi watchdog lama yang dikenal dan meminta izin
+Shutdown OS opsional dan tidak diaktifkan oleh flags lain:
+
+```bash
+sudo rdf-node controls approve --shutdown --remote
+```
+
+Wizard meminta konfirmasi terpisah. `--shutdown` meminta jawaban `SHUTDOWN`; fitur ini
+memerlukan opt-in helper/config tersendiri dan tidak bergantung pada approval lifecycle.
+Pengambilalihan lifecycle mendeteksi watchdog lama yang dikenal dan meminta izin
 sebelum menonaktifkannya; watchdog lain tetap harus diaudit. Ia memasang stop-intent guard
 pada **unit SDR yang disetujui**, bukan unit PPP atau bridge.
 
-Untuk Start/Stop/Restart stack dan reboot, buka lease dari sesi maintenance terpercaya:
+Untuk Start/Stop/Restart stack, reboot, atau shutdown, buka lease dari sesi maintenance
+terpercaya:
 
 ```bash
 sudo rdf-node controls maintenance-open --seconds 300
@@ -288,8 +297,19 @@ sudo rdf-node controls maintenance-open --seconds 300
 
 Panel Config -> Login -> Kontrol menggunakan manager yang sama dengan Ground.
 Start/Stop berarti **seluruh unit stack SDR**, bukan fungsi DSP-only yang belum diintegrasikan.
-Reboot memerlukan Prepare lalu konfirmasi Execute, challenge sekali pakai 30 detik,
-lease aktif, jurnal durable, dan verifikasi boot baru. Tidak ada health selama OS reboot.
+Reboot memerlukan Prepare lalu konfirmasi Execute, challenge sekali pakai 30 detik, lease aktif,
+jurnal durable, dan verifikasi boot baru.
+Shutdown Pi memakai prepare/execute, challenge sekali pakai, konfirmasi terakhir, dan lease aktif.
+Sebelum menjadwalkan, helper menyimpan intent durable dan menolak semua prepare/execute shutdown
+berikutnya pada boot yang sama, termasuk dari sesi UI lain. Helper menjadwalkan
+`/usr/bin/systemctl poweroff` melalui unit transient tetap dalam 5 detik; `SHUTDOWN_SCHEDULED`
+bukan bukti OS sudah mati. API dan kedua panel mempertahankan status belum pasti lintas polling
+dan sesi; tidak ada retry otomatis. Setelah memeriksa Pi secara lokal, gunakan `sudo rdf-node
+controls shutdown-reconcile` hanya bila unit shutdown lama tidak aktif. Perintah root ini
+meminta konfirmasi ketik `SHUTDOWN RECONCILED` dan helper hanya menghapus intent setelah
+`systemctl show` memastikan unit timer serta service tidak aktif; status aktif/tidak diketahui
+ditolak. Marker boot sebelumnya dibersihkan pada pemeriksaan helper berikutnya. Perangkat harus
+dinyalakan lagi secara lokal.
 
 Pengubahan frekuensi memasukkan center dan VFO0 secara bersamaan. Read-back file saja
 menghasilkan **PERSISTED_UNVERIFIED**, bukan APPLIED. Beberapa engine tidak menyediakan
@@ -313,8 +333,8 @@ Tes lokal:
 python3 run.py selftest
 ```
 
-Tes memakai temporary files, broker fixture loopback, serta mock untuk systemd/reboot.
-Tidak ada perintah reboot nyata dari test suite. Jalankan tanpa sudo bila tidak diperlukan.
+Tes memakai temporary files, broker fixture loopback, serta mock untuk systemd/reboot/shutdown.
+Tidak ada perintah reboot atau shutdown nyata dari test suite. Jalankan tanpa sudo bila tidak diperlukan.
 
 | Masalah | Langkah |
 |---|---|

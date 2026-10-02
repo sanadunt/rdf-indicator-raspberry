@@ -137,6 +137,8 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/v2/capabilities': return self.reply(200,app.capabilities())
             if p=='/api/v2/operations/latest':
                 return self.reply(200,app.operations_view() if self.server.ground else [app.commands.public(x) for x in app.journal.latest()])
+            if p=='/api/v2/operations/pending-shutdowns':
+                return self.reply(200,{'pending':bool(app.journal.pending_shutdowns())})
             if p=='/api/v2/angular/latest':
                 if self.server.ground: return self.reply(200,app.angular_view())
                 r=app.source.record

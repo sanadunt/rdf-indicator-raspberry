@@ -12,6 +12,7 @@ OPS={
     'config.get':'cmd/config/get', 'config.patch':'cmd/config/patch',
     'processing.set':'cmd/processing/set', 'service.restart':'cmd/service/restart',
     'system.reboot.prepare':'cmd/system/reboot/prepare', 'system.reboot.execute':'cmd/system/reboot/execute',
+    'system.shutdown.prepare':'cmd/system/shutdown/prepare', 'system.shutdown.execute':'cmd/system/shutdown/execute',
     'operation.get':'cmd/operation/get', 'stream.set':'cmd/stream/set',
 }
 READ_OPS={'config.get','operation.get'}
@@ -72,7 +73,8 @@ class CommandManager:
             else:
                 flag={'config.patch':'config_patch_enabled','processing.set':'processing_enabled',
                       'service.restart':'restart_enabled','system.reboot.prepare':'reboot_enabled',
-                      'system.reboot.execute':'reboot_enabled'}[op]
+                      'system.reboot.execute':'reboot_enabled','system.shutdown.prepare':'shutdown_enabled',
+                      'system.shutdown.execute':'shutdown_enabled'}[op]
                 if self.cfg['runtime_mode']!='controlled' or not self.cfg['control'][flag]: raise ValueError('CAPABILITY_DISABLED')
                 if op=='processing.set' and request.get('desired') not in ('RUNNING','STOPPED'): raise ValueError('INVALID_DESIRED_STATE')
                 if op=='config.patch':
@@ -169,14 +171,15 @@ class CommandManager:
                         return 'APPLIED',{'proof':'NEW_FRESH_DAQ_AND_UNIT_ACTIVE','scope':'SDR_STACK','desired':'RUNNING'}
                 self.stop_event.wait(0.25)
             return 'OUTCOME_UNKNOWN',{'reason':'LIFECYCLE_VERIFICATION_TIMEOUT','accepted':True}
-        if op=='system.reboot.prepare':
-            result=self._helper({'op':op,'id':r['id']})
-            return 'APPLIED',result
-        if op=='system.reboot.execute':
-            if not isinstance(r.get('prepare_id'),str) or not isinstance(r.get('challenge'),str): raise ValueError('REBOOT_PREPARE_REQUIRED')
-            # Durable marker BEFORE calling the helper; restart reconciles boot ID.
-            self._stage(r,'REBOOT_SCHEDULED',{'boot_before':a.boot})
+        if op in ('system.reboot.prepare','system.shutdown.prepare'):
+            return 'APPLIED',self._helper({'op':op,'id':r['id']})
+        if op in ('system.reboot.execute','system.shutdown.execute'):
+            action='shutdown' if op.startswith('system.shutdown.') else 'reboot'
+            if not isinstance(r.get('prepare_id'),str) or not isinstance(r.get('challenge'),str):
+                raise ValueError(f'{action.upper()}_PREPARE_REQUIRED')
+            stage=f'{action.upper()}_SCHEDULED'
+            self._stage(r,stage,{'boot_before':a.boot})
             result=self._helper({'op':op,'id':r['prepare_id'],'challenge':r['challenge']})
-            a.planned_reboot=True
-            return 'REBOOT_SCHEDULED',result
+            if action=='reboot': a.planned_reboot=True
+            return stage,result
         raise ValueError('UNSUPPORTED_OPERATION')

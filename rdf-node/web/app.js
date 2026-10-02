@@ -1,6 +1,8 @@
 'use strict';
 const $=id=>document.getElementById(id);
-let snapshot={}, csrf=null, authenticated=false, lastSeq=null, lastProgress=0, lastApi=0, linkData=false, hostPage=false, lastTouch=Date.now(), lastAdminSessionRefresh=0, adminSessionRefreshPending=false, pinKeyHandler=null, modalReturnFocus=null, mqttKeyboardDismiss=null;
+function readShutdownUncertainty(){try{return localStorage.getItem('rdf-node-edge-shutdown-uncertain')==='1';}catch{return false;}}
+function setShutdownUncertainty(value){shutdownUncertain=value;try{if(value)localStorage.setItem('rdf-node-edge-shutdown-uncertain','1');else localStorage.removeItem('rdf-node-edge-shutdown-uncertain');}catch{}}
+let snapshot={}, csrf=null, authenticated=false, lastSeq=null, lastProgress=0, lastApi=0, linkData=false, hostPage=false, lastTouch=Date.now(), lastAdminSessionRefresh=0, adminSessionRefreshPending=false, pinKeyHandler=null, modalReturnFocus=null, mqttKeyboardDismiss=null, pollPending=false, pollAgain=false, pollTimer=null, shutdownUncertain=readShutdownUncertainty(), shutdownHistoryChecked=false, shutdownHistoryAt=0, shutdownHistoryRequest=null;
 const good=['UP','CONNECTED','RECEIVING','HEALTHY','SYNCED','APPLIED','REPLY'];
 const bad=['ERROR','LOST','DEGRADED','FAILED','UNAVAILABLE'];
 const ADMIN_SESSION_REFRESH_MS=20000, ADMIN_SESSION_ACTIVITY_MS=30000, ADMIN_SESSION_CHECK_MS=10000;
@@ -13,7 +15,7 @@ function rows(id,values){const e=$(id);e.replaceChildren(...values.map(v=>row(..
 const mqttTopics=[
  ['KELUAR / RASPBERRY -> GROUND',[
   ['availability','QoS 1 / retained','Online JSON: v,sid,online,t; offline LWT: v,sid,online,reason.'],
-  ['capabilities','QoS 1 / retained','Payload: v,sid,boot,instance,version,mode,codecs,angle,native_axis,count,profiles,scope,helper_available,maintenance,remote_commands,config_patch,processing,restart,reboot.'],
+  ['capabilities','QoS 1 / retained','Payload: v,sid,boot,instance,version,mode,codecs,angle,native_axis,count,profiles,scope,helper_available,maintenance,remote_commands,config_patch,processing,restart,reboot,shutdown.'],
   ['state','QoS 1 / retained','Payload: v,sid,boot,instance,t,run,daq,cfg,profile,clock.'],
   ['config/reported','QoS 1 / retained','Payload: v,sid,rev,t,proof,digest,effective (hanya safe settings, bukan full settings).'],
   ['telemetry/health','QoS 0 / ~1 dtk','Payload: v,sid,q,t,run,daq,drop,age,temp,clk,rev; run/DAQ/clock dikirim sebagai kode.'],
@@ -31,6 +33,8 @@ const mqttTopics=[
   ['cmd/service/restart','QoS 1','Restart stack yang disetujui lokal.'],
   ['cmd/system/reboot/prepare','QoS 1','Menyiapkan reboot dengan policy/maintenance lokal.'],
   ['cmd/system/reboot/execute','QoS 1','Eksekusi reboot setelah challenge dan approval lokal.'],
+  ['cmd/system/shutdown/prepare','QoS 1','Menyiapkan shutdown dengan policy/maintenance lokal.'],
+  ['cmd/system/shutdown/execute','QoS 1','Eksekusi shutdown setelah challenge dan approval lokal.'],
   ['cmd/operation/get','QoS 1','Permintaan status operation.'],
   ['cmd/stream/set','QoS 1','Perubahan profil telemetry bila remote control diizinkan.']
  ]]
@@ -96,8 +100,66 @@ function render(s){
  renderData(s);
 }
 async function get(path){const response=await fetch(path,{cache:'no-store',signal:AbortSignal.timeout(1200)});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json();}
-async function post(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf||''},body:JSON.stringify(body),signal:AbortSignal.timeout(6000)});let j=await response.json();if(!response.ok)throw new Error(j.error||j.result?.error||j.stage||'Permintaan gagal');return j;}
-async function poll(){try{const s=await get('/api/v2/snapshot');lastApi=Date.now();if(s.snapshot_seq!==lastSeq&&s.snapshot_seq!=null){lastSeq=s.snapshot_seq;lastProgress=Date.now();}snapshot=s;render(s);}catch(e){/* local watchdog displays staleness independently */}finally{setTimeout(poll,500);}}
+async function post(path,body,timeout=6000){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf||''},body:JSON.stringify(body),signal:AbortSignal.timeout(timeout)});let j=await response.json();if(!response.ok){const error=new Error(j.error||j.result?.error||j.stage||'Permintaan gagal');error.status=response.status;throw error;}return j;}
+const shutdownFailureStages=new Set(['FAILED','REJECTED','EXPIRED','CONFLICT','CANCELLED']);
+async function checkShutdownHistory(force=false,clearIfEmpty=false){
+ if(!force&&shutdownHistoryChecked&&Date.now()-shutdownHistoryAt<5000)return shutdownUncertain;
+ if(shutdownHistoryRequest)return shutdownHistoryRequest;
+ shutdownHistoryRequest=(async()=>{
+  const status=await get('/api/v2/operations/pending-shutdowns');
+  if(typeof status?.pending!=='boolean')throw new Error('Invalid shutdown status');
+  shutdownHistoryAt=Date.now();shutdownHistoryChecked=true;
+  if(status.pending)setShutdownUncertainty(true);
+  else if(clearIfEmpty)setShutdownUncertainty(false);
+  return status.pending;
+ })();
+ try{return await shutdownHistoryRequest;}finally{shutdownHistoryRequest=null;}
+}
+async function shutdownOutcome(id){for(let i=0;i<12;i++){try{const outcome=await post('/api/v2/operation/result',{id},1500);if(['SHUTDOWN_SCHEDULED','FAILED','REJECTED','OUTCOME_UNKNOWN'].includes(outcome.stage))return outcome;}catch{return null;}await new Promise(r=>setTimeout(r,250));}return null;}
+async function waitForShutdownPrepare(id){
+ const deadline=Date.now()+10000;
+ while(Date.now()<deadline){
+  try{
+   const result=await post('/api/v2/operation/result',{id},1500);
+   if(['APPLIED','FAILED','REJECTED','OUTCOME_UNKNOWN'].includes(result.stage))return result;
+  }catch(error){if(error.status>=400&&error.status<500)throw error;}
+  await new Promise(r=>setTimeout(r,250));
+ }
+ return null;
+}
+async function showShutdownOutcome(outcome,fallbackStage='OUTCOME_UNKNOWN',detail=''){
+ const stage=outcome?.stage||fallbackStage;
+ if(shutdownFailureStages.has(stage)){try{await checkShutdownHistory(true,true);}catch{setShutdownUncertainty(true);}}
+ else setShutdownUncertainty(true);
+ const reason=outcome?.result?.error||detail;
+ const body=stage==='SHUTDOWN_SCHEDULED'
+  ?'SHUTDOWN_SCHEDULED: host belum terbukti mati. Periksa Raspberry secara lokal; jangan ulangi saat unit systemd masih aktif.'
+  :shutdownUncertain
+   ?`Status ${stage}${reason?` (${reason})`:''}. Periksa Raspberry lokal. Untuk intent tidak aktif, jalankan sudo rdf-node controls shutdown-reconcile pada Pi.`
+   :`Status ${stage}${reason?` (${reason})`:''}. Permintaan ini gagal/ditolak dan tidak ada shutdown baru yang dijadwalkan.`;
+ const status=modal(stage==='SHUTDOWN_SCHEDULED'?'Shutdown dijadwalkan':shutdownUncertain?'Status shutdown':'Shutdown tidak dijadwalkan');
+ text(status,body);
+}
+async function poll(manual=false){
+ if(pollPending){if(manual)pollAgain=true;return;}
+ pollPending=true;
+ const retry=$('retry');
+ if(manual&&retry){retry.disabled=true;retry.textContent='Mencoba lagi...';}
+ try{const s=await get('/api/v2/snapshot');lastApi=Date.now();if(s.snapshot_seq!==lastSeq&&s.snapshot_seq!=null){lastSeq=s.snapshot_seq;lastProgress=Date.now();}snapshot=s;try{await checkShutdownHistory();}catch{}render(s);}
+ catch(e){/* local watchdog displays staleness independently */}
+ finally{
+  pollPending=false;
+  if(manual&&retry){retry.disabled=false;retry.textContent='Coba lagi';}
+  if(pollAgain){pollAgain=false;void poll(true);}
+  else pollTimer=setTimeout(poll,500);
+ }
+}
+function retrySnapshot(){
+ if(pollTimer){clearTimeout(pollTimer);pollTimer=null;}
+ if(pollPending){pollAgain=true;return;}
+ void poll(true);
+}
+ $('retry').onclick=retrySnapshot;
 async function keepAdminSessionAlive(){
  const now=Date.now();
  if(!authenticated||adminSessionRefreshPending||now-lastTouch>ADMIN_SESSION_ACTIVITY_MS||now-lastAdminSessionRefresh<ADMIN_SESSION_REFRESH_MS)return;
@@ -385,7 +447,11 @@ async function openMqttSettings(){
  enabled.focus({preventScroll:true});
 }
 $('mqttsettings').onclick=openMqttSettings;
-async function command(op,extras={}){const r={v:2,id:`local-${Date.now()}-${crypto.randomUUID().slice(0,8)}`,sid:snapshot.sid,boot:snapshot.boot_id,issued_ms:Date.now(),expires_ms:Date.now()+15000,base_rev:snapshot.config?.sdr_revision??null,op,...extras};const result=await post('/api/v2/commands',r);$('modalmsg').textContent=`${result.stage}: ${result.id||''}`;return result;}
+async function command(op,extras={}){
+ const r={v:2,id:`local-${Date.now()}-${crypto.randomUUID().slice(0,8)}`,sid:snapshot.sid,boot:snapshot.boot_id,issued_ms:Date.now(),expires_ms:Date.now()+15000,base_rev:snapshot.config?.sdr_revision??null,op,...extras};
+ try{const result=await post('/api/v2/commands',r);if(op==='system.shutdown.execute')result.requestId=r.id;$('modalmsg').textContent=`${result.stage}: ${result.id||''}`;return result;}
+ catch(error){if(op!=='system.shutdown.execute')throw error;const failure=new Error(error.message);failure.operationId=r.id;failure.status=error.status;throw failure;}
+}
 $('profilebtn').onclick=()=>{if(needLogin())return;const box=modal('Profil telemetry');text(box,'Grafik otomatis dipause saat command, data invalid, atau receipt hilang.');action(box,'CONTROL',()=>command('stream.set',{profile:'control'}));action(box,'BALANCED',()=>command('stream.set',{profile:'balanced'}));action(box,'GRAPH U8',()=>command('stream.set',{profile:'graph_u8'}));};
 function preferences(){
  if(needLogin())return;
@@ -420,7 +486,10 @@ $('controlbtn').onclick=()=>{if(needLogin())return;const box=modal('Kontrol RDF 
  const row=document.createElement('div');box.append(row);
  action(row,'Frekuensi',()=>frequency()).disabled=!caps.config_patch;
  action(row,'Refresh config',()=>command('config.get'));
- action(row,'Reboot Pi',()=>prepareReboot(),true).disabled=!caps.reboot;
+  action(row,'Reboot Pi',()=>prepareReboot(),true).disabled=!caps.reboot;
+  const shutdown=action(row,'Shutdown Pi',()=>prepareShutdown(),true);
+  shutdown.disabled=!caps.shutdown||!shutdownHistoryChecked;
+  shutdown.title=!shutdownHistoryChecked?'Riwayat operasi belum tersedia.':shutdownUncertain?'Periksa Raspberry secara lokal sebelum mengulangi shutdown.':'';
 };
 function confirmOperation(label,op,extra){const box=modal(label);text(box,'Aksi ini mengganggu pemrosesan RDF. Bridge tetap hidup kecuali reboot OS. Pastikan kondisi maintenance aman.');action(box,'Konfirmasi',()=>command(op,extra),true);}
 function frequency(){const box=modal('Frekuensi center + VFO0');text(box,'MHz; range dan gain mengikuti policy perangkat. File tersimpan belum berarti runtime terverifikasi.');const input=document.createElement('input');input.type='number';input.step='0.001';input.value=snapshot.detection?.frequency_hz?snapshot.detection.frequency_hz/1e6:'';box.append(input);action(box,'Apply',()=>{const hz=Math.round(Number(input.value)*1e6);if(!Number.isFinite(hz)||hz<=0)throw new Error('Frekuensi tidak valid');return command('config.patch',{changes:{center_frequency_hz:hz,vfo0_frequency_hz:hz}});});}
@@ -431,5 +500,35 @@ async function prepareReboot(){const box=modal('Reboot Raspberry');text(box,'Nod
  if(result.stage!=='APPLIED'||!result.result?.challenge)throw new Error(result.result?.error||'Challenge belum tersedia');
  const cbox=modal('Konfirmasi reboot OS');text(cbox,'Konfirmasi dalam 30 detik. Reboot mulai setelah hasil dijurnal.');action(cbox,'REBOOT SEKARANG',()=>command('system.reboot.execute',{prepare_id:r.id,challenge:result.result.challenge}),true);
  });}
+async function prepareShutdown(){
+ const box=modal('Shutdown Raspberry');
+ text(box,'Raspberry akan dimatikan sepenuhnya; akses lokal diperlukan untuk menyalakannya lagi. Maintenance lease lokal (sudo) harus aktif.');
+ action(box,'Prepare',async()=>{
+  if(readShutdownUncertainty())setShutdownUncertainty(true);
+  try{await checkShutdownHistory(true);}catch{$('modalmsg').textContent='Status shutdown tidak tersedia; permintaan tidak dikirim.';return;}
+  if(shutdownUncertain&&!confirm('Hasil shutdown sebelumnya belum pasti. Periksa status Raspberry lokal. Jika intent tidak aktif, jalankan sudo rdf-node controls shutdown-reconcile pada Pi; helper menolak bila unit masih aktif. Lanjutkan?'))return;
+  setShutdownUncertainty(false);
+  const prepared=await command('system.shutdown.prepare');
+  if(!prepared?.id||prepared.stage==='REJECTED'){ $('modalmsg').textContent=prepared?.result?.error||'Prepare shutdown ditolak.';return; }
+  $('modalmsg').textContent='Menunggu hasil prepare...';
+  let result;
+  try{result=await waitForShutdownPrepare(prepared.id);}catch(error){$('modalmsg').textContent=error.message;return;}
+  if(result?.stage!=='APPLIED'||!result.result?.challenge){$('modalmsg').textContent=result?.result?.error||'Challenge shutdown belum tersedia setelah menunggu helper.';return;}
+  try{await checkShutdownHistory(true);}catch{$('modalmsg').textContent='Status shutdown berubah/tidak tersedia; execute tidak dikirim.';return;}
+  if(shutdownUncertain&&!confirm('Ada shutdown terdahulu yang belum pasti. Periksa Raspberry lokal dan rekonsiliasi intent hanya bila unit systemd tidak aktif. Lanjutkan?'))return;
+  const cbox=modal('Konfirmasi shutdown OS');
+  text(cbox,'Pi akan mati dalam 5 detik setelah jadwal diterima. Tidak ada bukti OS sudah berhenti; nyalakan kembali secara lokal.');
+  action(cbox,'SHUTDOWN PI SEKARANG',async()=>{
+   const executeId=`local-${Date.now()}-${crypto.randomUUID().slice(0,8)}`;
+   setShutdownUncertainty(true);
+   let sent;
+   try{sent=await command('system.shutdown.execute',{id:executeId,prepare_id:prepared.id,challenge:result.result.challenge});}
+   catch(error){await showShutdownOutcome(null,error.status>=400&&error.status<500?'REJECTED':'OUTCOME_UNKNOWN',error.message);return;}
+   if(sent.id!==executeId){await showShutdownOutcome(null,'OUTCOME_UNKNOWN','ID operasi tidak cocok');return;}
+   const outcome=await shutdownOutcome(executeId);
+   await showShutdownOutcome(outcome,outcome?'OUTCOME_UNKNOWN':'ACK_TIMEOUT');
+  },true);
+ });
+}
 document.addEventListener('pointerdown',()=>{lastTouch=Date.now();$('blank').hidden=true;});document.addEventListener('keydown',()=>{lastTouch=Date.now();$('blank').hidden=true;});
 get('/api/v2/session').then(s=>{if(authenticated)return;authenticated=s.authenticated;csrf=s.csrf;lastAdminSessionRefresh=Date.now();render(snapshot);}).catch(()=>{});poll();

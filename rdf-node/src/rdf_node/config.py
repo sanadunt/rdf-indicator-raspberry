@@ -100,7 +100,7 @@ def validate_config(c: dict) -> None:
     if c['mqtt']['enabled']:
         if not c['mqtt']['control_credentials_file'] or not c['mqtt']['bulk_credentials_file']:
             raise ValueError('MQTT_CREDENTIALS_REQUIRED')
-    if c['runtime_mode'] == 'read_only' and any(c['control'][k] for k in ('config_patch_enabled','processing_enabled','restart_enabled','reboot_enabled')):
+    if c['runtime_mode'] == 'read_only' and any(c['control'][k] for k in ('config_patch_enabled','processing_enabled','restart_enabled','reboot_enabled','shutdown_enabled')):
         raise ValueError('MUTATION_REQUIRES_CONTROLLED_MODE')
 
 def save_config(path: Path, cfg: dict) -> None:

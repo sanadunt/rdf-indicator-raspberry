@@ -45,6 +45,31 @@ Local HTTP server stdlib memiliki client/body caps, Host/Origin checks, cookie a
 CSRF, no-store dan CSP. Tidak boleh dibind ke LAN melalui perubahan tidak terkontrol.
 Admin PIN session memakai idle timeout rolling (default 600 detik). Request dengan session valid dan ping panel saat ada interaksi baru memperpanjang sesi; polling snapshot publik tidak.
 
+### Status error dan pemulihan UI
+
+Edge panel dan Ground companion memisahkan API offline dari data yang hanya stale. Keduanya
+mempertahankan snapshot terakhir yang sudah dirender dengan penanda `STALE`; tombol `Coba lagi`
+memulai fetch segera, dan polling periodik tetap aktif dengan satu request in-flight. Ground
+membedakan kegagalan snapshot dari kegagalan API grafik angular. Tidak ada restart service,
+SDR, reboot, atau shutdown otomatis sebagai respons error.
+
+### Shutdown OS
+
+`system.shutdown.prepare/execute` adalah capability terpisah yang mati secara default pada
+config dan helper. Jalurnya memakai command manager/jurnal yang sama dengan Ground, tetapi
+helper hanya menjalankan aksi systemd tetap setelah maintenance lease dan challenge lokal.
+Helper menyimpan intent shutdown durable dan hanya menjadwalkan aksi systemd tetap. Intent
+current-boot menolak prepare/execute berikutnya sehingga tidak ada jadwal poweroff ganda;
+pemeriksaan helper setelah boot baru menghapus intent boot terdahulu. Hasil schedule tetap
+bukan bukti poweroff. Timeout/ambiguous response atau sesi baru menurunkan status menjadi
+`OUTCOME_UNKNOWN`, yang tetap terlihat lintas sesi lewat ringkasan jurnal tanpa batas latest-20.
+Kedua panel memuat ringkasan ini secara berkala dan sebelum execute; lost response Ground
+dihubungkan memakai operation ID yang dibuat klien. Tidak ada retry otomatis.
+`sudo rdf-node controls shutdown-reconcile` adalah jalur lokal root untuk intent yang
+ditinggalkan: helper memeriksa unit timer/service yang tersimpan melalui `systemctl show` dan
+hanya membersihkan saat keduanya tidak aktif; unit aktif atau status tidak diketahui tetap
+memblokir. Tes menggunakan mock systemd dan tidak menjalankan poweroff nyata.
+
 ## Perbedaan implementasi terhadap dokumen planning
 
 Perubahan berikut eksplisit, bukan klaim bahwa semuanya identik dengan contoh planning:

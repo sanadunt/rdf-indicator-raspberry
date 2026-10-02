@@ -65,6 +65,112 @@ class ApplicationTests(unittest.TestCase):
     def test_no_hardware_write_in_demo(self):
         self.a.demo=True;self.assertEqual(self.a.commands.submit(self.request('stream.set',profile='control'),'local-admin')['result']['error'],'DEMO_NO_HARDWARE_CONTROL')
     def test_disabled_reboot_rejected(self):self.assertEqual(self.a.commands.submit(self.request('system.reboot.prepare'),'local-admin')['result']['error'],'CAPABILITY_DISABLED')
+    def test_disabled_shutdown_rejected(self):self.assertEqual(self.a.commands.submit(self.request('system.shutdown.prepare'),'local-admin')['result']['error'],'CAPABILITY_DISABLED')
+    def test_shutdown_capability_requires_config_and_helper_approval(self):
+        self.a.cfg['runtime_mode']='controlled';self.a.cfg['control']['shutdown_enabled']=True
+        self.a.helper_status={'allow_shutdown':False}
+        self.assertFalse(self.a.capabilities()['shutdown'])
+        self.a.helper_status={'allow_shutdown':True}
+        self.assertTrue(self.a.capabilities()['shutdown'])
+    def test_ground_shutdown_requires_remote_commands_enabled(self):
+        self.a.cfg['runtime_mode']='controlled';self.a.cfg['control']['shutdown_enabled']=True
+        self.assertEqual(self.a.commands.submit(self.request('system.shutdown.prepare'),'ground-controller')['result']['error'],'REMOTE_COMMANDS_DISABLED')
+    def test_shutdown_is_scheduled_only_after_durable_marker(self):
+        request=self.request('system.shutdown.execute',prepare_id='prepared',challenge='fixture')
+        self.a.journal.accept(request,'local-admin')
+        observed=[]
+        def helper(payload):
+            observed.append((self.a.journal.lookup(request['id'])['stage'],payload))
+            return {'scheduled':True,'delay_seconds':5}
+        with mock.patch.object(self.a.commands,'_helper',side_effect=helper):
+            stage,result=self.a.commands._execute(request)
+        self.assertEqual(stage,'SHUTDOWN_SCHEDULED')
+        self.assertEqual(observed[0][0],'SHUTDOWN_SCHEDULED')
+        self.assertEqual(observed[0][1]['op'],'system.shutdown.execute')
+        self.assertFalse(self.a.planned_reboot)
+    def test_ground_rejects_success_ack_for_shutdown_execution(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd';request={'id':'ground-shutdown','op':'system.shutdown.execute','sid':sid}
+        ground.node_state={'sid':sid}
+        ground.journal.accept(request,'ground-local-admin');ground.journal.update(request['id'],'REQUESTED',{})
+        for status in ('APPLIED','REBOOT_SCHEDULED',{}):
+            ground.receive(ground.prefix+'/ack/operation',compact({'v':2,'sid':sid,'id':request['id'],
+                           'status':status,'result':{'proof':'fake'}}))
+            self.assertEqual(ground.journal.lookup(request['id'])['stage'],'REQUESTED')
+    def test_ground_preserves_ambiguous_shutdown_outcome_and_rejects_late_failure(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd';request={'id':'scheduled-shutdown','op':'system.shutdown.execute','sid':sid}
+        ground.node_state={'sid':sid}
+        ground.journal.accept(request,'ground-local-admin');ground.journal.update(request['id'],'SHUTDOWN_SCHEDULED',{'scheduled':True})
+        for status in ('FAILED','REJECTED'):
+            ground.receive(ground.prefix+'/ack/operation',compact({'v':2,'sid':sid,'id':request['id'],
+                           'status':status,'result':{'error':'late failure'}}))
+            self.assertEqual(ground.journal.lookup(request['id'])['stage'],'SHUTDOWN_SCHEDULED')
+        ground.receive(ground.prefix+'/ack/operation',compact({'v':2,'sid':sid,'id':request['id'],
+                       'status':'OUTCOME_UNKNOWN','result':{'error':'helper timeout'}}))
+        self.assertEqual(ground.journal.lookup(request['id'])['stage'],'OUTCOME_UNKNOWN')
+        ground.receive(ground.prefix+'/ack/operation',compact({'v':2,'sid':sid,'id':request['id'],
+                       'status':'FAILED','result':{'error':'stale failure'}}))
+        self.assertEqual(ground.journal.lookup(request['id'])['stage'],'OUTCOME_UNKNOWN')
+    def test_ground_accepts_shutdown_failure_before_schedule(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd';request={'id':'failed-shutdown','op':'system.shutdown.execute','sid':sid}
+        ground.node_state={'sid':sid}
+        ground.journal.accept(request,'ground-local-admin');ground.journal.update(request['id'],'REQUESTED',{})
+        ground.receive(ground.prefix+'/ack/operation',compact({'v':2,'sid':sid,'id':request['id'],
+                       'status':'FAILED','result':{'error':'SHUTDOWN_DISABLED'}}))
+        self.assertEqual(ground.journal.lookup(request['id'])['stage'],'FAILED')
+    def test_ground_marks_pending_shutdown_unknown_when_node_returns(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        old_sid='12ab34cd';ids=[]
+        for stage in ('REQUESTED','ACCEPTED','APPLYING','SHUTDOWN_SCHEDULED'):
+            op_id='ground-shutdown-'+stage.lower()
+            request={'id':op_id,'op':'system.shutdown.execute','sid':old_sid,'boot':'boot-old'}
+            ground.journal.accept(request,'ground-local-admin')
+            ground.journal.update(op_id,stage,{'scheduled':True})
+            ids.append(op_id)
+        ground.node_state={'sid':old_sid,'boot':'boot-old'}
+        state={'v':2,'sid':'98ab76cd','boot':'boot-new','instance':'instance-new'}
+        ground.receive(ground.prefix+'/state',compact(state))
+        for op_id in ids:
+            self.assertEqual(ground.journal.lookup(op_id)['stage'],'OUTCOME_UNKNOWN')
+    def test_ground_reconciles_shutdown_beyond_recent_operation_window(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd';request={'id':'old-shutdown','op':'system.shutdown.execute','sid':sid,'boot':'boot-old'}
+        ground.journal.accept(request,'ground-local-admin');ground.journal.update(request['id'],'SHUTDOWN_SCHEDULED',{})
+        first=ground.journal.lookup(request['id'])['updated_ms']+1
+        with mock.patch('rdf_node.journal.now_ms',side_effect=iter(range(first,first+5000))):
+            for index in range(2001):
+                filler={'id':f'recent-{index}','op':'config.get','sid':sid}
+                ground.journal.accept(filler,'ground-local-admin');ground.journal.update(filler['id'],'APPLIED',{})
+        ground.node_state={'sid':sid,'boot':'boot-old'}
+        state={'v':2,'sid':'98ab76cd','boot':'boot-new','instance':'instance-new'}
+        ground.receive(ground.prefix+'/state',compact(state))
+        self.assertEqual(ground.journal.lookup(request['id'])['stage'],'OUTCOME_UNKNOWN')
+    def test_ground_command_preserves_client_id_for_result_recovery(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        ground.client=mock.Mock(ready=True);ground.client.offer.return_value=True
+        ground.node_state={'sid':'12ab34cd','boot':'boot-current'};ground.node_config={'rev':7}
+        ground.health={'q':1};ground.health_seen=time.monotonic()
+        request={'id':'ground-client-0123456789abcdef','op':'system.shutdown.execute',
+                 'prepare_id':'prepare-id','challenge':'challenge','base_rev':7}
+        result=ground.submit_command(request)
+        self.assertEqual(result['id'],request['id'])
+        self.assertEqual(ground.journal.lookup(request['id'])['request']['id'],request['id'])
+    def test_ground_rejects_invalid_client_command_id(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        ground.client=mock.Mock(ready=True);ground.client.offer.return_value=True
+        ground.node_state={'sid':'12ab34cd','boot':'boot-current'};ground.node_config={'rev':7}
+        ground.health={'q':1};ground.health_seen=time.monotonic()
+        result=ground.submit_command({'id':'invalid id','op':'system.shutdown.prepare','base_rev':7})
+        self.assertEqual(result['error'],'INVALID_COMMAND_ID')
     def test_idempotent_query_does_not_redo(self):
         r=self.request();self.a.commands.submit(r,'local-admin');old=self.a.journal.lookup(r['id'])
         self.a.commands.submit(r,'local-admin');self.assertEqual(old['updated_ms'],self.a.journal.lookup(r['id'])['updated_ms'])
@@ -85,6 +191,7 @@ class ApplicationTests(unittest.TestCase):
         with mock.patch.object(c,'_run') as run:c.reconcile_intent();run.assert_not_called()
     def test_helper_stopped_intent_reconciled_not_rebooted(self):
         from rdf_node.helper import Controller,DEFAULT_POLICY
+
         p=dict(DEFAULT_POLICY,state_dir=str(self.path/'helper'),allowed_user=None,allow_lifecycle=True,lifecycle_audited=True,engine_service='approved-test.service')
         c=Controller(p);atomic_write(c.state/'intent.json',compact({'desired':'STOPPED'}))
         with mock.patch.object(c,'_run') as run:
@@ -185,6 +292,19 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(broker.errors)
     def test_snapshot_no_secrets(self):
         code,h,b=self.http('GET','/api/v2/snapshot');self.assertEqual(code,200);self.assertNotIn(self.pin.encode(),b);self.assertNotIn(b'admin_hash_file',b);self.assertEqual(h['Cache-Control'],'no-store')
+    def test_pending_shutdown_summary_includes_old_unknown_operation(self):
+        request={'id':'old-shutdown','op':'system.shutdown.execute'}
+        self.a.journal.accept(request,'test');self.a.journal.update(request['id'],'OUTCOME_UNKNOWN',{'reason':'lost ACK'})
+        first=self.a.journal.lookup(request['id'])['updated_ms']+1
+        with mock.patch('rdf_node.journal.now_ms',side_effect=iter(range(first,first+100))):
+            for index in range(25):
+                filler={'id':f'recent-{index}','op':'config.get'}
+                self.a.journal.accept(filler,'test');self.a.journal.update(filler['id'],'APPLIED',{})
+        code,_,body=self.http('GET','/api/v2/operations/pending-shutdowns')
+        self.assertEqual((code,json.loads(body)),(200,{'pending':True}))
+        self.a.journal.update(request['id'],'FAILED',{'error':'verified rejection'})
+        code,_,body=self.http('GET','/api/v2/operations/pending-shutdowns')
+        self.assertEqual((code,json.loads(body)),(200,{'pending':False}))
     def test_host_dns_rebinding_rejected(self):self.assertEqual(self.http('GET','/',headers={'Host':'attacker.invalid'})[0],403)
     def test_cors_write_rejected(self):self.assertEqual(self.http('POST','/api/v2/login',{'pin':self.pin},headers={'Origin':'https://attacker.invalid'})[0],403)
     def test_no_auth_write_rejected(self):self.assertEqual(self.http('POST','/api/v2/display/preferences',{'theme':'light'})[0],403)

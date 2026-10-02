@@ -1,1 +1,9 @@
 :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#0a111c;color:#eaf3ff;font-family:system-ui,sans-serif}header{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:18px 24px;border-bottom:1px solid #243248;color:#79dce4;font-size:14px}main{display:grid;grid-template-columns:1fr 1fr;gap:24px;padding:24px;max-width:1200px;margin:auto}section{background:#111d2c;border:1px solid #233349;border-radius:12px;padding:20px;min-width:0}small{color:#a6b7cf;letter-spacing:2px}h1{font-size:48px;margin:8px 0;color:#91e4b5}h2{font-size:18px}.plot{max-width:460px;margin:auto}canvas{width:100%;height:auto}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;color:#aec6dd;max-height:250px;overflow:auto}p{font-size:13px;color:#a6b7cf}.actions{display:flex;gap:5px;margin:12px 0}button,input,select{font:inherit;border:1px solid #355271;border-radius:6px;background:#192a40;color:#ecf5ff;padding:10px;margin:4px 0;max-width:100%}button{cursor:pointer}input{display:block;width:100%}.note{border-top:1px solid #355271;padding-top:14px}@media(max-width:760px){main{grid-template-columns:1fr;padding:10px}}
+.api-status{display:flex;align-items:center;justify-content:space-between;gap:12px;max-width:1152px;margin:12px auto 0;padding:10px 16px;background:#311c22;border:1px solid #ff9696;border-radius:6px;color:#fff0f0}
+.api-status[hidden]{display:none}
+.api-status #api-message{line-height:1.5}
+.api-status button{min-height:44px;padding:8px 14px;border-color:#ff9696;white-space:nowrap}
+.api-status button:focus-visible{outline:2px solid #eaf3ff;outline-offset:2px}
+main.data-stale section{border-color:#f1c16e}
+.plot.stale{border:2px solid #f1c16e}
+.actions{flex-wrap:wrap;gap:8px}.actions button{min-height:44px}button:focus-visible{outline:2px solid #79dce4;outline-offset:2px}button:disabled{cursor:not-allowed;opacity:.55}

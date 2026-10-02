@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Distinguish local API outage from stale cached data in both panels; add immediate manual retry while regular polling continues, without automatic service or SDR recovery.
+- Prevent duplicate shutdown scheduling per boot, retain unresolved outcomes across all journal pages/sessions, and add root-only systemd-evidence-checked local reconciliation.
+- Keep ambiguous shutdown results `OUTCOME_UNKNOWN`; tests mock the systemd action and never power off a host.
+
 - Replace local admin passwords with six-digit PIN login and a touch keypad on the Raspberry panel.
 - Keep admin PIN sessions alive while the panel is actively used; the rolling inactivity timeout remains enabled.
 - Add saved accent-color and font preferences to the Config panel.

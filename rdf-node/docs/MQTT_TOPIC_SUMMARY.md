@@ -55,7 +55,9 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | `cmd/service/restart` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Restart SDR stack yang di-approve. Bukan restart PPP atau bridge. |
 | `cmd/system/reboot/prepare` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Meminta challenge reboot sekali pakai. |
 | `cmd/system/reboot/execute` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Eksekusi reboot dengan `prepare_id` dan `challenge` yang masih valid. |
-| `cmd/operation/get` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Query hasil/progress operation berdasarkan ID. |
+| `cmd/system/shutdown/prepare` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Meminta challenge shutdown sekali pakai; approval terpisah. |
+| `cmd/system/shutdown/execute` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Menjadwalkan poweroff dengan `prepare_id` dan challenge yang masih valid. |
+| `cmd/operation/get` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Query hasil operation berdasarkan ID. |
 | `cmd/stream/set` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Ganti profile telemetry. |
 
 ### Peran setiap topic di Ground
@@ -71,7 +73,7 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | `config/reported` | Simpan safe settings, revision dan proof. Jika revision berubah, buang DoA/Angular dari revision sebelumnya. |
 | `availability` | Tampilkan status koneksi Control sebagai petunjuk saja; cek health untuk mengetahui kondisi DAQ. |
 | `ack/config` | Cocokkan `id` dengan journal command konfigurasi; tampilkan progress dan hasil tanpa menganggap ACK broker sebagai hasil operasi. |
-| `ack/operation` | Cocokkan `id` untuk lifecycle, stream dan reboot; tunggu bukti akhir yang sesuai operation. |
+| `ack/operation` | Cocokkan `id` untuk lifecycle, stream, reboot dan shutdown; jangan anggap `SHUTDOWN_SCHEDULED` sebagai host telah mati. |
 | `ground/receipt` | Kirim sequence health/DoA/Angular yang benar-benar sudah diproses; jangan kirim hanya karena broker mengirim PUBLISH. |
 | `cmd/config/get` | Minta safe config terbaru; proses ACK `revision`/`proof` dan report terpisah di `config/reported`. |
 | `cmd/config/patch` | Kirim hanya field allowlist dengan `base_rev` terkini; bedakan `APPLIED` dari `PERSISTED_UNVERIFIED`. |
@@ -79,6 +81,8 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | `cmd/service/restart` | Minta restart SDR stack yang di-approve; tunggu ACK final dengan proof operasi dan telemetry health fresh sebelum menyatakan pulih. |
 | `cmd/system/reboot/prepare` | Minta challenge reboot setelah policy/approval terpenuhi; jangan log challenge. |
 | `cmd/system/reboot/execute` | Kirim challenge satu kali sebelum kedaluwarsa; tunggu boot ID baru dan health fresh untuk rekonsiliasi. |
+| `cmd/system/shutdown/prepare` | Minta challenge shutdown hanya saat capability tersedia; jangan log challenge. |
+| `cmd/system/shutdown/execute` | Kirim challenge sekali pakai; `SHUTDOWN_SCHEDULED` bukan bukti poweroff dan hasil ambigu tetap `OUTCOME_UNKNOWN`. |
 | `cmd/operation/get` | Query journal dengan `target_id` jika ACK hilang atau Ground reconnect. |
 | `cmd/stream/set` | Ganti profile, lalu baca profile aktif dari `state` sebelum memperbarui ekspektasi rate Angular. |
 
@@ -141,7 +145,7 @@ Ukuran event memakai contoh JSON yang dicantumkan di bawah. State dapat dipublis
 
 `*` Kedua baris ACK memakai JSON fixture `ack/config` di bawah hanya untuk mengukur ukuran paket; payload ACK aktual berubah mengikuti status dan `result` operation.
 
-Ukuran command adalah fixture dengan envelope dan nilai umum yang sama seperti contoh `config.patch`; `system.reboot.execute` memakai placeholder challenge 32 karakter. Nilai aktual bergantung ID, timestamp, operation field, dan isi `changes`.
+Ukuran command adalah fixture dengan envelope dan nilai umum yang sama seperti contoh `config.patch`; command execute reboot/shutdown memakai placeholder challenge 32 karakter. Nilai aktual bergantung ID, timestamp, operation field, dan isi `changes`.
 
 | Topic command (Ground → Edge) | Payload fixture | MQTT PUBLISH |
 |---|---:|---:|
@@ -151,6 +155,8 @@ Ukuran command adalah fixture dengan envelope dan nilai umum yang sama seperti c
 | `cmd/service/restart` | 179 B | 225 B |
 | `cmd/system/reboot/prepare` | 185 B | 237 B |
 | `cmd/system/reboot/execute` | 260 B | 312 B |
+| `cmd/system/shutdown/prepare` | 187 B | 241 B |
+| `cmd/system/shutdown/execute` | 262 B | 316 B |
 | `cmd/operation/get` | 204 B | 248 B |
 | `cmd/stream/set` | 195 B | 236 B |
 
@@ -236,10 +242,10 @@ Detail tidak menggantikan gate health utama. Ground saat ini menyimpan detail te
 ### `capabilities`
 
 ```json
-{"v":2,"sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","version":"1.0.0","mode":"read_only","codecs":["q16","u8"],"angle":"theta_mirror","native_axis":1,"count":360,"profiles":["control","balanced","graph_u8"],"scope":"SDR_STACK","helper_available":true,"maintenance":false,"remote_commands":false,"config_patch":false,"processing":false,"restart":false,"reboot":false}
+{"v":2,"sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","version":"1.0.0","mode":"read_only","codecs":["q16","u8"],"angle":"theta_mirror","native_axis":1,"count":360,"profiles":["control","balanced","graph_u8"],"scope":"SDR_STACK","helper_available":true,"maintenance":false,"remote_commands":false,"config_patch":false,"processing":false,"restart":false,"reboot":false,"shutdown":false}
 ```
 
-Capability boolean (`remote_commands`, `config_patch`, `processing`, `restart`, `reboot`) adalah izin/runtime availability yang dilaporkan node, bukan otorisasi broker. Ground harus cek capability sebelum menampilkan atau mengirim mutation. Nilainya dapat berbeda antar perangkat karena approval lokal. Profile yang didukung saat ini:
+Capability boolean (`remote_commands`, `config_patch`, `processing`, `restart`, `reboot`, `shutdown`) adalah izin/runtime availability yang dilaporkan node, bukan otorisasi broker. Ground harus cek capability node dan `remote_commands` sebelum menampilkan atau mengirim mutation. Nilainya dapat berbeda antar perangkat karena approval lokal. Profile yang didukung saat ini:
 
 | Profile | DoA | Angular |
 |---|---|---|
@@ -356,6 +362,8 @@ Semua command memakai envelope v2 berikut. Ground harus mengisi identitas dan re
 | `base_rev` | Revision safe config yang diamati Ground; wajib cocok untuk mutation. |
 | `op` | Nama operation. Topic command wajib cocok dengan mapping di bawah. |
 | operation field | Salah satu `changes`, `desired`, `profile`, `target_id`, `prepare_id`, `challenge`, sesuai operation. Unknown field ditolak. |
+Ground HTTP API juga menerima `id` klien opsional dan meneruskannya tanpa perubahan ke envelope MQTT; Ground UI memakainya untuk memulihkan hasil shutdown berdasarkan ID yang sama bila respons HTTP execute hilang.
+
 
 | Topic suffix | `op` | Field tambahan |
 |---|---|---|
@@ -365,7 +373,8 @@ Semua command memakai envelope v2 berikut. Ground harus mengisi identitas dan re
 | `cmd/service/restart` | `service.restart` | Tidak ada. Hanya unit SDR stack yang di-approve. |
 | `cmd/system/reboot/prepare` | `system.reboot.prepare` | Tidak ada. ACK mengembalikan `prepare_id`, `challenge`, `valid_seconds` (30). |
 | `cmd/system/reboot/execute` | `system.reboot.execute` | `prepare_id` dan `challenge` dari ACK prepare yang masih berlaku. Challenge sekali pakai; jangan log atau simpan sebagai credential permanen. |
-| `cmd/operation/get` | `operation.get` | `target_id`: ID operation yang ditanya. Read-only. |
+| `cmd/system/shutdown/prepare` | `system.shutdown.prepare` | Tidak ada. ACK mengembalikan `prepare_id`, `challenge`, `valid_seconds` (30). |
+| `cmd/system/shutdown/execute` | `system.shutdown.execute` | `prepare_id` dan challenge sekali pakai dari ACK prepare. Memerlukan helper `allow_shutdown`, config `shutdown_enabled`, maintenance; Ground juga memerlukan policy remote command. |
 | `cmd/stream/set` | `stream.set` | `profile`: `control`, `balanced`, atau `graph_u8`. |
 
 Command selain `config.get` dan `operation.get` subject ke identity, boot, deadline, clock trusted, revision dan capability/policy lokal. Perintah mutation tidak diaktifkan hanya karena topic dapat dipublish. Konfigurasi default bersifat read-only. Retained command ditolak. Jika `id` sama dan payload sama, Edge mengembalikan progress/hasil jurnal tanpa menjalankan ulang; `id` sama dengan payload berbeda adalah conflict.
@@ -380,7 +389,7 @@ Command selain `config.get` dan `operation.get` subject ke identity, boot, deadl
 ```
 
 `result` bergantung pada operation. `config.get` mengembalikan `revision` dan `proof`, serta memicu report terbaru ke `config/reported`. `operation.get` mengembalikan `operation` berupa record operation publik atau `null`. Error biasanya berisi `{"error":"ERROR_CODE"}`.
-Status yang dikenal jurnal mencakup `ACCEPTED`, `APPLYING`, `VERIFYING`, `REBOOT_SCHEDULED`, `APPLIED`, `FAILED`, `REJECTED`, `EXPIRED`, `CONFLICT`, `PERSISTED_UNVERIFIED`, `OUTCOME_UNKNOWN`, dan `CANCELLED`.
+Status yang dikenal jurnal mencakup `ACCEPTED`, `APPLYING`, `VERIFYING`, `REBOOT_SCHEDULED`, `SHUTDOWN_SCHEDULED`, `APPLIED`, `FAILED`, `REJECTED`, `EXPIRED`, `CONFLICT`, `PERSISTED_UNVERIFIED`, `OUTCOME_UNKNOWN`, dan `CANCELLED`.
 
 `PERSISTED_UNVERIFIED` berarti perubahan tersimpan tetapi bukti runtime belum lengkap. `OUTCOME_UNKNOWN` berarti hasil side effect belum diketahui, bukan bukti gagal atau berhasil. Ground tidak boleh mengubah dua status ini menjadi sukses/gagal pasti atau mengulang mutation dengan ID baru tanpa rekonsiliasi.
 

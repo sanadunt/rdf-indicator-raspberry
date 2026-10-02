@@ -56,6 +56,12 @@ class Journal:
         with self.lock:
             ids=[r[0] for r in self.db.execute('SELECT id FROM operations ORDER BY updated DESC LIMIT ?',(n,))]
             return [self.lookup(i) for i in ids]
+    def pending_shutdowns(self):
+        failures={'FAILED','REJECTED','EXPIRED','CONFLICT','CANCELLED'}
+        with self.lock:
+            rows=self.db.execute('SELECT id,request,stage FROM operations').fetchall()
+        return [{'id':id,'stage':stage} for id,request,stage in rows
+                if stage not in failures and json.loads(request).get('op')=='system.shutdown.execute']
     def recover(self,boot):
         recovered=[]
         with self.lock:

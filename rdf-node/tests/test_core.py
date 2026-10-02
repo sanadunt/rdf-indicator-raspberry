@@ -6,7 +6,7 @@ from rdf_node.util import compact,strict_json,now_ms,digest
 from rdf_node.source import parse_csv,parse_status,safe_settings,Source
 from rdf_node.codec import HEADER,CHUNK,encode,decode,split,Assembler
 from rdf_node.journal import Journal
-from rdf_node.helper import DEFAULT_POLICY,Controller,validate_changes,patch_file
+from rdf_node.helper import DEFAULT_POLICY,Controller,HelperError,validate_changes,patch_file
 from rdf_node.mqtt import vi,read_vi,Reader,publish_packet,connect_packet,properties,utf,Message,Outbox
 from rdf_node import monitor
 
@@ -57,7 +57,10 @@ class PppProbeTests(unittest.TestCase):
         self.assertEqual(state['interface'],'ppp0')
 
 class ConfigTests(unittest.TestCase):
-    def test_default_config(self): self.assertEqual(load_config()['api']['port'],8790)
+    def test_default_config(self): self.assertEqual(load_config()['api']['port'],8790);self.assertFalse(load_config()['control']['shutdown_enabled'])
+    def test_shutdown_requires_controlled_mode(self):
+        c=load_config();c['control']['shutdown_enabled']=True
+        with self.assertRaisesRegex(ValueError,'MUTATION_REQUIRES_CONTROLLED_MODE'):validate_config(c)
 
     def test_enabled_tls_can_use_system_ca_trust(self):
         c=load_config()
@@ -207,6 +210,11 @@ class JournalTests(unittest.TestCase):
         self.j.accept({'id':'x','op':'config.patch','boot':'old'},'test');self.j.recover('old');self.assertEqual(self.j.lookup('x')['stage'],'OUTCOME_UNKNOWN')
     def test_reboot_requires_new_boot(self):
         self.j.accept({'id':'x','op':'system.reboot.execute','boot':'old'},'test');self.j.update('x','REBOOT_SCHEDULED');self.j.recover('new');self.assertEqual(self.j.lookup('x')['stage'],'APPLIED')
+    def test_shutdown_schedule_never_implies_success_after_restart(self):
+        self.j.accept({'id':'shutdown','op':'system.shutdown.execute','boot':'old'},'test')
+        self.j.update('shutdown','SHUTDOWN_SCHEDULED')
+        self.j.recover('new')
+        self.assertEqual(self.j.lookup('shutdown')['stage'],'OUTCOME_UNKNOWN')
     def test_revision_stable(self):self.assertEqual(self.j.config_revision('a'),self.j.config_revision('a'));self.assertEqual(self.j.config_revision('b'),2)
 
 class HelperTests(unittest.TestCase):
@@ -225,6 +233,19 @@ class HelperTests(unittest.TestCase):
         with self.assertRaises(ValueError):self.ctrl.dispatch({'op':'processing.set','desired':'STOPPED'},os.getuid())
     def test_reboot_disabled(self):
         with self.assertRaises(ValueError):self.ctrl.dispatch({'op':'system.reboot.prepare','id':'x'},os.getuid())
+    def test_shutdown_disabled(self):
+        with self.assertRaisesRegex(ValueError,'SHUTDOWN_DISABLED'):
+            self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'x'},os.getuid())
+    def test_shutdown_requires_maintenance(self):
+        self.p['allow_shutdown']=True
+        with self.assertRaisesRegex(ValueError,'MAINTENANCE_REQUIRED'):
+            self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'x'},os.getuid())
+    def test_helper_schedule_timeout_maps_to_unknown(self):
+        from rdf_node.helper import call_helper
+        connection=mock.MagicMock()
+        connection.__enter__.return_value.recv.return_value=compact({'ok':False,'error':'SYSTEMD_ACTION_OUTCOME_UNKNOWN'})+b'\n'
+        with mock.patch('rdf_node.helper.socket.socket',return_value=connection):
+            with self.assertRaises(TimeoutError):call_helper('/tmp/control.sock',{'op':'status'})
     def test_patch_digest_compare_swap(self):
         file=self.path/'settings.json';file.write_bytes(compact(settings()))
         with self.assertRaises(ValueError):patch_file(file,{'gain_db':15.7},'wrong',self.p)
@@ -251,6 +272,112 @@ class HelperTests(unittest.TestCase):
             e={'op':'system.reboot.execute','id':'p','challenge':r['challenge']}
             self.assertTrue(self.ctrl.dispatch(e,os.getuid())['scheduled'])
             with self.assertRaises(ValueError):self.ctrl.dispatch(e,os.getuid())
+    def test_shutdown_challenge_is_action_bound_and_one_use(self):
+        self.p.update(allow_reboot=True,allow_shutdown=True)
+        with mock.patch.object(self.ctrl,'maintenance',return_value=True),mock.patch.object(self.ctrl,'_run') as run:
+            reboot=self.ctrl.dispatch({'op':'system.reboot.prepare','id':'reboot'},os.getuid())
+            with self.assertRaisesRegex(ValueError,'SHUTDOWN_CHALLENGE_INVALID'):
+                self.ctrl.dispatch({'op':'system.shutdown.execute','id':'reboot','challenge':reboot['challenge']},os.getuid())
+            prepared=self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'shutdown'},os.getuid())
+            request={'op':'system.shutdown.execute','id':'shutdown','challenge':prepared['challenge']}
+            result=self.ctrl.dispatch(request,os.getuid())
+            self.assertTrue(result['scheduled'])
+            self.assertEqual(result['delay_seconds'],5)
+            intent=json.loads((self.path/'state/shutdown-intent.json').read_text())
+            self.assertEqual((intent['id'],intent['boot']),('shutdown',self.ctrl.boot))
+            run.assert_called_once()
+            args=run.call_args.args[0]
+            self.assertEqual(args[:2],['/usr/bin/systemd-run','--quiet'])
+            self.assertTrue(args[2].startswith('--unit=rdf-node-shutdown-'))
+            self.assertEqual(intent['unit'],args[2].split('=',1)[1])
+            self.assertEqual(args[3:],['--on-active=5s','/usr/bin/systemctl','poweroff'])
+            with self.assertRaisesRegex(ValueError,'SHUTDOWN_CHALLENGE_INVALID'):
+                self.ctrl.dispatch(request,os.getuid())
+    def test_shutdown_intent_blocks_second_schedule_for_current_boot(self):
+        self.p['allow_shutdown']=True
+        with mock.patch.object(self.ctrl,'maintenance',return_value=True),mock.patch.object(self.ctrl,'_run') as run:
+            first=self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'first'},os.getuid())
+            second=self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'second'},os.getuid())
+            self.ctrl.dispatch({'op':'system.shutdown.execute','id':'first','challenge':first['challenge']},os.getuid())
+            with self.assertRaisesRegex(ValueError,'SHUTDOWN_ALREADY_SCHEDULED'):
+                self.ctrl.dispatch({'op':'system.shutdown.execute','id':'second','challenge':second['challenge']},os.getuid())
+            with self.assertRaisesRegex(ValueError,'SHUTDOWN_ALREADY_SCHEDULED'):
+                self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'third'},os.getuid())
+        run.assert_called_once()
+    def test_shutdown_intent_from_prior_boot_allows_new_schedule(self):
+        self.p['allow_shutdown']=True;self.ctrl.boot='boot-current'
+        self.ctrl.state.joinpath('shutdown-intent.json').write_bytes(compact({'id':'old','boot':'boot-previous'}))
+        with mock.patch.object(self.ctrl,'maintenance',return_value=True),mock.patch.object(self.ctrl,'_run') as run:
+            prepared=self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'new'},os.getuid())
+            result=self.ctrl.dispatch({'op':'system.shutdown.execute','id':'new','challenge':prepared['challenge']},os.getuid())
+        self.assertTrue(result['scheduled']);run.assert_called_once()
+        self.assertEqual(json.loads((self.ctrl.state/'shutdown-intent.json').read_text())['boot'],'boot-current')
+    def test_malformed_shutdown_intent_blocks_prepare(self):
+        self.p['allow_shutdown']=True;(self.ctrl.state/'shutdown-intent.json').write_text('{broken')
+        with mock.patch.object(self.ctrl,'maintenance',return_value=True):
+            with self.assertRaisesRegex(ValueError,'SHUTDOWN_ALREADY_SCHEDULED'):
+                self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'new'},os.getuid())
+    def test_prepare_preserves_other_live_challenges(self):
+        self.p.update(allow_reboot=True,allow_shutdown=True)
+        with mock.patch.object(self.ctrl,'maintenance',return_value=True),mock.patch.object(self.ctrl,'_run') as run:
+            shutdown=self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'shutdown'},os.getuid())
+            reboot=self.ctrl.dispatch({'op':'system.reboot.prepare','id':'reboot'},os.getuid())
+            for op,id,challenge in (
+                    ('system.shutdown.execute','shutdown',shutdown['challenge']),
+                    ('system.reboot.execute','reboot',reboot['challenge'])):
+                result=self.ctrl.dispatch({'op':op,'id':id,'challenge':challenge},os.getuid())
+                self.assertTrue(result['scheduled'])
+            self.assertEqual(run.call_count,2)
+    def test_pending_challenges_are_bounded(self):
+        self.p['allow_shutdown']=True
+        with mock.patch.object(self.ctrl,'maintenance',return_value=True):
+            for index in range(32):
+                self.ctrl.dispatch({'op':'system.shutdown.prepare','id':f'shutdown-{index}'},os.getuid())
+            with self.assertRaisesRegex(ValueError,'TOO_MANY_ACTIVE_CHALLENGES'):
+                self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'shutdown-overflow'},os.getuid())
+    def test_systemd_schedule_failure_is_outcome_unknown(self):
+        self.p['allow_shutdown']=True
+        with mock.patch.object(self.ctrl,'maintenance',return_value=True),mock.patch.object(
+                self.ctrl,'_run',side_effect=HelperError('SYSTEMD_ACTION_FAILED')):
+            prepared=self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'shutdown'},os.getuid())
+            with self.assertRaisesRegex(TimeoutError,'SYSTEMD_ACTION_OUTCOME_UNKNOWN'):
+                self.ctrl.dispatch({'op':'system.shutdown.execute','id':'shutdown','challenge':prepared['challenge']},os.getuid())
+        self.assertTrue((self.path/'state/shutdown-intent.json').exists())
+    def test_shutdown_reconcile_requires_local_root(self):
+        with self.assertRaisesRegex(ValueError,'SHUTDOWN_RECONCILE_REQUIRES_ROOT'):
+            self.ctrl.dispatch({'op':'system.shutdown.reconcile'},self.ctrl.uid)
+    def test_shutdown_reconcile_clears_only_inactive_fixed_units(self):
+        unit='rdf-node-shutdown-0123456789'
+        path=self.ctrl.state/'shutdown-intent.json'
+        path.write_bytes(compact({'id':'shutdown','boot':self.ctrl.boot,'unit':unit}))
+        inactive=mock.Mock(returncode=0,stdout='LoadState=not-found\nActiveState=inactive\n')
+        with mock.patch('rdf_node.helper.subprocess.run',side_effect=(inactive,inactive)) as run:
+            result=self.ctrl.dispatch({'op':'system.shutdown.reconcile'},0)
+        self.assertTrue(result['cleared']);self.assertFalse(path.exists())
+        self.assertEqual([call.args[0] for call in run.call_args_list],
+                         [['/usr/bin/systemctl','show','--no-pager','--property=LoadState,ActiveState',unit+'.timer'],
+                          ['/usr/bin/systemctl','show','--no-pager','--property=LoadState,ActiveState',unit+'.service']])
+    def test_shutdown_reconcile_keeps_marker_when_timer_is_active(self):
+        path=self.ctrl.state/'shutdown-intent.json'
+        path.write_bytes(compact({'id':'shutdown','boot':self.ctrl.boot,'unit':'rdf-node-shutdown-0123456789'}))
+        active=mock.Mock(returncode=0,stdout='LoadState=loaded\nActiveState=active\n')
+        with mock.patch('rdf_node.helper.subprocess.run',return_value=active):
+            with self.assertRaisesRegex(ValueError,'SHUTDOWN_UNIT_ACTIVE'):
+                self.ctrl.dispatch({'op':'system.shutdown.reconcile'},0)
+        self.assertTrue(path.exists())
+    def test_shutdown_reconcile_keeps_marker_when_systemctl_cannot_report(self):
+        path=self.ctrl.state/'shutdown-intent.json'
+        path.write_bytes(compact({'id':'shutdown','boot':self.ctrl.boot,'unit':'rdf-node-shutdown-0123456789'}))
+        with mock.patch('rdf_node.helper.subprocess.run',return_value=mock.Mock(returncode=1,stdout='')):
+            with self.assertRaisesRegex(ValueError,'SHUTDOWN_UNIT_STATUS_UNKNOWN'):
+                self.ctrl.dispatch({'op':'system.shutdown.reconcile'},0)
+        self.assertTrue(path.exists())
+    def test_shutdown_challenge_expires_after_30_seconds(self):
+        self.p['allow_shutdown']=True
+        with mock.patch.object(self.ctrl,'maintenance',return_value=True),mock.patch('rdf_node.helper.time.monotonic',side_effect=(100,131)):
+            prepared=self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'shutdown'},os.getuid())
+            with self.assertRaisesRegex(ValueError,'SHUTDOWN_CHALLENGE_INVALID'):
+                self.ctrl.dispatch({'op':'system.shutdown.execute','id':'shutdown','challenge':prepared['challenge']},os.getuid())
 
 class MqttWireTests(unittest.TestCase):
     def test_varints(self):
@@ -267,6 +394,7 @@ class MqttWireTests(unittest.TestCase):
         raw=connect_packet('client','u','p');self.assertIn(b'\x00\x04MQTT\x05',raw);self.assertEqual(raw[0],0x10)
     def test_packet_limit(self):
         with self.assertRaises(ValueError):Reader().feed(b'\x30'+vi(20000))
+
     def test_latest_value_queue(self):
         q=Outbox();q.offer(Message('h','t',b'1',0,False,1,1,time.monotonic()));q.offer(Message('h','t',b'2',0,False,1,1,time.monotonic()));self.assertEqual(q.pop().payload,b'2');self.assertEqual(q.superseded,1)
     def test_expiry_queue(self):
