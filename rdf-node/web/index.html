@@ -26,8 +26,8 @@
 <section id="data" class="page data-page">
 <div class="pagetitle"><b>DATA / MQTT</b><button id="mqttsettings" class="smallbtn">Login</button></div>
 <div class="data-summary"><div><small>CTRL / BULK</small><b id="mqttclients">DISABLED / DISABLED</b></div><div><small>GROUND RECEIPT</small><b id="mqttreceipt">UNCONFIRMED</b></div></div>
-<div class="topic-heading"><span id="topicprefix"></span><span>TOPIK / PAYLOAD</span></div>
-<div id="topiclist" class="topic-list" tabindex="0" aria-label="Daftar topik MQTT"></div>
+<div class="topic-heading"><span id="topicprefix"></span><span id="deliverylegend" aria-label="QoS 0 sukses berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker, bukan receipt Ground." title="QoS 0 sukses berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker, bukan receipt Ground.">QoS 0 lokal · QoS 1 PUBACK</span></div>
+<div id="topiclist" class="topic-list" tabindex="0" aria-label="Topik MQTT keluar Raspberry ke Ground dan topik masuk"></div>
 </section>
 <nav><button data-tab="home" class="selected" aria-current="page" aria-label="Utama"><span>&#9673;</span>Utama</button><button data-tab="link" aria-label="Link"><span>&#8644;</span>Link</button><button data-tab="system" aria-label="Sistem"><span>&#9638;</span>Sistem</button><button data-tab="config" aria-label="Config"><span>&#9881;</span>Config</button><button data-tab="data" aria-label="Data"><span>&#9634;</span>Data</button></nav>
 <div id="stale" hidden role="status" aria-live="polite"><b>SUMBER STATUS HILANG</b><span id="stalereason">API lokal tidak merespons.</span><small>Data di belakang bukan status terkini.</small><button id="retry" type="button">Coba lagi</button></div>

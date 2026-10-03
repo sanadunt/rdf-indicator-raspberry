@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest import mock
 from rdf_node.agent import Agent
 from rdf_node.ground import Ground
+from rdf_node.mqtt import Client
 from rdf_node.config import load_config
 from rdf_node.api import Auth,Server,set_pin
 from rdf_node.util import now_ms,compact,atomic_write
@@ -40,6 +41,15 @@ class ApplicationTests(unittest.TestCase):
         s=Source(self.a.cfg,self.a.journal);s.poll(force=True)
         self.assertFalse(s.view(True)['daq']['frame_progressing'])
     def test_second_frame_proves_progress(self):self.assertTrue(self.a.source.view(True)['valid'])
+    def test_outbound_topic_failure_is_visible_in_snapshot(self):
+        self.a.clients={'control':Client(cfg={},client_id='offline')}
+        self.assertFalse(self.a._offer('health','telemetry/health',{'v':2}))
+        self.a._snapshot()
+        delivery=self.a.snapshot()['link']['mqtt_topic_delivery']['telemetry/health']
+        self.assertEqual((delivery['state'],delivery['error'],delivery['qos']),
+                         ('ERROR','MQTT_DISCONNECTED',0))
+        self.assertEqual(delivery['confirmation'],'SOCKET_WRITE')
+        self.assertIsNone(delivery['sent_ms'])
     def test_receipt_unknown_session_rejected(self):
         self.a.sent_health.append(1);self.a.accept_receipt({'v':2,'sid':'00000000','hq':1});self.assertEqual(self.a.receipt_rejects,1)
     def test_receipt_unsent_sequence_rejected(self):
@@ -453,6 +463,14 @@ class EndToEndTests(unittest.TestCase):
             thread=threading.Thread(target=writer,daemon=True);thread.start();a.start();g.start()
             try:
                 self.assertTrue(wait(lambda:g.snapshot()['health_fresh'],12),[a.snapshot(),g.snapshot(),b.errors])
+                self.assertTrue(wait(lambda:a.snapshot().get('link',{}).get('mqtt_topic_delivery',{}).get('telemetry/health',{}).get('state')=='SENT',8),a.snapshot())
+                health_delivery=a.snapshot()['link']['mqtt_topic_delivery']['telemetry/health']
+                self.assertEqual((health_delivery['qos'],health_delivery['confirmation']),(0,'SOCKET_WRITE'))
+                self.assertIsNone(health_delivery['error'])
+                self.assertTrue(wait(lambda:a.snapshot().get('link',{}).get('mqtt_topic_delivery',{}).get('state',{}).get('state')=='SENT',8),a.snapshot())
+                state_delivery=a.snapshot()['link']['mqtt_topic_delivery']['state']
+                self.assertEqual((state_delivery['qos'],state_delivery['confirmation']),(1,'PUBACK'))
+                self.assertIsNone(state_delivery['error'])
                 self.assertTrue(wait(lambda:a.receipt_view()['state']=='RECEIVING',12),[a.receipt_view(),g.snapshot()])
                 self.assertTrue(wait(lambda:g.angular_view() is not None,20),[a.snapshot(),g.snapshot(),b.errors])
                 self.assertEqual(len(g.angular_view()['values']),360)

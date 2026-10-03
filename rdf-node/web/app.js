@@ -24,7 +24,7 @@ const mqttTopics=[
   ['telemetry/angular','QoS 0 / binary','Envelope sid/q/index/count/total + frame RDF2 berisi metadata dan 360 nilai terkuantisasi Q16/U8; digate data/receipt. Bukan raw IQ.'],
   ['ack/config','QoS 1','Payload ACK: v,sid,id,status,t,rev,result.'],
   ['ack/operation','QoS 1','Payload ACK: v,sid,id,status,t,rev,result.']
- ]],
+ ],true],
  ['MASUK / GROUND -> RASPBERRY',[
   ['ground/receipt','QoS 0','Konfirmasi hq/dq/aq dan revision; retained tidak diterima sebagai bukti.'],
   ['cmd/config/get','QoS 1','Permintaan safe config view.'],
@@ -39,22 +39,77 @@ const mqttTopics=[
   ['cmd/stream/set','QoS 1','Perubahan profil telemetry bila remote control diizinkan.']
  ]]
 ];
-let renderedTopicPrefix=null;
+let renderedTopicPrefix=null;const topicStatusCells=new Map();
 function renderTopicList(){
- const host=$('topiclist');if(!host)return;const fragment=document.createDocumentFragment();
- for(const [title,topics] of mqttTopics){
+ const host=$('topiclist');if(!host)return;const fragment=document.createDocumentFragment();topicStatusCells.clear();
+ for(const [title,topics,outbound] of mqttTopics){
   const group=document.createElement('section');group.className='topic-group';
   const heading=document.createElement('h3');heading.textContent=title;group.append(heading);
-  for(const [suffix,quality,description] of topics){
-   const detail=document.createElement('details');const summary=document.createElement('summary');
-   const name=document.createElement('span');name.textContent=suffix;
-   const qos=document.createElement('span');qos.className='topic-qos';qos.textContent=quality;
-   summary.append(name,qos);const note=document.createElement('p');note.textContent=description;
-   detail.append(summary,note);group.append(detail);
+  if(outbound){
+   const table=document.createElement('table');table.className='topic-table';
+   const caption=document.createElement('caption');caption.className='sr-only';
+   caption.textContent='Topik keluar dari Raspberry ke Ground. QoS 0 berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker, bukan receipt Ground.';
+   const thead=document.createElement('thead'),header=document.createElement('tr');
+   for(const text of ['Topik','QoS','Payload','Status kirim']){
+    const th=document.createElement('th');th.scope='col';th.textContent=text;header.append(th);
+   }
+   thead.append(header);table.append(caption,thead);
+   const body=document.createElement('tbody');
+   for(const [suffix,quality,description] of topics){
+    const tr=document.createElement('tr'),nameCell=document.createElement('td');
+    const name=document.createElement('code');name.textContent=suffix;nameCell.append(name);
+    const mobileInfo=document.createElement('details');mobileInfo.className='topic-mobile-info';
+    const mobileSummary=document.createElement('summary');mobileSummary.textContent='QoS / payload';
+    mobileSummary.setAttribute('aria-label',`${suffix}: QoS and payload details`);
+    const mobileNote=document.createElement('span');mobileNote.textContent=`${quality} · ${description}`;
+    mobileInfo.append(mobileSummary,mobileNote);nameCell.append(mobileInfo);
+    const qos=document.createElement('td');qos.textContent=quality;
+    const payload=document.createElement('td'),detail=document.createElement('details');
+    const summary=document.createElement('summary');summary.textContent='Lihat';
+    const note=document.createElement('span');note.textContent=description;
+    detail.append(summary,note);payload.append(detail);
+    const delivery=document.createElement('td');delivery.className='delivery-cell';
+    const result=document.createElement('div');result.className='delivery-result';
+    const dot=document.createElement('span');dot.className='delivery-dot';dot.setAttribute('aria-hidden','true');
+    const label=document.createElement('strong'),info=document.createElement('small');
+    result.append(dot,label,info);delivery.append(result);
+    tr.append(nameCell,qos,payload,delivery);body.append(tr);
+    topicStatusCells.set(suffix,{cell:delivery,label,info});
+   }
+   table.append(body);group.append(table);
+  }else{
+   for(const [suffix,quality,description] of topics){
+    const detail=document.createElement('details');const summary=document.createElement('summary');
+    const name=document.createElement('span');name.textContent=suffix;
+    const qos=document.createElement('span');qos.className='topic-qos';qos.textContent=quality;
+    summary.append(name,qos);const note=document.createElement('p');note.textContent=description;
+    detail.append(summary,note);group.append(detail);
+   }
   }
   fragment.append(group);
  }
  host.replaceChildren(fragment);
+}
+function setTopicDelivery(entry,status){
+ const state=status?.state||'NONE',label=entry.label,info=entry.info;
+ entry.cell.className=`delivery-cell delivery-cell--${state.toLowerCase()}`;
+ if(state==='SENT'){
+  label.textContent='TERKIRIM';
+  info.textContent=status.qos===1?'PUBACK broker':'Socket lokal';
+ }else if(state==='ERROR'){
+  label.textContent='GAGAL';info.textContent=status.error||'PUBLISH_FAILED';
+ }else if(state==='PENDING'){
+  label.textContent='MENUNGGU';info.textContent='Publish MQTT';
+ }else{
+  label.textContent='BELUM DIKIRIM';info.textContent='Belum ada percobaan';
+ }
+ const updated=status?.updated_ms;
+ entry.cell.title=typeof updated==='number'?`Terakhir diperbarui ${age(Date.now()-updated)} lalu`:'';
+ const recency=typeof updated==='number'?`; diperbarui ${age(Date.now()-updated)} lalu`:'';
+ entry.cell.setAttribute('aria-label',`${label.textContent}: ${info.textContent}${recency}`);
+}
+function updateTopicStatuses(statuses){
+ for(const [suffix,entry] of topicStatusCells)setTopicDelivery(entry,statuses?.[suffix]);
 }
 function renderData(s){
  const l=s.link||{},g=l.ground||{};
@@ -66,6 +121,7 @@ function renderData(s){
  if($('mqttsettings'))$('mqttsettings').textContent=authenticated?'Atur':'Login';
  const node=s.node_id||'--',prefix=`${s.mode==='DEMO'?'sdr/demo/v2':'sdr/v2'}/${node}/`;
  if(prefix!==renderedTopicPrefix){renderedTopicPrefix=prefix;$('topicprefix').textContent=prefix;renderTopicList();}
+ updateTopicStatuses(l.mqtt_topic_delivery||{});
 }
 function render(s){
  const d=s.detection||{},l=s.link||{},h=s.host||{},q=s.daq||{},c=s.config||{},g=l.ground||{},p=s.processing||{};

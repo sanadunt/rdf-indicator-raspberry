@@ -22,6 +22,22 @@ class NetworkTests(unittest.TestCase):
         b=self.broker();sent=[];c=self.client(b);self.assertTrue(wait(lambda:c.ready))
         c.offer('q','rdf/state',b'{}',qos=1,retain=True,on_sent=lambda:sent.append(True))
         self.assertTrue(wait(lambda:sent));self.assertIn('rdf/state',b.retained)
+    def test_puback_rejection_reports_publish_error(self):
+        b=self.broker(puback_reason=0x87);c=self.client(b)
+        self.assertTrue(wait(lambda:c.ready))
+        sent=[];errors=[]
+        self.assertTrue(c.offer('q','rdf/rejected',b'{}',qos=1,on_sent=lambda:sent.append(True),
+                                on_error=errors.append))
+        self.assertTrue(wait(lambda:errors))
+        self.assertEqual(errors,['PUBLISH_REJECTED_0X87'])
+        self.assertFalse(sent)
+    def test_payload_encoding_failure_reports_publish_error(self):
+        c=Client(cfg={},client_id='serialize')
+        c.connected=True;errors=[]
+        with self.assertRaises(TypeError):
+            c.offer('bad','rdf/data',object(),on_error=errors.append)
+        self.assertEqual(errors,['PUBLISH_PAYLOAD_ENCODE_FAILED'])
+
     def test_suback_failure_not_ready(self):
         b=self.broker(deny_sub='forbidden');c=self.client(b,[('forbidden',1,True)])
         self.assertTrue(wait(lambda:c.error=='SUBACK_REJECTED'));self.assertFalse(c.ready)

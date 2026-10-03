@@ -402,4 +402,7 @@ class MqttWireTests(unittest.TestCase):
     def test_priority(self):
         q=Outbox();q.offer(Message('bulk','t',b'b',0,False,10,3,time.monotonic()));q.offer(Message('ack','t',b'a',1,False,10,0,time.monotonic()));self.assertEqual(q.pop().payload,b'a')
     def test_bounded_queue(self):
-        q=Outbox(max_messages=1);self.assertTrue(q.offer(Message('a','t',b'a',0,False,None,1,0)));self.assertFalse(q.offer(Message('b','t',b'b',0,False,None,1,0)))
+        q=Outbox(max_messages=1);errors=[]
+        self.assertTrue(q.offer(Message('a','t',b'a',0,False,None,1,0)))
+        self.assertFalse(q.offer(Message('b','t',b'b',0,False,None,1,0,on_error=errors.append)))
+        self.assertEqual(errors,['OUTBOX_FULL'])

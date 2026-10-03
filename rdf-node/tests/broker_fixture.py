@@ -102,11 +102,12 @@ class WebSocketSocket:
     
 
 class Broker:
-    def __init__(self,tls_context=None,deny_sub=None,auth=None,websocket=False,websocket_path='/mqtt',websocket_early_close=False):
+    def __init__(self,tls_context=None,deny_sub=None,auth=None,websocket=False,websocket_path='/mqtt',websocket_early_close=False,puback_reason=0):
         self.listener=socket.socket();self.listener.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
         self.listener.bind(('127.0.0.1',0));self.listener.listen(20);self.listener.settimeout(.2)
         self.port=self.listener.getsockname()[1];self.tls_context=tls_context
         self.deny_sub=deny_sub;self.auth=auth or {'test':'test-password'}
+        self.puback_reason=puback_reason
         self.websocket=websocket;self.websocket_path=websocket_path;self.websocket_early_close=websocket_early_close
         self.lock=threading.RLock();self.clients=[];self.connections=[];self.retained={};self.messages=[];self.errors=[]
         self.mqtt_connect_count=0;self.mqtt_pingreq_count=0
@@ -204,7 +205,9 @@ class Broker:
                                 if payload:self.retained[t]=payload
                                 else:self.retained.pop(t,None)
                         self._broadcast(t,payload,q,bool(h&1))
-                        if q:self._send(c,pkt(0x40,mid))
+                        if q:
+                            ack=pkt(0x40,mid) if self.puback_reason==0 else pkt(0x40,mid+bytes([self.puback_reason,0]))
+                            self._send(c,ack)
                     elif kind==12:
                         with self.lock:self.mqtt_pingreq_count+=1
                         self._send(c,b'\xd0\x00')

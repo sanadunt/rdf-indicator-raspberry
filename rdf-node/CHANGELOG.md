@@ -14,6 +14,7 @@
 - Allow the RDF edge systemd sandbox to use AF_NETLINK for PPP interface discovery.
 - Probe the configured PPP peer with one interface-bound ICMP echo about every five seconds; a missing reply does not mark PPP down.
 - Add a bottom Data page with MQTT broker settings and a read-only topic/payload inventory.
+- Show each outbound MQTT topic's latest publish result in the Data table. QoS 0 socket writes and QoS 1 broker PUBACK remain distinct from Ground receipt.
 - Add a touch keyboard for MQTT host, port, client ID, WebSocket path, and CTRL/BULK credentials.
 - Support plaintext MQTT/TCP and `ws://` with either anonymous broker access or per-channel credentials; TLS remains enabled by default.
 - Keep CTRL/BULK credentials separate and reconfigure clients live after admin save. Plaintext exposes credentials and payloads; use only on a trusted link.

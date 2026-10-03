@@ -155,6 +155,17 @@ MQTT CONNECTED/READY dibedakan dari Ground receipt. Receipt hq harus pernah terk
 bertambah; receipt berulang tidak menyegarkan progress. Setelah 10 detik terlambat,
 setelah 15 detik lost, belum pernah receipt berarti unconfirmed.
 
+Panel `DATA / MQTT` menampilkan `link.mqtt_topic_delivery`, keyed by suffix topic keluar.
+Entry menyimpan `state` (`PENDING`, `SENT`, `ERROR`), QoS, `confirmation`, `updated_ms`,
+`sent_ms` terakhir berhasil, dan kode `error` yang aman. Entry yang belum ada berarti
+belum ada percobaan publish sejak start atau reconfigure MQTT. Untuk QoS 0, `SENT` berarti
+frame PUBLISH selesai ditulis ke socket lokal (`SOCKET_WRITE`); QoS 1 berarti broker
+mengembalikan PUBACK. Keduanya bukan bukti Ground memproses data; receipt aplikasi tetap
+terpisah di `link.ground`. Error seperti `MQTT_DISCONNECTED`, `OUTBOX_FULL`, dan
+`PUBLISH_REJECTED_0X87` ditampilkan per topic; `sent_ms` tetap menunjuk sukses terakhir
+jika percobaan terbaru gagal.
+
+
 Grafik dipause karena source invalid, command, receipt, token/backlog, atau profile CONTROL.
 Token bucket adalah estimasi biaya aplikasi+allowance transport, bukan shaping seluruh
 socket/kernel/radio. Shell SSH, download log, ping terus-menerus juga berbagi link.

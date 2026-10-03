@@ -28,7 +28,7 @@ class Agent:
         self.profile=self.journal.get('profile',cfg['telemetry']['profile'])
         if self.profile not in PROFILES: self.profile=cfg['telemetry']['profile']
         self.config_proof='unverified'; self.request_config_report=True; self.planned_reboot=False
-        self.lock=threading.RLock(); self.snapshot_data={}; self.snapshot_seq=0
+        self.lock=threading.RLock(); self.snapshot_data={}; self.snapshot_seq=0; self.mqtt_topic_delivery={}
         self.stop_event=threading.Event(); self.events=queue.Queue(32)
         self.bulk_resume_after=time.monotonic()+cfg['telemetry']['resume_stable_seconds']
         self.receipt=None; self.receipt_progress=None; self.receipt_last_seen=None; self.receipt_rejects=0
@@ -187,7 +187,7 @@ class Agent:
                 except queue.Empty: break
             with self.lock:
                 self.receipt=None; self.receipt_progress=None; self.receipt_last_seen=None
-                self.sent_health.clear(); self.sent_doa.clear(); self.sent_angular.clear()
+                self.sent_health.clear(); self.sent_doa.clear(); self.sent_angular.clear(); self.mqtt_topic_delivery.clear()
             self._generation=-1; self.last_sent_state=None; self.request_config_report=True
             self.bulk_resume_after=time.monotonic()+self.cfg['telemetry']['resume_stable_seconds']
             self.bulk_reason='MQTT_RECONFIGURED'
@@ -278,6 +278,7 @@ class Agent:
         ctrl=self.clients.get('control'); bulk=self.clients.get('bulk')
         cs=ctrl.status() if ctrl else {'state':'DISABLED','ready':False,'depth':0,'pending_age_ms':0}
         bs=bulk.status() if bulk else {'state':'DISABLED','ready':False,'depth':0,'pending_age_ms':0}
+        with self.lock: topic_delivery=copy.deepcopy(self.mqtt_topic_delivery)
         # A read-only source can prove VFO frequency but not every native parameter.
         if view['valid'] and self.config_proof=='unverified': self.config_proof='source_correlated'
         if self.source.revision!=self.last_config_rev:
@@ -307,7 +308,8 @@ class Agent:
               'detection':view,'daq':view['daq'],'host':host,
               'link':{'usb':host['usb'],'ppp':host['ppp'],'interface':host['interface'],
                       'ppp_probe':host['ppp_probe'],'ppp_peer':self.cfg['link']['peer_ip'],
-                      'mqtt_control':cs,'mqtt_bulk':bs,'ground':receipt,'tx_kbit_s':host['tx_kbit_s'],'rx_kbit_s':host['rx_kbit_s'],
+                      'mqtt_control':cs,'mqtt_bulk':bs,'mqtt_topic_delivery':topic_delivery,'ground':receipt,
+                      'tx_kbit_s':host['tx_kbit_s'],'rx_kbit_s':host['rx_kbit_s'],
                       'traffic_layer':'PPP_IP_COUNTERS','profile':self.profile,'bulk_pause':self.bulk_reason,'angular_aborted':self.angular_abort},
               'config':self.config_view(sync),'capabilities':self.capabilities(),
               'last_operation':self.commands.public(latest[0]) if latest else None,'active_alerts':alerts}
@@ -333,10 +335,28 @@ class Agent:
                 'restart':c['restart_enabled'] and self.helper_status.get('allow_lifecycle',False),
                 'reboot':c['reboot_enabled'] and self.helper_status.get('allow_reboot',False),
                 'shutdown':c['shutdown_enabled'] and self.helper_status.get('allow_shutdown',False)}
+    def _topic_delivery_update(self,suffix,state,qos,error=None):
+        timestamp=now_ms()
+        if error is not None and (not isinstance(error,str) or not re.fullmatch(r'[A-Z0-9_]{1,64}',error)):
+            error='PUBLISH_FAILED'
+        with self.lock:
+            previous=self.mqtt_topic_delivery.get(suffix,{})
+            self.mqtt_topic_delivery[suffix]={
+                'state':state,'qos':qos,'confirmation':'PUBACK' if qos==1 else 'SOCKET_WRITE',
+                'updated_ms':timestamp,'sent_ms':timestamp if state=='SENT' else previous.get('sent_ms'),
+                'error':error}
     def _offer(self,key,suffix,payload,qos=0,retain=False,expiry=None,priority=2,sent=None,bulk=False):
         client=self.clients.get('bulk' if bulk else 'control')
         if not client: return False
-        return client.offer(key,self.prefix+'/'+suffix,payload,qos=qos,retain=retain,expiry=expiry,priority=priority,on_sent=sent)
+        self._topic_delivery_update(suffix,'PENDING',qos)
+        def delivered():
+            try:
+                if sent: sent()
+            finally:
+                self._topic_delivery_update(suffix,'SENT',qos)
+        def failed(reason): self._topic_delivery_update(suffix,'ERROR',qos,error=reason)
+        return client.offer(key,self.prefix+'/'+suffix,payload,qos=qos,retain=retain,expiry=expiry,
+                            priority=priority,on_sent=delivered,on_error=failed)
     def operation_changed(self,id,op,stage,result):
         suffix='ack/config' if op.startswith('config.') else 'ack/operation'
         self._offer('op:'+id,suffix,{'v':2,'sid':self.sid,'id':id,'status':stage,'t':now_ms(),'rev':self.source.revision,'result':result},
@@ -402,7 +422,7 @@ class Agent:
                 if reason:
                     if self.angular_parts: self.angular_abort+=1
                     self.angular_parts=[]
-                    if bulk: bulk.outbox.clear()
+                    if bulk: bulk.outbox.clear('BULK_PAUSED_'+reason)
                     self.bulk_reason=reason
                     self.bulk_resume_after=now+self.cfg['telemetry']['resume_stable_seconds']
                 elif now<self.bulk_resume_after:

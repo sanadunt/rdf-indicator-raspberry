@@ -135,29 +135,53 @@ class Message:
     priority:int
     offered:float
     on_sent:object=None
+    on_error:object=None
+
+def _notify_error(callback,reason):
+    if callback:
+        try: callback(reason)
+        except Exception: pass
+
 
 class Outbox:
     def __init__(self,max_messages=16,max_bytes=16384):
         self.lock=threading.RLock(); self.data=OrderedDict(); self.max_messages=max_messages; self.max_bytes=max_bytes
         self.superseded=0; self.rejected=0; self.expired=0
     def offer(self,m):
+        reason=None
         with self.lock:
             size=sum(len(x.payload) for k,x in self.data.items() if k!=m.key)+len(m.payload)
-            if (m.key not in self.data and len(self.data)>=self.max_messages) or size>self.max_bytes:
-                self.rejected+=1; return False
-            if m.key in self.data: self.superseded+=1
-            self.data[m.key]=m; return True
+            if m.key not in self.data and len(self.data)>=self.max_messages:
+                self.rejected+=1; reason='OUTBOX_FULL'
+            elif size>self.max_bytes:
+                self.rejected+=1; reason='OUTBOX_BYTE_LIMIT'
+            else:
+                if m.key in self.data: self.superseded+=1
+                self.data[m.key]=m
+        if reason: _notify_error(m.on_error,reason)
+        return reason is None
     def pop(self,now=None):
         now=time.monotonic() if now is None else now
+        expired=None
         with self.lock:
             for k,m in list(self.data.items()):
                 if m.expiry is not None and now-m.offered>m.expiry:
                     del self.data[k]; self.expired+=1
-            if not self.data: return None
-            key=min(self.data,key=lambda k:(self.data[k].priority,self.data[k].offered))
-            return self.data.pop(key)
-    def clear(self):
-        with self.lock: self.data.clear()
+                    if expired is None: expired=[]
+                    expired.append(m)
+            if not self.data: selected=None
+            else:
+                key=min(self.data,key=lambda k:(self.data[k].priority,self.data[k].offered))
+                selected=self.data.pop(key)
+        if expired:
+            for m in expired: _notify_error(m.on_error,'OUTBOX_EXPIRED')
+        return selected
+    def clear(self,reason='OUTBOX_CLEARED'):
+        with self.lock:
+            messages=list(self.data.values()) if self.data else None
+            self.data.clear()
+        if messages:
+            for m in messages: _notify_error(m.on_error,reason)
     def status(self):
         with self.lock:
             return dict(depth=len(self.data),bytes=sum(len(m.payload) for m in self.data.values()),
@@ -192,11 +216,16 @@ class Client:
         self.stop_event.set()
         if self.thread: self.thread.join(7)
     def reset(self): self.reset_event.set()
-    def offer(self,key,topic,payload,*,qos=0,retain=False,expiry=None,priority=2,on_sent=None):
-        if not self.connected: return False
-        if not isinstance(payload,bytes): payload=compact(payload)
-        if len(payload)>8192: return False
-        return self.outbox.offer(Message(key,topic,payload,qos,retain,expiry,priority,time.monotonic(),on_sent))
+    def offer(self,key,topic,payload,*,qos=0,retain=False,expiry=None,priority=2,on_sent=None,on_error=None):
+        if not self.connected:
+            _notify_error(on_error,'MQTT_DISCONNECTED'); return False
+        if not isinstance(payload,bytes):
+            try: payload=compact(payload)
+            except Exception:
+                _notify_error(on_error,'PUBLISH_PAYLOAD_ENCODE_FAILED'); raise
+        if len(payload)>8192:
+            _notify_error(on_error,'PUBLISH_PAYLOAD_LIMIT'); return False
+        return self.outbox.offer(Message(key,topic,payload,qos,retain,expiry,priority,time.monotonic(),on_sent,on_error))
     def status(self):
         return dict(state='CONNECTED' if self.connected else 'ERROR' if self.error else 'CONNECTING',
                     ready=self.ready,error=self.error,generation=self.generation,tx_bytes=self.tx_bytes,
@@ -226,7 +255,12 @@ class Client:
                 self.error=str(e) if isinstance(e,ValueError) and str(e).isupper() else type(e).__name__.upper()
             finally:
                 self.connected=False; self.ready=False; self.pending_age_ms=0
-                self.outbox.clear(); self._publish=None
+                failure=self.error or ('MQTT_STOPPED' if self.stop_event.is_set() else 'MQTT_CONNECTION_RESET')
+                if failure=='PUBLISH_REJECTED': failure='MQTT_CONNECTION_RESET'
+                if self._publish:
+                    message=self._publish[0]
+                    _notify_error(message.on_error,self.error or failure)
+                self.outbox.clear(failure); self._publish=None; self._pub_result=None
                 if self._socket:
                     try: self._socket.close()
                     except OSError: pass
@@ -304,7 +338,9 @@ class Client:
                     reason=self._pub_result
                     self._publish=None; self._pub_result=None; self.pending_age_ms=0
                     if reason>=0x80:
-                        self.error='PUBLISH_REJECTED'; raise ValueError('PUBLISH_REJECTED')
+                        self.error='PUBLISH_REJECTED'
+                        _notify_error(m.on_error,f'PUBLISH_REJECTED_0X{reason:02X}')
+                        raise ValueError('PUBLISH_REJECTED')
                     if m.on_sent:
                         try: m.on_sent()
                         except Exception: pass
@@ -313,13 +349,14 @@ class Client:
                 if m:
                     ttl=None if m.expiry is None else max(1,int(m.expiry-(now-m.offered)))
                     mid=self._next_id() if m.qos else 0
+                    self._publish=(m,mid,now)
                     data=publish_packet(m.topic,m.payload,mid,m.qos,m.retain,ttl)
                     if len(data)>self._server_max_packet: raise ValueError('SERVER_PACKET_LIMIT')
                     cost=len(data)+142+(144 if m.qos else 0)
                     if self.bucket.ready(cost):
-                        self._publish=(m,mid,now)
                         current=[encode_client_frame(data) if websocket else data,0,m,True,True]
                     else:
+                        self._publish=None
                         # Do not overwrite a newer value offered during the pop.
                         with self.outbox.lock:
                             if m.key not in self.outbox.data: self.outbox.data[m.key]=m
