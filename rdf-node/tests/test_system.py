@@ -32,7 +32,7 @@ def make_agent(path):
 
 class ApplicationTests(unittest.TestCase):
     def setUp(self):
-        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.path=Path(self.tmp.name)
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.path=Path(os.path.realpath(self.tmp.name))
         self.a=make_agent(self.path);self.addCleanup(self.a.journal.close)
     def request(self,op='config.get',**extras):
         return dict(v=2,id='test-'+uuid.uuid4().hex,sid=self.a.sid,boot=self.a.boot,issued_ms=now_ms(),expires_ms=now_ms()+15000,base_rev=self.a.source.revision,op=op,**extras)
@@ -98,6 +98,28 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(observed[0][0],'SHUTDOWN_SCHEDULED')
         self.assertEqual(observed[0][1]['op'],'system.shutdown.execute')
         self.assertFalse(self.a.planned_reboot)
+    def test_ground_keeps_diagnostic_doa_out_of_authoritative_detection(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-diagnostic')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd';ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test'}))
+        timestamp=now_ms()
+        sample={'v':2,'sid':sid,'q':1,'source':'doa.xml','source_timestamp_ms':timestamp,
+                'observed_timestamp_ms':timestamp,'raw_doa_deg':200,'frequency_mhz':137,
+                'trust':'UNVERIFIED','validation_reasons':['DIAGNOSTIC_UNVERIFIED','EMPTY_CSV']}
+        ground.receive(ground.prefix+'/telemetry/diagnostic/doa',compact(sample))
+        snapshot=ground.snapshot()
+        self.assertEqual(snapshot['diagnostic_doa']['raw_doa_deg'],200)
+        self.assertTrue(snapshot['diagnostic_doa']['available']);self.assertFalse(snapshot['diagnostic_doa']['stale'])
+        self.assertEqual(snapshot['diagnostic_doa']['trust'],'UNVERIFIED')
+        self.assertFalse(snapshot['detection']['valid']);self.assertIsNone(snapshot['detection']['relative_doa_deg'])
+        self.assertEqual(ground.doa,{})
+        newer=dict(sample,q=2,source_timestamp_ms=timestamp+1000,raw_doa_deg=201)
+        ground.receive(ground.prefix+'/telemetry/diagnostic/doa',compact(newer))
+        self.assertEqual(ground.snapshot()['diagnostic_doa']['q'],2)
+        older=dict(newer,q=3,source_timestamp_ms=timestamp+500)
+        with self.assertRaises(ValueError):
+            ground.receive(ground.prefix+'/telemetry/diagnostic/doa',compact(older))
+
     def test_ground_rejects_success_ack_for_shutdown_execution(self):
         cfg=load_config();cfg['state_dir']=str(self.path/'ground')
         ground=Ground(cfg);self.addCleanup(ground.journal.close)
@@ -446,6 +468,9 @@ class EndToEndTests(unittest.TestCase):
     def test_agent_graph_receipt_query_and_stopped_health(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp);a=make_agent(path)
+            xml_timestamp=now_ms()
+            atomic_write(path/'share'/'doa.xml',
+                         f'<DATA><TIME>{xml_timestamp}</TIME><FREQUENCY>137.0</FREQUENCY><DOA>200.0</DOA></DATA>'.encode())
             # Recreate the agent with network enabled; fixtures never target a real node.
             a.journal.close();cfg=a.cfg
             b=Broker();creds=path/'mqtt.json';creds.write_bytes(compact({'username':'test','password':'test-password'}))
@@ -475,6 +500,15 @@ class EndToEndTests(unittest.TestCase):
                 self.assertTrue(wait(lambda:g.angular_view() is not None,20),[a.snapshot(),g.snapshot(),b.errors])
                 self.assertEqual(len(g.angular_view()['values']),360)
                 self.assertTrue(g.snapshot()['detection']['valid'])
+                self.assertTrue(wait(lambda:g.snapshot().get('diagnostic_doa') is not None,5),
+                                [a.snapshot(),g.snapshot(),b.errors])
+                first_diagnostic=g.snapshot()['diagnostic_doa']
+                self.assertTrue(wait(lambda:g.snapshot()['diagnostic_doa']['q']>first_diagnostic['q'],5),
+                                [first_diagnostic,g.snapshot(),b.errors])
+                repeated_diagnostic=g.snapshot()['diagnostic_doa']
+                self.assertEqual(repeated_diagnostic['raw_doa_deg'],200)
+                self.assertEqual(repeated_diagnostic['source_timestamp_ms'],xml_timestamp)
+                self.assertTrue(g.snapshot()['detection']['valid'])
                 op=g.submit_command({'op':'config.get'})
                 self.assertTrue(wait(lambda:g.journal.lookup(op['id'])['stage']=='APPLIED',10),g.journal.lookup(op['id']))
                 oldq=g.health['q'];stop.set();thread.join(2);a.monitor.data.update(service_state='INACTIVE',cgroup_empty=True)
@@ -485,3 +519,46 @@ class EndToEndTests(unittest.TestCase):
                 self.assertFalse(b.errors)
             finally:
                 stop.set();thread.join(2);a.stop();g.stop();b.stop()
+    def test_invalid_csv_flows_only_through_diagnostic_topic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp);initial=make_agent(path);initial.journal.close();cfg=initial.cfg
+            timestamp=now_ms()
+            atomic_write(path/'share'/'DOA_value.html',b'')
+            atomic_write(path/'share'/'doa.xml',
+                         f'<DATA><TIME>{timestamp}</TIME><FREQUENCY>137.0</FREQUENCY><DOA>200.0</DOA></DATA>'.encode())
+            broker=Broker();creds=path/'mqtt.json'
+            creds.write_bytes(compact({'username':'test','password':'test-password'}))
+            cfg['mqtt'].update(enabled=True,host='127.0.0.1',port=broker.port,tls=False,allow_insecure_loopback=True,
+                               control_credentials_file=str(creds),bulk_credentials_file=str(creds))
+            cfg['telemetry']['resume_stable_seconds']=1
+            agent=Agent(cfg);agent.monitor=FakeMonitor(cfg);agent.source.poll(force=True)
+            ground_cfg=copy.deepcopy(cfg);ground_cfg['state_dir']=str(path/'ground-diagnostic')
+            ground=Ground(ground_cfg);stop=threading.Event()
+            def writer():
+                index=3
+                while not stop.wait(.25):
+                    index+=1;atomic_write(path/'share'/'status.json',compact(status(idx=index)))
+            thread=threading.Thread(target=writer,daemon=True);thread.start()
+            agent.start();ground.start()
+            try:
+                self.assertTrue(wait(lambda:ground.snapshot().get('diagnostic_doa') is not None,12),
+                                [agent.snapshot(),ground.snapshot(),broker.errors])
+                self.assertTrue(wait(lambda:agent.snapshot().get('link',{}).get('mqtt_topic_delivery',{}).get(
+                    'telemetry/diagnostic/doa',{}).get('state')=='SENT',8),agent.snapshot())
+                diagnostic=ground.snapshot()['diagnostic_doa']
+                self.assertEqual((diagnostic['raw_doa_deg'],diagnostic['frequency_mhz']),(200,137))
+                self.assertIn('EMPTY_CSV',diagnostic['validation_reasons'])
+                initial_q=diagnostic['q']
+                self.assertTrue(wait(lambda:ground.snapshot().get('diagnostic_doa',{}).get('q',0)>initial_q,5),
+                                [diagnostic,ground.snapshot(),broker.errors])
+                repeated=ground.snapshot()['diagnostic_doa']
+                self.assertEqual(repeated['source_timestamp_ms'],diagnostic['source_timestamp_ms'])
+                self.assertEqual(repeated['raw_doa_deg'],diagnostic['raw_doa_deg'])
+                self.assertFalse(ground.snapshot()['detection']['valid']);self.assertEqual(ground.doa,{})
+                self.assertTrue(wait(lambda:agent.receipt_view()['state']=='RECEIVING',12),agent.receipt_view())
+                self.assertEqual(agent.receipt_view()['last'].get('dq'),0)
+                self.assertNotEqual(agent.snapshot()['link']['mqtt_topic_delivery'].get(
+                    'telemetry/doa',{}).get('state'),'SENT')
+                self.assertFalse(broker.errors)
+            finally:
+                stop.set();thread.join(2);agent.stop();ground.stop();broker.stop()

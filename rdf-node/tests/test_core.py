@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest import mock
 from rdf_node.config import load_config,validate_config
 from rdf_node.util import compact,strict_json,now_ms,digest
-from rdf_node.source import parse_csv,parse_status,safe_settings,Source
+from rdf_node.source import parse_csv,parse_doa_xml,parse_status,safe_settings,Source
 from rdf_node.codec import HEADER,CHUNK,encode,decode,split,Assembler
 from rdf_node.journal import Journal
 from rdf_node.helper import DEFAULT_POLICY,Controller,HelperError,validate_changes,patch_file
@@ -127,6 +127,18 @@ class ParserTests(unittest.TestCase):
     def test_frequency_mismatch(self):
         r=record();r[4]=100000000
         with self.assertRaises(ValueError):parse_csv(csv_bytes(r),settings())
+    def test_doa_xml_keeps_source_units_and_time(self):
+        raw=b'<DATA><TIME>1791169415361</TIME><FREQUENCY>137.0</FREQUENCY><DOA>200.0</DOA></DATA>'
+        self.assertEqual(parse_doa_xml(raw),{'source_timestamp_ms':1791169415361,
+                         'raw_doa_deg':200.0,'frequency_mhz':137.0})
+    def test_doa_xml_rejects_duplicate_fields_and_entities(self):
+        documents=(b'<DATA><TIME>1791169415361</TIME><TIME>1791169415362</TIME><FREQUENCY>137</FREQUENCY><DOA>200</DOA></DATA>',
+                   b'<!DOCTYPE DATA [<!ENTITY angle "200">]><DATA><TIME>1791169415361</TIME><FREQUENCY>137</FREQUENCY><DOA>&angle;</DOA></DATA>')
+        for document in documents:
+            with self.subTest(document=document):
+                with self.assertRaises(ValueError):parse_doa_xml(document)
+
+
     def test_settings_redaction(self):
         s=settings();s.update(api_key='do-not-export',password='secret',remote_url='secret')
         result=safe_settings(s);self.assertNotIn('secret',str(result));self.assertNotIn('api_key',result)
@@ -164,6 +176,25 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(self.src.seq,q);self.assertEqual(self.src.record,r);self.assertFalse(self.src.view(True)['valid'])
     def test_no_path_local_mode(self):
         self.cfg['source']['share_dir']=None;s=Source(self.cfg,self.j);s.poll();self.assertEqual(s.view(True)['state'],'SETUP_REQUIRED')
+    def test_xml_diagnostic_survives_empty_csv_without_authorizing_detection(self):
+        raw=b'<DATA><TIME>1791169415361</TIME><FREQUENCY>137.0</FREQUENCY><DOA>200.0</DOA></DATA>'
+        (self.path/'doa.xml').write_bytes(raw);(self.path/'DOA_value.html').write_bytes(b'')
+        self.src.poll(force=True)
+        detection=self.src.view(True)
+        diagnostic=self.src.diagnostic_view(detection['reasons'])
+        self.assertFalse(detection['valid']);self.assertIsNone(detection['relative_doa_deg'])
+        self.assertTrue(diagnostic['available']);self.assertEqual(diagnostic['raw_doa_deg'],200)
+        self.assertEqual(diagnostic['frequency_mhz'],137)
+        self.assertIn('DIAGNOSTIC_UNVERIFIED',diagnostic['validation_reasons'])
+        self.assertIn('EMPTY_CSV',diagnostic['validation_reasons'])
+        self.assertGreater(diagnostic['observed_timestamp_ms'],0)
+    def test_missing_xml_does_not_block_valid_csv(self):
+        self.src.poll(force=True);self.write(2);self.src.poll(force=True)
+        detection=self.src.view(True)
+        self.assertTrue(detection['valid'])
+        self.assertFalse(self.src.diagnostic_view(detection['reasons'])['available'])
+
+
     def test_config_change_does_not_relabel_old_record(self):
         self.src.poll(force=True);oldrev=self.src.record['observed_revision'];s=settings();s['uniform_gain']=20.7
         (self.path/'settings.json').write_bytes(compact(s));self.src.poll(force=True)
@@ -220,7 +251,7 @@ class JournalTests(unittest.TestCase):
 class HelperTests(unittest.TestCase):
     def setUp(self):
         import pwd
-        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.path=Path(self.tmp.name)
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.path=Path(os.path.realpath(self.tmp.name))
         self.p=dict(DEFAULT_POLICY);self.p.update(state_dir=str(self.path/'state'),allowed_user=pwd.getpwuid(os.getuid()).pw_name,engine_service='test-sdr.service')
         self.ctrl=Controller(self.p)
     def test_arbitrary_rpc_denied(self):

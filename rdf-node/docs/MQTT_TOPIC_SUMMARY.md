@@ -26,7 +26,7 @@ Edge membuka dua MQTT client:
 
 | Kanal | Client ID | Hak data |
 |---|---|---|
-| Control | `{client_id}-control` | Publish telemetry JSON, state, capabilities, config report, availability, ACK; subscribe command dan receipt. |
+| Control | `{client_id}-control` | Publish JSON telemetry (termasuk topik diagnostik terpisah), state, capabilities, config report, availability, ACK; subscribe command dan receipt. |
 | Bulk | `{client_id}-bulk` | Publish `telemetry/angular` saja. Tidak subscribe command dan tidak memiliki hak command. |
 | Ground | `{node_id}-ground` | Subscribe data operasional/ACK; publish command dan receipt. |
 
@@ -39,6 +39,7 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | Topic suffix | Arah | Kanal | QoS | Retained | Interval / expiry | Isi |
 |---|---|---|---:|---|---|---|
 | `telemetry/doa` | Edge -> Ground | Control | 0 | Tidak | Umumnya tiap 1 s bila DoA valid; expiry 3 s | Ringkasan DoA, frekuensi, confidence, power, revision. |
+| `telemetry/diagnostic/doa` | Edge -> Ground | Control | 0 | Tidak | 1/s selama `doa.xml` tersedia; expiry 3 s | Sudut raw `doa.xml`, timestamp sumber/observasi, frekuensi MHz, status `UNVERIFIED` dan validation reasons. Diulang meski sampel tidak berubah, terlepas dari gate DoA normal. |
 | `telemetry/health` | Edge -> Ground | Control | 0 | Tidak | Tiap 1 s; expiry 5 s | Status run, DAQ, clock, umur sumber, temperatur, dropped frames. |
 | `telemetry/health/detail` | Edge -> Ground | Control | 0 | Tidak | Tiap 10 s; expiry 15 s | Detail host, USB, sync DAQ, trafik, parse dan abort counter. |
 | `telemetry/angular` | Edge -> Ground | Bulk | 0 | Tidak | Profile-dependent; expiry 3 s | Frame 360 sampel dalam satu atau lebih payload binary. |
@@ -65,6 +66,7 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | Topic | Yang dilakukan Ground |
 |---|---|
 | `telemetry/doa` | Tampilkan DoA terbaru hanya jika `ok`, revision, sequence, timestamp dan health cocok; jangan anggap `c` sebagai probabilitas. |
+| `telemetry/diagnostic/doa` | Tampilkan terpisah sebagai diagnostik UNVERIFIED dengan timestamp dan reasons; jangan gabungkan ke `telemetry/doa`, receipt, atau keputusan kontrol. |
 | `telemetry/health` | Gunakan sebagai sumber utama freshness dan status DAQ; pisahkan MQTT tersambung dari `daq=1`. |
 | `telemetry/health/detail` | Pakai untuk diagnosis host, USB, sync, trafik dan error; jangan jadikan pengganti gate health. |
 | `telemetry/angular` | Rakit semua chunk sebelum menggambar kurva; receipt `aq` baru maju setelah frame lolos gate. |
@@ -120,13 +122,14 @@ Angka berikut diukur dari serializer JSON compact (`util.compact`) dan paket MQT
 | Topic / profile | Interval saat syarat lolos | Payload contoh | MQTT PUBLISH |
 |---|---|---:|---:|
 | `telemetry/doa` | Maks. 1/s; hanya DoA valid dengan sequence baru | 109 B | 147 B |
+| `telemetry/diagnostic/doa` | 1/s selama XML tersedia; heartbeat mengulang sampel yang sama, independen dari gate DoA normal | 303 B | 352 B |
 | `telemetry/health` | 1/s | 113 B | 154 B |
 | `telemetry/health/detail` | 1/10 s | 179 B | 227 B |
 | `telemetry/angular` (`balanced`, Q16) | 2 chunk/4 s; tiap chunk | 396 B | 438 B |
 | `telemetry/angular` (`graph_u8`, U8) | 1 chunk/2 s | 420 B | 462 B |
 | `telemetry/angular` (`control`) | Tidak dipublish | — | — |
 
-Satu frame Q16 berarti total 792 B payload dan 876 B dalam dua PUBLISH. Angular adalah binary, bukan JSON. DoA, health, dan detail adalah satu-satunya JSON telemetri periodik; hanya DoA dan health berjalan tiap detik.
+Satu frame Q16 berarti total 792 B payload dan 876 B dalam dua PUBLISH. Angular adalah binary, bukan JSON. Health, normal DoA, detail, dan diagnostic DoA adalah JSON telemetri berkala; diagnostic DoA hanya dikirim saat gate strict memblokir `telemetry/doa` dan payload berubah, paling banyak 1/s.
 
 ### Topic event-driven dan command
 
@@ -195,6 +198,14 @@ Jadi, bukan semua JSON dikirim per detik: health dan DoA saja yang dijadwalkan 1
 | `ok` | `1` menandakan DoA lolos gate source Edge. |
 
 Ground menolak DoA yang retained, lebih lama dari 5 s, sequence tidak maju, `ok` bukan `1`, revision tidak cocok, atau tidak didukung health DAQ fresh dengan `daq=1`.
+
+### `telemetry/diagnostic/doa`
+
+```json
+{"v":2,"sid":"7a8b9c0d","q":19,"source":"doa.xml","source_timestamp_ms":1790668800123,"observed_timestamp_ms":1790668800444,"raw_doa_deg":200.0,"frequency_mhz":137.0,"trust":"UNVERIFIED","validation_reasons":["DIAGNOSTIC_UNVERIFIED","EMPTY_CSV","DAQ_NOT_HEALTHY","SOURCE_UNVERIFIED","ANGLE_UNVERIFIED"]}
+```
+
+`source_timestamp_ms` berasal dari field `TIME` XML sebagai Unix milliseconds; `observed_timestamp_ms` adalah waktu Edge membaca sampel; `frequency_mhz` mempertahankan unit MHz yang ditulis XML; `raw_doa_deg` tidak dikonversi menjadi sudut otoritatif. `validation_reasons` memuat gate `detection` saat publish dan selalu menyertakan `DIAGNOSTIC_UNVERIFIED`. Pesan QoS 0 ini hanya dikirim saat DoA strict tidak valid dan sampel/reasons berubah, maksimum 1/s, expiry 3 s, tidak retained. Ground menampilkan topik ini terpisah; data tidak diterima sebagai DoA valid, receipt, atau dasar command. Ukuran contoh payload 303 B / PUBLISH 352 B memakai fixture lima reasons; payload aktual mengikuti panjang reasons.
 
 ### `telemetry/health`
 

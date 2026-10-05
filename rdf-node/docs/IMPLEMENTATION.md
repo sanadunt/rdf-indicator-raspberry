@@ -10,10 +10,11 @@ Native SDR _share
        -> Scheduler -> MQTT control / MQTT bulk -> T900 PPP
 
 Ground MQTT consumer
-   -> validate session/config/health
-   -> decode DoA + assemble angular chunks
-   -> local API + preview graph
-   -> receipt with accepted sequences
+   -> validate normal telemetry session/config/health
+   -> decode authoritative DoA + assemble angular chunks
+   -> keep diagnostic DoA on a separate UNVERIFIED path
+   -> local API + preview graph + diagnostic display
+   -> receipt only for accepted health/DoA/angular sequences
 
 Authenticated command
    -> CommandManager -> SQLite journal -> single worker
@@ -115,6 +116,11 @@ CSV: 377 field, opsional trailing delimiter kosong. Exact 360 nilai finite; satu
 harus tidak ambigu. Source timestamp, frequency dan revision-at-read dilacak. Re-reading
 file tidak membuat q baru. Timestamp regresi ditolak sampai sumber/agent direkonsiliasi.
 
+`doa.xml` diparse terpisah hanya untuk tampilan/relay diagnostik. `TIME` adalah Unix
+milliseconds, `FREQUENCY` dalam MHz, dan `DOA` dipertahankan sebagai nilai raw. Diagnostik
+tidak mengisi `detection`, mengubah gate angle/provenance, atau memenuhi syarat telemetry,
+receipt, maupun control normal. XML hilang/rusak tidak dapat membuat source valid.
+
 DAQ sehat memerlukan status fresh, daq_ok boolean, frame/sample-delay/IQ sync true, dan
 kemajuan frame. Observasi frame pertama belum membuktikan progress. Counter turun/reset
 memerlukan progress berikutnya. Missing field dianggap unknown, tidak dibuat hijau.
@@ -164,6 +170,18 @@ mengembalikan PUBACK. Keduanya bukan bukti Ground memproses data; receipt aplika
 terpisah di `link.ground`. Error seperti `MQTT_DISCONNECTED`, `OUTBOX_FULL`, dan
 `PUBLISH_REJECTED_0X87` ditampilkan per topic; `sent_ms` tetap menunjuk sukses terakhir
 jika percobaan terbaru gagal.
+
+`telemetry/diagnostic/doa` memakai client Control, QoS 0, expiry 3 s, tanpa retention.
+Saat `doa.xml` tersedia, Edge mengirim satu sampel per detik, termasuk saat isi sampel
+tidak berubah dan terlepas dari hasil gate DoA normal. Sequence `q` bertambah tiap
+publish; timestamp sumber dan observasi tetap menunjuk pembacaan file yang sama. Ground
+menyimpan dan menampilkan sampel terpisah sebagai `UNVERIFIED`; ini tidak menambah `dq`
+atau menjadi detection normal.
+
+Panel utama Edge membaca `diagnostic_doa` dari snapshot lokal dan polling API tiap 500 ms.
+Snapshot agent mengikuti `source.poll_ms` (default 250 ms). Saat detection normal invalid,
+panel menampilkan sudut raw dan frekuensi XML dengan label `UNVERIFIED`, umur sumber, dan
+validation reasons. Detection valid tetap memakai sudut relatif normal.
 
 
 Grafik dipause karena source invalid, command, receipt, token/backlog, atau profile CONTROL.

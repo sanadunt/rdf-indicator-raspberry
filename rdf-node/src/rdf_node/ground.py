@@ -21,12 +21,12 @@ class Ground:
         self.cfg=cfg; self.demo=demo; self.prefix=('sdr/demo/v2/' if demo else 'sdr/v2/')+cfg['node_id']
         self.lock=threading.RLock(); self.stop_event=threading.Event(); self.events=queue.Queue(64)
         self.journal=Journal(Path(cfg['state_dir'])/'ground.sqlite3')
-        self.node_state={}; self.node_config={}; self.caps={}; self.health={}; self.doa={}; self.angular=None; self.detail={}
-        self.health_seen=0; self.doa_seen=0; self.angular_seen=0; self.state_seen=0; self.sid_map={}
+        self.node_state={}; self.node_config={}; self.caps={}; self.health={}; self.doa={}; self.diagnostic_doa=None; self.angular=None; self.detail={}
+        self.health_seen=0; self.doa_seen=0; self.diagnostic_seen=None; self.angular_seen=0; self.state_seen=0; self.sid_map={}
         self.assembler=Assembler(); self.rejected=0; self.receipt_count=0; self.snapshot_seq=0; self.current_gen=-1
         self.client=Client(cfg=cfg['mqtt'],client_id=cfg['node_id']+'-ground'+('-demo' if demo else ''),
             credentials_file=cfg['mqtt']['control_credentials_file'],rate=1000,
-            subscriptions=[(self.prefix+'/telemetry/'+s,0,True) for s in ('doa','health','health/detail','angular')]+
+            subscriptions=[(self.prefix+'/telemetry/'+s,0,True) for s in ('doa','health','health/detail','angular','diagnostic/doa')]+
                           [(self.prefix+'/'+s,1,False) for s in ('state','capabilities','config/reported','availability','ack/config','ack/operation')],
             on_message=self._incoming)
         self.thread=threading.Thread(target=self._loop,name='ground-consumer',daemon=True)
@@ -86,7 +86,7 @@ class Ground:
                 if self.node_state.get('sid')!=sid:
                     for old in self.journal.pending_shutdowns():
                         self.journal.update(old['id'],'OUTCOME_UNKNOWN',{'reason':'SHUTDOWN_COMPLETION_UNVERIFIED','boot':j['boot']})
-                    self.health={}; self.doa={}; self.angular=None; self.node_config={}; self.assembler.clear()
+                    self.health={}; self.doa={}; self.diagnostic_doa=None; self.diagnostic_seen=None; self.angular=None; self.node_config={}; self.assembler.clear()
                 self.node_state=j; self.state_seen=time.monotonic(); return
             if suffix=='capabilities': self.caps=j; return
             if sid!=self.node_state.get('sid'): return
@@ -110,6 +110,22 @@ class Ground:
                 finite(j['a'],0,360); finite(j['c'],-327.67,327.67); finite(j['p'],-1e6,1e6); integer(j['f'],1,0xffffffff)
                 if not self.health or self.health.get('daq')!=1 or time.monotonic()-self.health_seen>8: raise ValueError('DOA_WITHOUT_HEALTH')
                 self.doa=j; self.doa_seen=time.monotonic()
+            elif suffix=='telemetry/diagnostic/doa':
+                q=integer(j.get('q'),1,0xffffffff)
+                source_time=integer(j.get('source_timestamp_ms'),1000000000000,9999999999999)
+                integer(j.get('observed_timestamp_ms'),1000000000000,9999999999999)
+                angle=finite(j.get('raw_doa_deg'),0,360)
+                finite(j.get('frequency_mhz'),0.001,5000)
+                reasons=j.get('validation_reasons')
+                if (j.get('source')!='doa.xml' or j.get('trust')!='UNVERIFIED' or
+                    not isinstance(reasons,list) or not 1<=len(reasons)<=32 or
+                    any(not isinstance(r,str) or not re.fullmatch(r'[A-Z0-9_:-]{1,64}',r) for r in reasons) or
+                    'DIAGNOSTIC_UNVERIFIED' not in reasons):
+                    raise ValueError('BAD_DIAGNOSTIC_DOA')
+                if self.diagnostic_doa and q<=self.diagnostic_doa.get('q',0): return
+                if self.diagnostic_doa and source_time<self.diagnostic_doa['source_timestamp_ms']:
+                    raise ValueError('DIAGNOSTIC_SOURCE_TIME_REGRESSED')
+                self.diagnostic_doa=j; self.diagnostic_seen=time.monotonic()
             elif suffix=='telemetry/health/detail': self.detail=j
             elif suffix in ('ack/config','ack/operation'):
                 old=self.journal.lookup(str(j.get('id','')))
@@ -133,6 +149,12 @@ class Ground:
             da=round((now-self.doa_seen)*1000) if self.doa else None
             fresh=bool(ha is not None and ha<8000)
             doa_valid=bool(fresh and self.health.get('daq')==1 and self.doa and da<5000 and now_ms()-self.doa.get('t',0)<5000)
+            diagnostic=copy.deepcopy(self.diagnostic_doa)
+            diagnostic_age=round((now-self.diagnostic_seen)*1000) if diagnostic else None
+            if diagnostic:
+                diagnostic['available']=True
+                diagnostic['received_age_ms']=diagnostic_age
+                diagnostic['stale']=diagnostic_age>5000
             latest=self.journal.latest(1)
             return {'schema_version':2,'snapshot_seq':self.snapshot_seq,'snapshot_ms':now_ms(),'node_id':self.cfg['node_id'],
                     'mode':'DEMO' if self.demo else 'LIVE','sid':self.node_state.get('sid'),'boot_id':self.node_state.get('boot'),
@@ -140,6 +162,7 @@ class Ground:
                     'detection':{'valid':doa_valid,'relative_doa_deg':self.doa.get('a') if doa_valid else None,
                                  'frequency_hz':self.doa.get('f'),'source_timestamp_ms':self.doa.get('t'),'confidence_native_db':self.doa.get('c'),
                                  'power_native_db':self.doa.get('p'),'receipt_age_ms':da},
+                    'diagnostic_doa':diagnostic,
                     'config':self.config_view(),'link':{'mqtt_control':self.client.status(),'receipt_sent':self.receipt_count,'rejected':self.rejected},
                     'capabilities':self.capabilities(),'last_operation':CommandManager.public(latest[0]) if latest else None}
     def angular_view(self):

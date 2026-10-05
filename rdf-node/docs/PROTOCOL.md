@@ -8,6 +8,7 @@ Demo CLI tidak membuka koneksi MQTT. Prefix demo tersedia hanya bagi integration
 | Topic suffix | Arah | QoS | Retained |
 |---|---|---:|---|
 | telemetry/doa | UAV -> Ground | 0 | tidak |
+| telemetry/diagnostic/doa | UAV -> Ground | 0 | tidak |
 | telemetry/health | UAV -> Ground | 0 | tidak |
 | telemetry/health/detail | UAV -> Ground | 0 | tidak |
 | telemetry/angular | UAV -> Ground | 0 | tidak |
@@ -110,6 +111,11 @@ Kurva parsial tidak dirender. Konvensi1 mempertahankan index native; tidak otoma
 Dikirim setiap5s oleh satu receiver yang benar-benar mendecode. `aq` baru maju setelah
 frame selesai dan lolos. Bukan PUBACK MQTT, bukan bukti operator melihat browser.
 Unknown sid, q yang tidak pernah terkirim, regressi, dan retained receipt ditolak.
+`telemetry/diagnostic/doa` dipublikasikan satu kali per detik selama XML tersedia,
+terlepas dari validitas DoA normal, termasuk untuk sampel yang tidak berubah. `q`
+bertambah tiap publish; timestamp sumber/observasi menunjuk pembacaan file, bukan waktu
+heartbeat. Ground menampilkannya pada field API `diagnostic_doa` sebagai `UNVERIFIED`;
+data tidak masuk ke `dq`, DoA valid, angular, atau otorisasi command.
 
 ## Command envelope
 
@@ -131,6 +137,7 @@ Hasil tersedia lewat jurnal setelah reconnect; tidak bergantung broker offline h
 Receiver Ubuntu: `http://127.0.0.1:8791`.
 
 - `GET /api/v2/snapshot`: node/health/metadata yang telah digate.
+  `diagnostic_doa` berisi sampel XML terpisah dengan timestamp sumber/observasi, alasan validasi dan status stale; tidak dihitung sebagai receipt atau DoA valid.
 - `GET /api/v2/angular/latest`: array360, metadata dan `stale`.
 - `GET /api/v2/config`: safe report/proof.
 - `GET /api/v2/operations/latest`: public results, challenge disensor.

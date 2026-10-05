@@ -21,6 +21,7 @@ const mqttTopics=[
   ['telemetry/health','QoS 0 / ~1 dtk','Payload: v,sid,q,t,run,daq,drop,age,temp,clk,rev; run/DAQ/clock dikirim sebagai kode.'],
   ['telemetry/health/detail','QoS 0 / ~10 dtk','Payload: v,sid,t,usb,sync,cpu,mem,disk_free,throt,uv,tx,rx,adrop,parse.'],
   ['telemetry/doa','QoS 0','Payload: v,sid,q,t,f,a,c,p,rev,ok. f=Hz, a=DoA relatif, c=confidence dB, p=power dB.'],
+  ['telemetry/diagnostic/doa','QoS 0 / heartbeat 1 dtk bila XML tersedia','Sampel doa.xml diulang meski tidak berubah; raw angle + source/observation timestamps; UNVERIFIED; bukan receipt.'],
   ['telemetry/angular','QoS 0 / binary','Envelope sid/q/index/count/total + frame RDF2 berisi metadata dan 360 nilai terkuantisasi Q16/U8; digate data/receipt. Bukan raw IQ.'],
   ['ack/config','QoS 1','Payload ACK: v,sid,id,status,t,rev,result.'],
   ['ack/operation','QoS 1','Payload ACK: v,sid,id,status,t,rev,result.']
@@ -125,16 +126,20 @@ function renderData(s){
 }
 function render(s){
  const d=s.detection||{},l=s.link||{},h=s.host||{},q=s.daq||{},c=s.config||{},g=l.ground||{},p=s.processing||{};
+ const diag=s.diagnostic_doa||{},showDiagnostic=!d.valid&&diag.available;
+ const diagnosticReason=Array.isArray(diag.validation_reasons)&&diag.validation_reasons.find(reason=>reason!=='DIAGNOSTIC_UNVERIFIED')||'UNVERIFIED';
  $('mode').textContent=s.mode==='DEMO'?'DEMO':'';
  const names={RUNNING:'RDF BERJALAN',STOPPED:'RDF BERHENTI',STARTING:'MEMULAI RDF',STOPPING:'MENGHENTIKAN',ERROR:'RDF ERROR',UNKNOWN:'RDF UNKNOWN'};
  label('run',names[p.observed]||'MENUNGGU',p.observed==='RUNNING'?'HEALTHY':p.observed);
  label('ppp',l.ppp||'--',l.ppp);label('mqtt',l.mqtt_control?.state||'DISABLED',l.mqtt_control?.state);
  label('ground',g.state==='RECEIVING'?age(g.age_ms):g.state==='UNCONFIRMED'?'BELUM TERBUKTI':g.state||'--',g.state);
- $('angle').textContent=d.valid?`${fmt(d.relative_doa_deg)}\u00b0`:'--';
- $('angle').className=d.valid?'good':'neutral';
- $('age').textContent=d.valid?`Umur ${age(d.source_age_ms)}`:`${d.state||'MENUNGGU'} / ${age(d.source_age_ms)}`;
- $('freq').textContent=d.frequency_hz?`${fmt(d.frequency_hz/1e6,3)} MHz`:'-- MHz';
- $('quality').textContent=`PAPR ${fmt(d.confidence_native_db,2)} dB / P ${fmt(d.power_native_db)} dB`;
+ $('angle-label').textContent=showDiagnostic?'DOA RAW / UNVERIFIED':'ARAH RELATIF';
+ $('angle').textContent=showDiagnostic?`${fmt(diag.raw_doa_deg)}\u00b0`:d.valid?`${fmt(d.relative_doa_deg)}\u00b0`:'--';
+ $('angle').className=showDiagnostic?'warn':d.valid?'good':'neutral';
+ $('age').textContent=showDiagnostic?`doa.xml / umur ${age(diag.source_age_ms)}`:d.valid?`Umur ${age(d.source_age_ms)}`:`${d.state||'MENUNGGU'} / ${age(d.source_age_ms)}`;
+ $('frequency-label').textContent=showDiagnostic?'FREKUENSI XML':'FREKUENSI VFO';
+ $('freq').textContent=showDiagnostic?`${fmt(diag.frequency_mhz,3)} MHz`:d.frequency_hz?`${fmt(d.frequency_hz/1e6,3)} MHz`:'-- MHz';
+ $('quality').textContent=showDiagnostic?`Gate: ${diagnosticReason}`:`PAPR ${fmt(d.confidence_native_db,2)} dB / P ${fmt(d.power_native_db)} dB`;
  label('daq',q.state==='HEALTHY'?'SINKRON':q.state||'UNKNOWN',q.state);
  const syncnames={SYNCED:'SAMA',REPORTED_SAME:'REPORT SAMA',UNVERIFIED:'BELUM TERVERIFIKASI',PENDING:'BELUM SAMA',LAST_KNOWN:'TERAKHIR SAMA'};
  label('sync',`${syncnames[c.ground_sync]||'UNVERIFIED'}${c.sdr_revision?` r${c.sdr_revision}`:''}`,c.ground_sync);

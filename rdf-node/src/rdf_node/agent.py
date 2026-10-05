@@ -34,6 +34,7 @@ class Agent:
         self.receipt=None; self.receipt_progress=None; self.receipt_last_seen=None; self.receipt_rejects=0
         self.sent_health=deque(maxlen=120); self.sent_doa=deque(maxlen=120); self.sent_angular=deque(maxlen=30)
         self.hq=0; self.last_doa_q=0; self.last_angular_q=0; self.angular_parts=[]; self.angular_started=0
+        self.diagnostic_q=0
         self.angular_q=0; self.angular_abort=0; self.bulk_reason='BOOTSTRAP'; self.helper_status={}
         self.clients={}; self._generation=-1; self.last_config_rev=None; self.last_sent_state=None
         self.mqtt_state_path=Path(cfg['state_dir'])/'mqtt-ui-settings.json'
@@ -264,6 +265,7 @@ class Agent:
         host=self.monitor.snapshot()
         if self.demo: host['clock_trusted']=True; host['clock_state']='DEMO'
         view=self.source.view(host['clock_trusted'],self.commands.busy)
+        diagnostic=self.source.diagnostic_view(view['reasons'])
         processing='UNKNOWN'
         if host['service_state']=='ACTIVE': processing='RUNNING'
         elif host['service_state']=='FAILED': processing='ERROR'
@@ -305,7 +307,7 @@ class Agent:
               'node_id':self.cfg['node_id'],'sid':self.sid,'boot_id':self.boot,'agent_instance_id':self.instance,
               'snapshot_seq':self.snapshot_seq,'snapshot_ms':now_ms(),
               'processing':{'observed':processing,'desired':self.helper_status.get('desired'),'scope':'SDR_STACK'},
-              'detection':view,'daq':view['daq'],'host':host,
+              'detection':view,'diagnostic_doa':diagnostic,'daq':view['daq'],'host':host,
               'link':{'usb':host['usb'],'ppp':host['ppp'],'interface':host['interface'],
                       'ppp_probe':host['ppp_probe'],'ppp_peer':self.cfg['link']['peer_ip'],
                       'mqtt_control':cs,'mqtt_bulk':bs,'mqtt_topic_delivery':topic_delivery,'ground':receipt,
@@ -412,6 +414,17 @@ class Agent:
                              'a':round(d['relative_doa_deg'],2),'c':round(d['confidence_native_db'],2),
                              'p':round(d['power_native_db'],2),'rev':d['revision'],'ok':1}
                     if self._offer('doa','telemetry/doa',payload,expiry=3,sent=self._remember('doa',d['q'])): self.last_doa_q=d['q']
+                diag=s['diagnostic_doa']
+                if diag['available'] and tick('diagnostic',1):
+                    self.diagnostic_q+=1
+                    if self.diagnostic_q>0xffffffff: raise RuntimeError('DIAGNOSTIC_SEQUENCE_EXHAUSTED_RESTART_AGENT')
+                    payload={'v':2,'sid':self.sid,'q':self.diagnostic_q,'source':'doa.xml',
+                             'source_timestamp_ms':diag['source_timestamp_ms'],
+                             'observed_timestamp_ms':diag['observed_timestamp_ms'],
+                             'raw_doa_deg':round(diag['raw_doa_deg'],2),
+                             'frequency_mhz':round(diag['frequency_mhz'],6),
+                             'trust':'UNVERIFIED','validation_reasons':diag['validation_reasons']}
+                    self._offer('diagnostic-doa','telemetry/diagnostic/doa',payload,expiry=3,priority=3)
                 reason=None
                 if self.profile=='control': reason='PROFILE_CONTROL'
                 elif not d['valid']: reason='SOURCE_NOT_ELIGIBLE'

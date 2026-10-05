@@ -3,6 +3,7 @@ import csv
 import io
 import hashlib
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from .util import finite, integer, stable_read, strict_json, digest, now_ms
 
@@ -72,6 +73,23 @@ def parse_csv(data: bytes, settings: dict | None, output_vfo=0) -> dict:
         raise ValueError('MULTIPLE_RECORDS_WITHOUT_VFO_AUTHORITY')
     return parsed[0]
 
+def parse_doa_xml(data:bytes) -> dict:
+    if not data: raise ValueError('XML_EMPTY')
+    if b'\x00' in data: raise ValueError('XML_NUL')
+    upper=data.upper()
+    if b'<!DOCTYPE' in upper or b'<!ENTITY' in upper: raise ValueError('XML_DTD_FORBIDDEN')
+    try: root=ET.fromstring(data)
+    except ET.ParseError as e: raise ValueError('XML_PARSE_ERROR') from e
+    if root.tag!='DATA': raise ValueError('XML_ROOT_INVALID')
+    def field(name):
+        matches=[child for child in root if child.tag==name]
+        if len(matches)!=1 or list(matches[0]) or matches[0].text is None: raise ValueError('XML_FIELD_INVALID')
+        return matches[0].text.strip()
+    return {'source_timestamp_ms':integer(field('TIME'),1000000000000,9999999999999),
+            'raw_doa_deg':finite(field('DOA'),0,360),
+            'frequency_mhz':finite(field('FREQUENCY'),0.001,5000)}
+
+
 def parse_status(data:bytes) -> dict:
     j=strict_json(data)
     if not isinstance(j,dict):
@@ -105,6 +123,8 @@ class Source:
         self.config_changed_mono=time.monotonic(); self.revision=None
         self.error=None; self.status_error=None; self.config_error=None
         self.parse_errors=0; self.frame_reset=False; self.drop_delta=None; self.last_drop=None
+        self.diagnostic_record=None; self.diagnostic_signature=None; self.diagnostic_seen=None
+        self.diagnostic_observed_ms=None; self.diagnostic_error=None
         self.source_tick=0; self.next_settings=0; self.next_status=0; self.settings_stat=None
     def poll(self, force=False):
         self.source_tick+=1
@@ -170,6 +190,20 @@ class Source:
         except (OSError,ValueError,TypeError,KeyError,RecursionError) as e:
             self.parse_errors+=1
             self.error=str(e)[:64] if isinstance(e,ValueError) else type(e).__name__+':DOA_UNAVAILABLE'
+        try:
+            raw=stable_read(self.path/'doa.xml',limit)
+            rec=parse_doa_xml(raw); sig=rec['source_timestamp_ms']
+            if self.diagnostic_signature is not None and sig<self.diagnostic_signature:
+                raise ValueError('DOA_XML_TIME_REGRESSED')
+            if sig!=self.diagnostic_signature:
+                self.diagnostic_signature=sig; self.diagnostic_seen=time.monotonic()
+                self.diagnostic_observed_ms=now_ms(); self.diagnostic_record=rec
+            self.diagnostic_error=None
+        except (OSError,ValueError,TypeError,KeyError,RecursionError) as e:
+            code=str(e)
+            self.diagnostic_error=('DOA_'+code if code.startswith('XML_') else
+                                   code if code.startswith('DOA_XML_') else 'DOA_XML_UNAVAILABLE')
+
     def view(self, clock_trusted:bool, mutation=False) -> dict:
         mono=time.monotonic(); utc=now_ms(); rec=self.record; st=self.status
         def age(obj, seen):
@@ -214,3 +248,20 @@ class Source:
                              frame_index=st['frame_index'] if st else None,
                              dropped_frames=st['dropped_frames'] if st else None,drop_delta=self.drop_delta,
                              adc_overdrive=st['adc_overdrive'] if st else None))
+
+    def diagnostic_view(self, validation_reasons=()) -> dict:
+        mono=time.monotonic(); utc=now_ms(); rec=self.diagnostic_record
+        age=max(0,utc-rec['source_timestamp_ms'],int((mono-self.diagnostic_seen)*1000)) if rec else None
+        reasons=['DIAGNOSTIC_UNVERIFIED']
+        reasons.extend(reason.upper() for reason in (validation_reasons or ()) if isinstance(reason,str))
+        if self.diagnostic_error: reasons.append(self.diagnostic_error)
+        if rec:
+            if rec['source_timestamp_ms']>utc+1000: reasons.append('DOA_XML_TIME_FUTURE')
+            if age>self.cfg['freshness']['doa_ms']: reasons.append('DOA_XML_STALE')
+        elif not self.diagnostic_error: reasons.append('DOA_XML_UNAVAILABLE')
+        return {'available':bool(rec),'source':'doa.xml','trust':'UNVERIFIED',
+                'source_timestamp_ms':rec['source_timestamp_ms'] if rec else None,
+                'observed_timestamp_ms':self.diagnostic_observed_ms,
+                'raw_doa_deg':rec['raw_doa_deg'] if rec else None,
+                'frequency_mhz':rec['frequency_mhz'] if rec else None,
+                'source_age_ms':age,'validation_reasons':list(dict.fromkeys(reasons))}

@@ -9,6 +9,17 @@ shutdownUncertain=readShutdownUncertainty();
 function setShutdownUncertainty(value){shutdownUncertain=value;try{if(value)localStorage.setItem('rdf-node-ground-shutdown-uncertain','1');else localStorage.removeItem('rdf-node-ground-shutdown-uncertain');}catch{}}
 function rememberShutdownState(op){if(op?.op==='system.shutdown.execute'&&!shutdownFailureStages.has(op.stage))setShutdownUncertainty(true);}
 function updateShutdownButton(){$('shutdown').disabled=shutdownPending||!apiSnapshotAvailable||!shutdownHistoryChecked||!(snapshot.capabilities?.shutdown&&snapshot.capabilities?.remote_commands);}
+function diagnosticTimestamp(ms){return Number.isSafeInteger(ms)?`${new Date(ms).toISOString()} (${ms} ms)`:'--';}
+function renderDiagnostic(d){
+ if(!d?.available){$('diagnostic-state').textContent='Belum ada data diagnostik dari node.';$('diagnostic-angle').textContent='DoA raw: --';$('diagnostic-frequency').textContent='Frekuensi: --';$('diagnostic-source-time').textContent='TIME sumber: --';$('diagnostic-observed-time').textContent='Observasi Edge: --';$('diagnostic-age').textContent='Usia: --';$('diagnostic-reasons').textContent='Gate: --';return;}
+ $('diagnostic-state').textContent=d.stale?`UNVERIFIED / STALE RECEIPT (${d.received_age_ms??'--'} ms)`:'UNVERIFIED / RECEIVED';
+ $('diagnostic-angle').textContent=`DoA raw: ${Number.isFinite(d.raw_doa_deg)?d.raw_doa_deg.toFixed(1):'--'}°`;
+ $('diagnostic-frequency').textContent=`Frekuensi: ${Number.isFinite(d.frequency_mhz)?d.frequency_mhz.toFixed(3):'--'} MHz`;
+ $('diagnostic-source-time').textContent=`TIME sumber: ${diagnosticTimestamp(d.source_timestamp_ms)}`;
+ $('diagnostic-observed-time').textContent=`Observasi Edge: ${diagnosticTimestamp(d.observed_timestamp_ms)}`;
+ $('diagnostic-age').textContent=`Usia pesan Ground ${d.received_age_ms??'--'} ms`;
+ $('diagnostic-reasons').textContent=`Alasan validasi: ${Array.isArray(d.validation_reasons)?d.validation_reasons.join(', '):'--'}`;
+}
 async function checkShutdownHistory(force=false,clearIfEmpty=false){
  if(!force&&shutdownHistoryChecked&&Date.now()-shutdownHistoryAt<5000)return shutdownUncertain;
  if(shutdownHistoryRequest)return shutdownHistoryRequest;
@@ -107,6 +118,7 @@ async function poll(manual=false){
   updateShutdownButton();
   document.querySelector('main').classList.remove('data-stale');
   const d=snapshot.detection||{};
+  renderDiagnostic(snapshot.diagnostic_doa);
   $('state').textContent=`${snapshot.mode} / ${snapshot.health_fresh?'HEALTH FRESH':'HEALTH STALE'} / MQTT ${snapshot.link?.mqtt_control?.state||'--'}`;
   $('angle').textContent=d.valid?`${d.relative_doa_deg.toFixed(1)}\u00b0`:'--';
   $('metadata').textContent=`VFO ${d.frequency_hz?(d.frequency_hz/1e6).toFixed(3):'--'} MHz; PAPR ${d.confidence_native_db??'--'} dB; data umur terima ${d.receipt_age_ms??'--'} ms`;
