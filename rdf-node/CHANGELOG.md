@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Clarify SDR service Start/Stop/Restart versus Raspberry reboot/shutdown in Kontrol RDF; remove the maintenance status sentence.
+- Default setup to `rdfsdr.service` for SDR lifecycle controls when the unit is registered; Raspberry reboot and shutdown remain separately approved host actions.
 
 - Publish diagnostic `doa.xml` every 3 s while a sample is available to keep periodic Control traffic within the default byte budget alongside health and valid DoA. Show raw angle and XML frequency as `UNVERIFIED` on the Edge main panel when strict DoA is blocked. Ground keeps it separate from normal DoA, receipt, and command gates. Existing broker ACLs need the new Control-topic write permission.
 

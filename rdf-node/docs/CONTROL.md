@@ -82,9 +82,12 @@ memverifikasi seluruh efek. Ini terlihat pada panel/ACK. Freshness DoA tetap dip
 
 ## Lifecycle stack
 
-`processing.set` memakai desired RUNNING/STOPPED; implementasinya `systemctl --no-block`
-terhadap unit stack SDR yang di-approve. `service.restart` memakai unit yang sama.
-Tidak ada perintah stop bridge/PPP via dashboard rutin.
+`processing.set` memakai desired RUNNING/STOPPED dan menjalankan seluruh unit SDR pada
+`link.engine_service`; `service.restart` memakai unit yang sama. Setup otomatis memilih
+`rdfsdr.service` bila terdaftar. Konfigurasi lama yang menunjuk unit lain tidak ditimpa;
+sebelum approval, ubah target secara eksplisit dengan `sudo rdf-node setup --engine-unit
+rdfsdr.service`.
+Dashboard tidak menghentikan `rdf-edge.service` atau PPP.
 
 STOP menyimpan intent dan marker terlebih dahulu. Start menghapus marker dan menyimpan
 RUNNING. Drop-in ConditionPathExists mencegah unit hidup kembali saat marker stop ada.

@@ -94,8 +94,10 @@ DoA/graph tidak akan diterbitkan dengan data tebakan. Setup dapat diulangi:
 sudo rdf-node setup
 ```
 
-Nama service SDR akan diambil bila `sdr-doa.service` benar-benar terdaftar. Nama lain dapat
-masuk lewat `setup --engine-unit NAMA.service` setelah Anda memverifikasinya.
+Setup otomatis memilih `rdfsdr.service` bila unit itu terdaftar. Konfigurasi lama yang
+menunjuk unit lain tidak ditimpa; ubah eksplisit dengan `sudo rdf-node setup --engine-unit
+rdfsdr.service`. Tekan Enter pada prompt folder sumber untuk mempertahankan path yang sudah
+tersimpan. Unit lain hanya dipilih eksplisit setelah diverifikasi.
 
 ### Buka panel sekarang
 
@@ -288,6 +290,17 @@ Pengambilalihan lifecycle mendeteksi watchdog lama yang dikenal dan meminta izin
 sebelum menonaktifkannya; watchdog lain tetap harus diaudit. Ia memasang stop-intent guard
 pada **unit SDR yang disetujui**, bukan unit PPP atau bridge.
 
+Untuk panel lokal tanpa perintah Ground, jalankan dari terminal Raspberry:
+
+```bash
+sudo rdf-node setup --engine-unit rdfsdr.service
+sudo rdf-node controls approve --lifecycle --reboot --shutdown
+```
+
+Approval meminta `APPROVE`, `AUDITED`, `REBOOT`, dan `SHUTDOWN`; `--remote` sengaja tidak
+dipakai. Jika lifecycle sebelumnya disetujui untuk unit lain, audit unit, drop-in, dan intent
+lama sebelum mengganti target.
+
 Untuk Start/Stop/Restart stack, reboot, atau shutdown, buka lease dari sesi maintenance
 terpercaya:
 
@@ -296,7 +309,8 @@ sudo rdf-node controls maintenance-open --seconds 300
 ```
 
 Panel Config -> Login -> Kontrol menggunakan manager yang sama dengan Ground.
-Start/Stop berarti **seluruh unit stack SDR**, bukan fungsi DSP-only yang belum diintegrasikan.
+Start/Stop/Restart mengelola seluruh unit `link.engine_service` yang disetujui (`rdfsdr.service`
+untuk konfigurasi ini), bukan `rdf-edge.service` atau unit PPP.
 Reboot memerlukan Prepare lalu konfirmasi Execute, challenge sekali pakai 30 detik, lease aktif,
 jurnal durable, dan verifikasi boot baru.
 Shutdown Pi memakai prepare/execute, challenge sekali pakai, konfirmasi terakhir, dan lease aktif.

@@ -248,6 +248,41 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(self.j.lookup('shutdown')['stage'],'OUTCOME_UNKNOWN')
     def test_revision_stable(self):self.assertEqual(self.j.config_revision('a'),self.j.config_revision('a'));self.assertEqual(self.j.config_revision('b'),2)
 
+class LifecycleSetupTests(unittest.TestCase):
+    def test_setup_discovers_rdfsdr_for_panel_lifecycle_actions(self):
+        from types import SimpleNamespace
+        from rdf_node import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);config=root/'config.yaml';config.write_text('{}')
+            args=SimpleNamespace(config=str(config),share_dir='',grant_read=False,engine_unit=None,
+                                 verify_source=False,yes=False)
+            with (
+                mock.patch.object(cli,'require_root'),
+                mock.patch.object(cli,'discover_sources',return_value=[]),
+                mock.patch('builtins.input',return_value=''),
+                mock.patch.object(cli.subprocess,'run',return_value=mock.Mock(stdout='loaded\n')) as probe,
+                mock.patch.object(cli,'chown_config')
+            ):
+                cli.setup(args)
+            cfg=load_config(config)
+            self.assertEqual(cfg['link']['engine_service'],'rdfsdr.service')
+            self.assertEqual(probe.call_args.args[0],
+                             ['systemctl','show','rdfsdr.service','-p','LoadState','--value'])
+            policy=dict(DEFAULT_POLICY,state_dir=str(root/'helper'),allowed_user=None,
+                        allow_lifecycle=True,lifecycle_audited=True,
+                        engine_service=cfg['link']['engine_service'])
+            controller=Controller(policy)
+            actions=(('processing.set','RUNNING'),('processing.set','STOPPED'),('service.restart',None))
+            with mock.patch.object(controller,'maintenance',return_value=True), \
+                    mock.patch.object(controller,'_run') as run:
+                for op,desired in actions:
+                    request={'op':op}
+                    if desired is not None:request['desired']=desired
+                    controller.dispatch(request,os.getuid())
+            self.assertEqual([call.args[0] for call in run.call_args_list],[
+                ['/usr/bin/systemctl','--no-block','start','rdfsdr.service'],
+                ['/usr/bin/systemctl','--no-block','stop','rdfsdr.service'],
+                ['/usr/bin/systemctl','--no-block','restart','rdfsdr.service']])
 class HelperTests(unittest.TestCase):
     def setUp(self):
         import pwd

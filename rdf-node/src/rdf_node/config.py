@@ -8,6 +8,8 @@ from .mqtt_ws import validate_mqtt_host,validate_websocket_path
 from .util import finite
 
 ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_SDR_SERVICE = 'rdfsdr.service'
+
 PROFILES = {
     'control': {'doa_s': 1.0, 'angular_s': None, 'encoding': 'q16'},
     'balanced': {'doa_s': 1.0, 'angular_s': 4.0, 'encoding': 'q16'},

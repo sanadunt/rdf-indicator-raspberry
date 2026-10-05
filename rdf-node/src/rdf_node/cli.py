@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 import yaml
-from .config import load_config, save_config, ROOT
+from .config import DEFAULT_SDR_SERVICE, load_config, save_config, ROOT
 from .util import atomic_write, compact, now_ms, stable_read
 
 def chown_config(path):
@@ -70,8 +70,8 @@ def setup(args):
     if args.engine_unit:
         cfg['link']['engine_service']=args.engine_unit
     elif not cfg['link']['engine_service']:
-        p=subprocess.run(['systemctl','show','sdr-doa.service','-p','LoadState','--value'],capture_output=True,text=True)
-        if p.stdout.strip()=='loaded': cfg['link']['engine_service']='sdr-doa.service'
+        p=subprocess.run(['systemctl','show',DEFAULT_SDR_SERVICE,'-p','LoadState','--value'],capture_output=True,text=True)
+        if p.stdout.strip()=='loaded': cfg['link']['engine_service']=DEFAULT_SDR_SERVICE
     if args.verify_source:
         print('Approval ini harus berdasarkan data fresh, healthy DAQ dan uji orientasi yang sudah Anda lakukan.')
         if args.yes or input('Ketik VERIFIED untuk mengizinkan source LIVE: ').strip()=='VERIFIED':

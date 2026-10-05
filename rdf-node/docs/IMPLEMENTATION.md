@@ -96,10 +96,11 @@ Perubahan berikut eksplisit, bukan klaim bahwa semuanya identik dengan contoh pl
    aktual; angka historis 9.14 kbit/s bukan hasil ukur software ini.
 6. **Clock:** provider MVP menggunakan status time sync OS. Tidak ada provider GPS time,
    model uncertainty/holdover, atau time sync RF otomatis. Unknown menutup write/live gate.
-7. **Lifecycle:** kontrol yang disediakan ialah unit stack SDR terpilih, bukan API DSP-only
-   yang belum terbukti tersedia. Helper menangani stop intent dan startup reconciliation,
-   tetapi tidak menambahkan watchdog DSP otomatis baru. Recovery crash engine tetap
-   bergantung pada unit yang diaudit; kegagalan tampil sebagai health/error.
+7. **Lifecycle:** setup otomatis memilih `rdfsdr.service` bila terdaftar, dan menyimpan
+   unit itu di `link.engine_service`. Start/stop/restart tetap mengelola seluruh unit SDR
+   yang disetujui, bukan API DSP-only yang belum terbukti tersedia. Helper menangani stop
+   intent dan startup reconciliation; recovery crash engine tetap bergantung pada unit yang
+   diaudit. Kegagalan tampil sebagai health/error.
 8. **Settings:** hanya lima field allowlist di bawah. Algoritma/geometri/DAQ calibration
    tidak diubah oleh command generic. Permintaan lain ditolak sebagai unsupported.
 9. **Display:** theme dan blank timeout didukung. Formulir admin MQTT menyediakan keyboard
