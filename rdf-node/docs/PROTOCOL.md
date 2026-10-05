@@ -111,8 +111,9 @@ Kurva parsial tidak dirender. Konvensi1 mempertahankan index native; tidak otoma
 Dikirim setiap5s oleh satu receiver yang benar-benar mendecode. `aq` baru maju setelah
 frame selesai dan lolos. Bukan PUBACK MQTT, bukan bukti operator melihat browser.
 Unknown sid, q yang tidak pernah terkirim, regressi, dan retained receipt ditolak.
-`telemetry/diagnostic/doa` dipublikasikan satu kali per detik selama XML tersedia,
-terlepas dari validitas DoA normal, termasuk untuk sampel yang tidak berubah. `q`
+`telemetry/diagnostic/doa` dipublikasikan setiap 3 detik selama XML tersedia,
+terlepas dari validitas DoA normal, termasuk untuk sampel yang tidak berubah. Cadence ini
+menjaga beban periodik Control di bawah budget default bersama health dan DoA normal. `q`
 bertambah tiap publish; timestamp sumber/observasi menunjuk pembacaan file, bukan waktu
 heartbeat. Ground menampilkannya pada field API `diagnostic_doa` sebagai `UNVERIFIED`;
 data tidak masuk ke `dq`, DoA valid, angular, atau otorisasi command.

@@ -112,7 +112,7 @@ Setelah MQTT dikonfigurasi:
 1. Pastikan kedua client READY pada tab Link.
 2. Cek health receiver meningkat dan Ground receipt menjadi RECEIVING.
 3. Validasi output source lalu lihat DoA serta array360 pada receiver.
-4. Pastikan `telemetry/diagnostic/doa` berulang tiap detik selama XML tersedia, termasuk saat sampel sama dan DoA normal valid; tetap `UNVERIFIED` serta tidak menambah `dq`. Saat gate normal memblokir, pastikan panel utama Edge menampilkan sudut raw dan frekuensi XML secara terpisah.
+4. Pastikan `telemetry/diagnostic/doa` berulang setiap 3 detik selama XML tersedia, termasuk saat sampel sama dan DoA normal valid; tetap `UNVERIFIED` serta tidak menambah `dq`. Saat gate normal memblokir, pastikan panel utama Edge menampilkan sudut raw dan frekuensi XML secara terpisah.
 5. Bandingkan peak/konvensi raw CSV dengan graph tanpa menambahkan abs/log transform.
 6. Putuskan radio sementara dengan jalur management aman, lihat stale/lost, reconnect
    tanpa burst data lama; jangan reset SDR.

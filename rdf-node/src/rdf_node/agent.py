@@ -415,7 +415,7 @@ class Agent:
                              'p':round(d['power_native_db'],2),'rev':d['revision'],'ok':1}
                     if self._offer('doa','telemetry/doa',payload,expiry=3,sent=self._remember('doa',d['q'])): self.last_doa_q=d['q']
                 diag=s['diagnostic_doa']
-                if diag['available'] and tick('diagnostic',1):
+                if diag['available'] and tick('diagnostic',3):
                     self.diagnostic_q+=1
                     if self.diagnostic_q>0xffffffff: raise RuntimeError('DIAGNOSTIC_SEQUENCE_EXHAUSTED_RESTART_AGENT')
                     payload={'v':2,'sid':self.sid,'q':self.diagnostic_q,'source':'doa.xml',

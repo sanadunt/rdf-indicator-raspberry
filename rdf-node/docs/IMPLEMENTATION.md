@@ -172,11 +172,12 @@ terpisah di `link.ground`. Error seperti `MQTT_DISCONNECTED`, `OUTBOX_FULL`, dan
 jika percobaan terbaru gagal.
 
 `telemetry/diagnostic/doa` memakai client Control, QoS 0, expiry 3 s, tanpa retention.
-Saat `doa.xml` tersedia, Edge mengirim satu sampel per detik, termasuk saat isi sampel
-tidak berubah dan terlepas dari hasil gate DoA normal. Sequence `q` bertambah tiap
-publish; timestamp sumber dan observasi tetap menunjuk pembacaan file yang sama. Ground
-menyimpan dan menampilkan sampel terpisah sebagai `UNVERIFIED`; ini tidak menambah `dq`
-atau menjadi detection normal.
+Saat `doa.xml` tersedia, Edge mengirim satu sampel setiap 3 s, termasuk saat isi sampel
+tidak berubah dan terlepas dari hasil gate DoA normal. Cadence ini menjaga beban telemetri
+periodik Control di bawah budget default bersama health dan DoA normal. Sequence `q`
+bertambah tiap publish; timestamp sumber dan observasi tetap menunjuk pembacaan file yang
+sama. Ground menyimpan dan menampilkan sampel terpisah sebagai `UNVERIFIED`; ini tidak
+menambah `dq` atau menjadi detection normal.
 
 Panel utama Edge membaca `diagnostic_doa` dari snapshot lokal dan polling API tiap 500 ms.
 Snapshot agent mengikuti `source.poll_ms` (default 250 ms). Saat detection normal invalid,

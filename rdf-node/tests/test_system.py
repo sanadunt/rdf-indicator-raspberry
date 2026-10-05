@@ -485,6 +485,13 @@ class EndToEndTests(unittest.TestCase):
                 while not stop.wait(.25):
                     i+=1;atomic_write(path/'share'/'status.json',compact(status(idx=i)))
                     atomic_write(path/'share'/'DOA_value.html',csv_bytes(record()))
+            diagnostic_offers=[];diagnostic_offers_lock=threading.Lock()
+            control_client=a.clients['control'];original_offer=control_client.offer
+            def record_offer(key,topic,payload,**kwargs):
+                if topic.endswith('/telemetry/diagnostic/doa'):
+                    with diagnostic_offers_lock: diagnostic_offers.append(time.monotonic())
+                return original_offer(key,topic,payload,**kwargs)
+            control_client.offer=record_offer
             thread=threading.Thread(target=writer,daemon=True);thread.start();a.start();g.start()
             try:
                 self.assertTrue(wait(lambda:g.snapshot()['health_fresh'],12),[a.snapshot(),g.snapshot(),b.errors])
@@ -505,6 +512,10 @@ class EndToEndTests(unittest.TestCase):
                 first_diagnostic=g.snapshot()['diagnostic_doa']
                 self.assertTrue(wait(lambda:g.snapshot()['diagnostic_doa']['q']>first_diagnostic['q'],5),
                                 [first_diagnostic,g.snapshot(),b.errors])
+                with diagnostic_offers_lock:
+                    self.assertGreaterEqual(len(diagnostic_offers),2)
+                    diagnostic_interval=diagnostic_offers[1]-diagnostic_offers[0]
+                self.assertGreaterEqual(diagnostic_interval,2.5)
                 repeated_diagnostic=g.snapshot()['diagnostic_doa']
                 self.assertEqual(repeated_diagnostic['raw_doa_deg'],200)
                 self.assertEqual(repeated_diagnostic['source_timestamp_ms'],xml_timestamp)

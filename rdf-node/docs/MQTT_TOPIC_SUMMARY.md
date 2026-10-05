@@ -39,7 +39,7 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | Topic suffix | Arah | Kanal | QoS | Retained | Interval / expiry | Isi |
 |---|---|---|---:|---|---|---|
 | `telemetry/doa` | Edge -> Ground | Control | 0 | Tidak | Umumnya tiap 1 s bila DoA valid; expiry 3 s | Ringkasan DoA, frekuensi, confidence, power, revision. |
-| `telemetry/diagnostic/doa` | Edge -> Ground | Control | 0 | Tidak | 1/s selama `doa.xml` tersedia; expiry 3 s | Sudut raw `doa.xml`, timestamp sumber/observasi, frekuensi MHz, status `UNVERIFIED` dan validation reasons. Diulang meski sampel tidak berubah, terlepas dari gate DoA normal. |
+| `telemetry/diagnostic/doa` | Edge -> Ground | Control | 0 | Tidak | Setiap 3 s selama `doa.xml` tersedia; expiry 3 s | Sudut raw `doa.xml`, timestamp sumber/observasi, frekuensi MHz, status `UNVERIFIED` dan validation reasons. Diulang meski sampel tidak berubah, terlepas dari gate DoA normal. |
 | `telemetry/health` | Edge -> Ground | Control | 0 | Tidak | Tiap 1 s; expiry 5 s | Status run, DAQ, clock, umur sumber, temperatur, dropped frames. |
 | `telemetry/health/detail` | Edge -> Ground | Control | 0 | Tidak | Tiap 10 s; expiry 15 s | Detail host, USB, sync DAQ, trafik, parse dan abort counter. |
 | `telemetry/angular` | Edge -> Ground | Bulk | 0 | Tidak | Profile-dependent; expiry 3 s | Frame 360 sampel dalam satu atau lebih payload binary. |
@@ -122,14 +122,14 @@ Angka berikut diukur dari serializer JSON compact (`util.compact`) dan paket MQT
 | Topic / profile | Interval saat syarat lolos | Payload contoh | MQTT PUBLISH |
 |---|---|---:|---:|
 | `telemetry/doa` | Maks. 1/s; hanya DoA valid dengan sequence baru | 109 B | 147 B |
-| `telemetry/diagnostic/doa` | 1/s selama XML tersedia; heartbeat mengulang sampel yang sama, independen dari gate DoA normal | 303 B | 352 B |
+| `telemetry/diagnostic/doa` | Setiap 3 s selama XML tersedia; heartbeat mengulang sampel yang sama, independen dari gate DoA normal | 303 B | 352 B |
 | `telemetry/health` | 1/s | 113 B | 154 B |
 | `telemetry/health/detail` | 1/10 s | 179 B | 227 B |
 | `telemetry/angular` (`balanced`, Q16) | 2 chunk/4 s; tiap chunk | 396 B | 438 B |
 | `telemetry/angular` (`graph_u8`, U8) | 1 chunk/2 s | 420 B | 462 B |
 | `telemetry/angular` (`control`) | Tidak dipublish | — | — |
 
-Satu frame Q16 berarti total 792 B payload dan 876 B dalam dua PUBLISH. Angular adalah binary, bukan JSON. Health, normal DoA, detail, dan diagnostic DoA adalah JSON telemetri berkala; diagnostic DoA hanya dikirim saat gate strict memblokir `telemetry/doa` dan payload berubah, paling banyak 1/s.
+Satu frame Q16 berarti total 792 B payload dan 876 B dalam dua PUBLISH. Angular adalah binary, bukan JSON. Health, normal DoA, detail, dan diagnostic DoA adalah JSON telemetri berkala. Dengan ukuran contoh dan biaya limiter `PUBLISH + 142 B`, cadence 1/s untuk health, DoA, dan diagnostic bersama detail tiap 10 s memerlukan sekitar 1.116 cost-B/s, di atas budget Control default 850. Karena itu Edge mengirim diagnostic setiap 3 s selama XML tersedia, meski DoA normal valid atau sampel tidak berubah; data tetap `UNVERIFIED`.
 
 ### Topic event-driven dan command
 
@@ -205,7 +205,7 @@ Ground menolak DoA yang retained, lebih lama dari 5 s, sequence tidak maju, `ok`
 {"v":2,"sid":"7a8b9c0d","q":19,"source":"doa.xml","source_timestamp_ms":1790668800123,"observed_timestamp_ms":1790668800444,"raw_doa_deg":200.0,"frequency_mhz":137.0,"trust":"UNVERIFIED","validation_reasons":["DIAGNOSTIC_UNVERIFIED","EMPTY_CSV","DAQ_NOT_HEALTHY","SOURCE_UNVERIFIED","ANGLE_UNVERIFIED"]}
 ```
 
-`source_timestamp_ms` berasal dari field `TIME` XML sebagai Unix milliseconds; `observed_timestamp_ms` adalah waktu Edge membaca sampel; `frequency_mhz` mempertahankan unit MHz yang ditulis XML; `raw_doa_deg` tidak dikonversi menjadi sudut otoritatif. `validation_reasons` memuat gate `detection` saat publish dan selalu menyertakan `DIAGNOSTIC_UNVERIFIED`. Pesan QoS 0 ini hanya dikirim saat DoA strict tidak valid dan sampel/reasons berubah, maksimum 1/s, expiry 3 s, tidak retained. Ground menampilkan topik ini terpisah; data tidak diterima sebagai DoA valid, receipt, atau dasar command. Ukuran contoh payload 303 B / PUBLISH 352 B memakai fixture lima reasons; payload aktual mengikuti panjang reasons.
+`source_timestamp_ms` berasal dari field `TIME` XML sebagai Unix milliseconds; `observed_timestamp_ms` adalah waktu Edge membaca sampel; `frequency_mhz` mempertahankan unit MHz yang ditulis XML; `raw_doa_deg` tidak dikonversi menjadi sudut otoritatif. `validation_reasons` memuat gate `detection` saat publish dan selalu menyertakan `DIAGNOSTIC_UNVERIFIED`. Edge mengirim pesan QoS 0 ini setiap 3 s selama XML tersedia, terlepas dari validitas DoA normal dan perubahan sampel; expiry 3 s, tidak retained. Ground menampilkan topik ini terpisah; data tidak diterima sebagai DoA valid, receipt, atau dasar command. Ukuran contoh payload 303 B / PUBLISH 352 B memakai fixture lima reasons; payload aktual mengikuti panjang reasons.
 
 ### `telemetry/health`
 
