@@ -540,15 +540,15 @@ function preferences(){
  grid.querySelector('select')?.focus();
 }
 $('themebtn').onclick=preferences;
-$('controlbtn').onclick=()=>{if(needLogin())return;const box=modal('Kontrol RDF - bukan bridge');const caps=snapshot.capabilities||{};text(box,`Maintenance: ${caps.maintenance?'AKTIF':'OFF'}; start/stop hanya stack yang di-approve.`);
- action(box,'Start',()=>command('processing.set',{desired:'RUNNING'})).disabled=!caps.processing;
- action(box,'Stop',()=>confirmOperation('STOP RDF','processing.set',{desired:'STOPPED'}),true).disabled=!caps.processing;
- action(box,'Restart RDF',()=>confirmOperation('RESTART RDF','service.restart',{}),true).disabled=!caps.restart;
+$('controlbtn').onclick=()=>{if(needLogin())return;const box=modal('Kontrol RDF');const caps=snapshot.capabilities||{};
+ action(box,'Start SDR service',()=>command('processing.set',{desired:'RUNNING'})).disabled=!caps.processing;
+ action(box,'Stop SDR service',()=>confirmOperation('STOP SDR SERVICE','processing.set',{desired:'STOPPED'}),true).disabled=!caps.processing;
+ action(box,'Restart SDR service',()=>confirmOperation('RESTART SDR SERVICE','service.restart',{}),true).disabled=!caps.restart;
  const row=document.createElement('div');box.append(row);
  action(row,'Frekuensi',()=>frequency()).disabled=!caps.config_patch;
  action(row,'Refresh config',()=>command('config.get'));
-  action(row,'Reboot Pi',()=>prepareReboot(),true).disabled=!caps.reboot;
-  const shutdown=action(row,'Shutdown Pi',()=>prepareShutdown(),true);
+  action(row,'Reboot Raspberry',()=>prepareReboot(),true).disabled=!caps.reboot;
+  const shutdown=action(row,'Shutdown Raspberry',()=>prepareShutdown(),true);
   shutdown.disabled=!caps.shutdown||!shutdownHistoryChecked;
   shutdown.title=!shutdownHistoryChecked?'Riwayat operasi belum tersedia.':shutdownUncertain?'Periksa Raspberry secara lokal sebelum mengulangi shutdown.':'';
 };

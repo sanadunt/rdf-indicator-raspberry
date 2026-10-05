@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Clarify SDR service Start/Stop/Restart versus Raspberry reboot/shutdown in Kontrol RDF; remove the maintenance status sentence.
+
 - Publish diagnostic `doa.xml` at 1 Hz whenever a sample is available, including unchanged samples; show raw angle and XML frequency as `UNVERIFIED` on the Edge main panel when strict DoA is blocked. Ground keeps it separate from normal DoA, receipt, and command gates. Existing broker ACLs need the new Control-topic write permission.
 
 - Distinguish local API outage from stale cached data in both panels; add immediate manual retry while regular polling continues, without automatic service or SDR recovery.
