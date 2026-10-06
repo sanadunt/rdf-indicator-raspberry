@@ -336,7 +336,10 @@ class Agent:
                 'processing':c['processing_enabled'] and self.helper_status.get('allow_lifecycle',False),
                 'restart':c['restart_enabled'] and self.helper_status.get('allow_lifecycle',False),
                 'reboot':c['reboot_enabled'] and self.helper_status.get('allow_reboot',False),
-                'shutdown':c['shutdown_enabled'] and self.helper_status.get('allow_shutdown',False)}
+                'shutdown':c['shutdown_enabled'] and self.helper_status.get('allow_shutdown',False),
+                'ppp_restart':self.cfg['runtime_mode']=='controlled' and c['remote_commands_enabled'] and
+                    self.helper_status.get('allow_remote_control',False) and c['ppp_restart_enabled'] and
+                    self.helper_status.get('allow_ppp_restart',False)}
     def _topic_delivery_update(self,suffix,state,qos,error=None):
         timestamp=now_ms()
         if error is not None and (not isinstance(error,str) or not re.fullmatch(r'[A-Z0-9_]{1,64}',error)):

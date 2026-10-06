@@ -64,6 +64,21 @@ class Ground:
     def _fresh(self,t,limit=10000):
         n=integer(t,1000000000000,9999999999999)
         if not -1000<=now_ms()-n<=limit: raise ValueError('SOURCE_TIMESTAMP_NOT_FRESH')
+    def _reconcile_ppp_restart_health(self):
+        if not self.health or not self.node_state or time.monotonic()-self.health_seen>8: return
+        health_ms=self.health.get('t'); sid=self.node_state.get('sid')
+        if type(health_ms) is not int or not isinstance(sid,str): return
+        for operation in self.journal.pending_ppp_restarts():
+            request=operation['request']; result=operation['result']
+            requested_ms=result.get('requested_ms')
+            if (operation['stage']!='PPP_RESTART_REQUESTED' or request.get('sid')!=sid or
+                    result.get('accepted_by_systemd') is not True or type(requested_ms) is not int or
+                    requested_ms!=request.get('issued_ms') or health_ms<=requested_ms):
+                continue
+            self.journal.update(operation['id'],'APPLIED',{
+                'proof':'SYSTEMD_ACCEPTED_AND_FRESH_NODE_HEALTH',
+                'accepted_by_systemd':True,'service':'t900-ppp.service',
+                'requested_ms':requested_ms,'health_timestamp_ms':health_ms})
     def receive(self,topic,data,retained=False):
         if not topic.startswith(self.prefix+'/'): return
         suffix=topic[len(self.prefix)+1:]
@@ -100,6 +115,9 @@ class Ground:
                 if self.node_state.get('sid')!=sid:
                     for old in self.journal.pending_shutdowns():
                         self.journal.update(old['id'],'OUTCOME_UNKNOWN',{'reason':'SHUTDOWN_COMPLETION_UNVERIFIED','boot':j['boot']})
+                    for old in self.journal.pending_ppp_restarts():
+                        result=dict(old['result']);result['reason']='PPP_RESTART_SESSION_CHANGED'
+                        self.journal.update(old['id'],'OUTCOME_UNKNOWN',result)
                     self.health={}; self.doa={}; self.diagnostic_doa=None; self.diagnostic_seen=None
                     self.diagnostic_angular=None; self.diagnostic_angular_seen=None; self.angular=None
                     self.node_config={}; self.assembler.clear(); self.diagnostic_assembler.clear()
@@ -119,6 +137,7 @@ class Ground:
                 for old in self.journal.latest():
                     if old['stage']=='REBOOT_SCHEDULED' and old['request'].get('boot')!=self.node_state.get('boot'):
                         self.journal.update(old['id'],'APPLIED',{'proof':'NEW_BOOT_AND_FRESH_HEALTH','boot':self.node_state.get('boot')})
+                self._reconcile_ppp_restart_health()
             elif suffix=='telemetry/doa':
                 self._fresh(j.get('t'),5000); q=integer(j.get('q'),1,0xffffffff)
                 if q<=self.doa.get('q',0): return
@@ -145,7 +164,8 @@ class Ground:
             elif suffix=='telemetry/health/detail': self.detail=j
             elif suffix in ('ack/config','ack/operation'):
                 old=self.journal.lookup(str(j.get('id','')))
-                stages=TERMINAL|{'ACCEPTED','APPLYING','VERIFYING','REBOOT_SCHEDULED','SHUTDOWN_SCHEDULED'}
+                stages=TERMINAL|{'ACCEPTED','APPLYING','VERIFYING','REBOOT_SCHEDULED',
+                                 'SHUTDOWN_SCHEDULED','PPP_RESTART_REQUESTED'}
                 stage=j.get('status')
                 if not isinstance(stage,str): return
                 if old and old['request'].get('op')=='system.shutdown.execute':
@@ -153,11 +173,25 @@ class Ground:
                     if old['stage']=='OUTCOME_UNKNOWN' and stage!='OUTCOME_UNKNOWN': return
                 if old and old['request'].get('op')=='system.shutdown.execute' and stage in {
                         'APPLIED','PERSISTED_UNVERIFIED','REBOOT_SCHEDULED'}: return
+                if old and old['request'].get('op')=='ppp.restart':
+                    if old['stage'] in TERMINAL and stage!=old['stage']: return
+                    if stage=='APPLIED': return
+                    if old['stage']=='PPP_RESTART_REQUESTED' and stage!='PPP_RESTART_REQUESTED': return
+                    if old['stage']=='OUTCOME_UNKNOWN' and old['result'].get('confirmed_by'): return
+                    if stage=='PPP_RESTART_REQUESTED':
+                        result=j.get('result')
+                        requested_ms=old['request'].get('issued_ms')
+                        if (not isinstance(result,dict) or result.get('accepted_by_systemd') is not True or
+                                type(result.get('requested_ms')) is not int or result.get('requested_ms')!=requested_ms or
+                                result.get('service')!='t900-ppp.service'):
+                            return
                 if old and old['request'].get('sid')==sid and stage in stages:
                     if old['stage'] in TERMINAL and stage not in TERMINAL: return
                     result=j.get('result',{})
                     if not isinstance(result,dict): return
                     self.journal.update(old['id'],stage,result)
+                    if old['request'].get('op')=='ppp.restart' and stage=='PPP_RESTART_REQUESTED':
+                        self._reconcile_ppp_restart_health()
     def snapshot(self):
         with self.lock:
             now=time.monotonic()
@@ -228,19 +262,52 @@ class Ground:
         if not isinstance(obj,dict) or obj.get('op') not in OPS: return {'stage':'REJECTED','error':'UNSUPPORTED_OPERATION'}
         if not self.client.ready or not self.health or time.monotonic()-self.health_seen>8:
             return {'stage':'REJECTED','error':'NODE_NOT_FRESH'}
-        # UI sends an intent; controller creates the envelope from known identity.
-        allowed={'id','op','changes','desired','profile','target_id','prepare_id','challenge','base_rev'}
+        op=obj['op']; confirm_present='confirm_previous_unknown' in obj
+        if confirm_present and op!='ppp.restart':
+            return {'stage':'REJECTED','error':'UNKNOWN_INTENT_FIELD'}
+        confirm=obj.get('confirm_previous_unknown',False)
+        if type(confirm) is not bool: return {'stage':'REJECTED','error':'INVALID_CONFIRMATION_FLAG'}
+        allowed={'id','op','changes','desired','profile','target_id','prepare_id','challenge','base_rev',
+                 'confirm_previous_unknown'}
         if set(obj)-allowed: return {'stage':'REJECTED','error':'UNKNOWN_INTENT_FIELD'}
         command_id=obj.get('id')
         if 'id' in obj and (not isinstance(command_id,str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,80}',command_id)):
             return {'stage':'REJECTED','error':'INVALID_COMMAND_ID'}
         with self.lock:
-            request=dict(obj)
-            request.update(v=2,id=command_id or 'ground-'+uuid.uuid4().hex[:20],sid=self.node_state['sid'],boot=self.node_state['boot'],
+            pending=self.journal.pending_ppp_restarts() if op=='ppp.restart' else []
+            if confirm and not pending:
+                return {'stage':'REJECTED','error':'PPP_RESTART_CONFIRMATION_NOT_REQUIRED'}
+            if pending and not confirm:
+                return {'stage':'REJECTED','error':'PPP_RESTART_CONFIRMATION_REQUIRED'}
+            if pending:
+                health_ms=self.health.get('t')
+                if type(health_ms) is not int or any(
+                        type(old['request'].get('issued_ms')) is not int or
+                        health_ms<=old['request']['issued_ms'] for old in pending):
+                    return {'stage':'REJECTED','error':'PPP_RESTART_HEALTH_NOT_NEWER'}
+            command_id=command_id or 'ground-'+uuid.uuid4().hex[:20]
+            if pending and any(old['id']==command_id for old in pending):
+                return {'stage':'REJECTED','error':'PPP_RESTART_REQUIRES_NEW_ID'}
+            existing=self.journal.lookup(command_id)
+            if existing:
+                intent={key:value for key,value in obj.items() if key!='confirm_previous_unknown'}
+                if (op=='ppp.restart' and existing['request'].get('op')=='ppp.restart' and not pending and
+                        all(existing['request'].get(key)==value for key,value in intent.items())):
+                    return {'id':command_id,'stage':existing['stage'],'request':existing['request']}
+                return {'stage':'REJECTED','error':'COMMAND_ID_CONFLICT'}
+            # The confirmation is local Ground intent and never enters the v2 MQTT envelope.
+            request={key:value for key,value in obj.items() if key!='confirm_previous_unknown'}
+            request.update(v=2,id=command_id,sid=self.node_state['sid'],boot=self.node_state['boot'],
                            issued_ms=now_ms(),expires_ms=now_ms()+15000)
             request.setdefault('base_rev',self.node_config.get('rev'))
             self.journal.accept(request,'ground-local-admin'); self.journal.update(request['id'],'REQUESTED',{})
-            if not self.client.offer('cmd:'+request['id'],self.prefix+'/'+OPS[request['op']],request,qos=1,expiry=15,priority=0):
+            if not self.client.offer('cmd:'+request['id'],self.prefix+'/'+OPS[request['op']],request,
+                                     qos=1,expiry=15,priority=0):
                 self.journal.update(request['id'],'REJECTED',{'error':'LOCAL_QUEUE_REJECTED'})
                 return {'stage':'REJECTED','error':'LOCAL_QUEUE_REJECTED'}
+            for old in pending:
+                result=dict(old['result'])
+                result.setdefault('reason','OPERATOR_CONFIRMED_NEW_REQUEST')
+                result['confirmed_by']=request['id']
+                self.journal.update(old['id'],'OUTCOME_UNKNOWN',result)
             return {'id':request['id'],'stage':'REQUESTED','request':request}

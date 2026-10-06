@@ -382,6 +382,84 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(agent.receipt_view()['state'],'UNCONFIRMED')
 
 
+class GroundCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        cfg=load_config();cfg['state_dir']=str(Path(self.tmp.name)/'ground-ppp')
+        self.ground=Ground(cfg);self.addCleanup(self.ground.journal.close)
+        self.sid='12ab34cd';self.boot='boot-current'
+        self.ground.client=mock.Mock(ready=True);self.ground.client.offer.return_value=True
+        self.ground.node_state={'sid':self.sid,'boot':self.boot,'instance':'ground-fixture'}
+        self.ground.node_config={'rev':7}
+        self.ground.health={'v':2,'sid':self.sid,'q':1,'t':now_ms(),'daq':1,'run':1}
+        self.ground.health_seen=time.monotonic()
+
+    def add_operation(self,op_id,stage,*,issued_ms=None,sid=None,result=None):
+        request={'id':op_id,'op':'ppp.restart','sid':sid or self.sid,'boot':self.boot,
+                 'issued_ms':issued_ms or now_ms()-1000,'expires_ms':now_ms()+15000,'base_rev':7}
+        self.ground.journal.accept(request,'ground-local-admin')
+        self.ground.journal.update(op_id,stage,result or {})
+        return request
+
+    def test_ppp_restart_applies_only_after_fresh_health(self):
+        requested_ms=now_ms()-1000
+        request=self.add_operation('ground-ppp-health','REQUESTED',issued_ms=requested_ms)
+        self.ground.health['t']=requested_ms-1
+        ack={'v':2,'sid':self.sid,'id':request['id'],'status':'PPP_RESTART_REQUESTED',
+             'result':{'accepted_by_systemd':True,'requested_ms':requested_ms,
+                       'service':'t900-ppp.service'}}
+        self.ground.receive(self.ground.prefix+'/ack/operation',compact(ack))
+        self.assertEqual(self.ground.journal.lookup(request['id'])['stage'],'PPP_RESTART_REQUESTED')
+
+        health={'v':2,'sid':self.sid,'q':2,'t':requested_ms+1,'daq':1,'run':1}
+        self.ground.receive(self.ground.prefix+'/telemetry/health',compact(health))
+        operation=self.ground.journal.lookup(request['id'])
+        self.assertEqual(operation['stage'],'APPLIED')
+        self.assertEqual(operation['result']['proof'],'SYSTEMD_ACCEPTED_AND_FRESH_NODE_HEALTH')
+        self.assertEqual(operation['result']['health_timestamp_ms'],health['t'])
+        self.assertNotIn('link_recovered',operation['result'])
+
+    def test_unresolved_ppp_restart_requires_confirmation(self):
+        self.add_operation('ground-ppp-unacked','REQUESTED')
+        intent={'id':'ground-ppp-new','op':'ppp.restart','base_rev':7}
+        rejected=self.ground.submit_command(intent)
+        self.assertEqual(rejected['error'],'PPP_RESTART_CONFIRMATION_REQUIRED')
+        self.ground.client.offer.assert_not_called()
+        self.assertEqual(self.ground.journal.lookup('ground-ppp-unacked')['stage'],'REQUESTED')
+
+        self.ground.health_seen=time.monotonic()-9
+        stale=self.ground.submit_command({**intent,'confirm_previous_unknown':True})
+        self.assertEqual(stale['error'],'NODE_NOT_FRESH')
+        self.ground.client.offer.assert_not_called()
+
+    def test_confirmed_new_ppp_request_preserves_old_unknown(self):
+        old=self.add_operation('ground-ppp-old','OUTCOME_UNKNOWN',result={'reason':'ACK_LOST'})
+        new_id='ground-ppp-confirmed-new'
+        submitted=self.ground.submit_command({'id':new_id,'op':'ppp.restart','base_rev':7,
+                                              'confirm_previous_unknown':True})
+        self.assertEqual(submitted['stage'],'REQUESTED')
+        self.assertNotEqual(submitted['id'],old['id'])
+        previous=self.ground.journal.lookup(old['id'])
+        self.assertEqual(previous['stage'],'OUTCOME_UNKNOWN')
+        self.assertEqual(previous['result']['confirmed_by'],new_id)
+        new=self.ground.journal.lookup(new_id)
+        self.assertNotIn('confirm_previous_unknown',new['request'])
+        self.assertNotIn('confirm_previous_unknown',self.ground.client.offer.call_args.args[2])
+        self.assertEqual(self.ground.client.offer.call_args.args[1],
+                         self.ground.prefix+'/cmd/service/ppp/restart')
+        self.assertEqual([item['id'] for item in self.ground.journal.pending_ppp_restarts()],
+                         [new_id])
+
+    def test_session_change_keeps_ppp_restart_unknown(self):
+        old=self.add_operation('ground-ppp-session-change','PPP_RESTART_REQUESTED',
+                               result={'accepted_by_systemd':True,'requested_ms':now_ms()-2000})
+        state={'v':2,'sid':'98ab76cd','boot':'boot-new','instance':'ground-returned'}
+        self.ground.receive(self.ground.prefix+'/state',compact(state))
+        self.assertEqual(self.ground.journal.lookup(old['id'])['stage'],'OUTCOME_UNKNOWN')
+        health={'v':2,'sid':state['sid'],'q':1,'t':now_ms(),'daq':1,'run':1}
+        self.ground.receive(self.ground.prefix+'/telemetry/health',compact(health))
+        self.assertEqual(self.ground.journal.lookup(old['id'])['stage'],'OUTCOME_UNKNOWN')
+
 class CommandTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
@@ -438,6 +516,61 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(accepted['stage'],'ACCEPTED')
         self.assertEqual(self.a.journal.lookup(request['id'])['stage'],'APPLIED')
         self.assertEqual(self.a.profile,'balanced')
+
+    def test_ppp_restart_requires_remote_and_action_capabilities(self):
+        self.a.cfg['runtime_mode']='controlled'
+        self.a.cfg['control'].update(remote_commands_enabled=True,ppp_restart_enabled=True)
+        self.a.helper_status={'allow_remote_control':False,'allow_ppp_restart':True}
+        self.assertFalse(self.a.capabilities()['ppp_restart'])
+        denied=self.a.commands.submit(self.request('ppp.restart'),'ground-controller')
+        self.assertEqual(denied['result']['error'],'REMOTE_COMMANDS_DISABLED')
+
+        self.a.helper_status={'allow_remote_control':True,'allow_ppp_restart':False}
+        self.assertFalse(self.a.capabilities()['ppp_restart'])
+        denied=self.a.commands.submit(self.request('ppp.restart'),'ground-controller')
+        self.assertEqual(denied['result']['error'],'CAPABILITY_DISABLED')
+
+        self.a.helper_status={'allow_remote_control':True,'allow_ppp_restart':True}
+        self.a.cfg['control']['ppp_restart_enabled']=False
+        self.assertFalse(self.a.capabilities()['ppp_restart'])
+        denied=self.a.commands.submit(self.request('ppp.restart'),'ground-controller')
+        self.assertEqual(denied['result']['error'],'CAPABILITY_DISABLED')
+
+        self.a.cfg['control']['ppp_restart_enabled']=True
+        self.assertTrue(self.a.capabilities()['ppp_restart'])
+        self.a.commands.start();self.addCleanup(self.a.commands.stop)
+        request=self.request('ppp.restart');observed=[]
+        def helper(payload):
+            observed.append((self.a.journal.lookup(request['id'])['stage'],payload))
+            return {'requested':True,'service':'t900-ppp.service'}
+        with mock.patch.object(self.a.commands,'_helper',side_effect=helper):
+            accepted=self.a.commands.submit(request,'ground-controller')
+            self.a.commands.queue.join()
+        self.assertEqual(accepted['stage'],'ACCEPTED')
+        self.assertEqual(observed,[('APPLYING',{'op':'ppp.restart','origin':'ground-controller'})])
+        operation=self.a.journal.lookup(request['id'])
+        self.assertEqual(operation['stage'],'PPP_RESTART_REQUESTED')
+        self.assertTrue(operation['result']['accepted_by_systemd'])
+
+    def test_ppp_restart_helper_timeout_stays_unknown(self):
+        self.a.cfg['runtime_mode']='controlled'
+        self.a.cfg['control'].update(remote_commands_enabled=True,ppp_restart_enabled=True)
+        self.a.helper_status={'allow_remote_control':True,'allow_ppp_restart':True}
+        self.a.commands.start();self.addCleanup(self.a.commands.stop)
+        request=self.request('ppp.restart')
+        with mock.patch.object(self.a.commands,'_helper',side_effect=TimeoutError('RPC_TIMEOUT')) as helper:
+            accepted=self.a.commands.submit(request,'ground-controller')
+            self.a.commands.queue.join()
+            self.assertEqual(accepted['stage'],'ACCEPTED')
+            self.assertEqual(self.a.journal.lookup(request['id'])['stage'],'OUTCOME_UNKNOWN')
+            duplicate=self.a.commands.submit(request,'ground-controller')
+        self.assertEqual(duplicate['stage'],'OUTCOME_UNKNOWN')
+        helper.assert_called_once_with({'op':'ppp.restart','origin':'ground-controller'})
+
+    def test_remote_payload_cannot_choose_ground_confirmation(self):
+        request=self.request('ppp.restart',confirm_previous_unknown=True)
+        result=self.a.commands.submit(request,'ground-controller')
+        self.assertEqual(result['result']['error'],'UNKNOWN_COMMAND_FIELD')
 
     def test_unrecognized_actor_is_rejected(self):
         result=self.a.commands.submit(self.request('stream.set',profile='balanced'),'untrusted-caller')

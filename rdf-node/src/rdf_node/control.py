@@ -11,6 +11,7 @@ from .config import PROFILES
 OPS={
     'config.get':'cmd/config/get', 'config.patch':'cmd/config/patch',
     'processing.set':'cmd/processing/set', 'service.restart':'cmd/service/restart',
+    'ppp.restart':'cmd/service/ppp/restart',
     'system.reboot.prepare':'cmd/system/reboot/prepare', 'system.reboot.execute':'cmd/system/reboot/execute',
     'system.shutdown.prepare':'cmd/system/shutdown/prepare', 'system.shutdown.execute':'cmd/system/shutdown/execute',
     'operation.get':'cmd/operation/get', 'stream.set':'cmd/stream/set',
@@ -73,10 +74,12 @@ class CommandManager:
                 if request.get('profile') not in PROFILES: raise ValueError('UNSUPPORTED_PROFILE')
             else:
                 flag={'config.patch':'config_patch_enabled','processing.set':'processing_enabled',
-                      'service.restart':'restart_enabled','system.reboot.prepare':'reboot_enabled',
-                      'system.reboot.execute':'reboot_enabled','system.shutdown.prepare':'shutdown_enabled',
-                      'system.shutdown.execute':'shutdown_enabled'}[op]
+                      'service.restart':'restart_enabled','ppp.restart':'ppp_restart_enabled',
+                      'system.reboot.prepare':'reboot_enabled','system.reboot.execute':'reboot_enabled',
+                      'system.shutdown.prepare':'shutdown_enabled','system.shutdown.execute':'shutdown_enabled'}[op]
                 if self.cfg['runtime_mode']!='controlled' or not self.cfg['control'][flag]: raise ValueError('CAPABILITY_DISABLED')
+                if op=='ppp.restart' and not a.helper_status.get('allow_ppp_restart',False):
+                    raise ValueError('CAPABILITY_DISABLED')
                 if op=='processing.set' and request.get('desired') not in ('RUNNING','STOPPED'): raise ValueError('INVALID_DESIRED_STATE')
                 if op=='config.patch':
                     from .helper import FIELD_MAP
@@ -125,6 +128,13 @@ class CommandManager:
                 self.queue.task_done()
     def _execute(self,r,actor):
         a=self.agent; op=r['op']
+        if op=='ppp.restart':
+            result=self._helper({'op':'ppp.restart','origin':actor})
+            if result!={'requested':True,'service':'t900-ppp.service'}:
+                raise TimeoutError('SYSTEMD_ACTION_OUTCOME_UNKNOWN')
+            return 'PPP_RESTART_REQUESTED',{
+                'accepted_by_systemd':True,'requested_ms':r['issued_ms'],'service':'t900-ppp.service'}
+
         if op=='stream.set':
             a.profile=r['profile']; a.journal.set('profile',a.profile)
             a.request_config_report=True

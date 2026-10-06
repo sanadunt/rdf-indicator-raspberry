@@ -62,6 +62,17 @@ class Journal:
             rows=self.db.execute('SELECT id,request,stage FROM operations').fetchall()
         return [{'id':id,'stage':stage} for id,request,stage in rows
                 if stage not in failures and json.loads(request).get('op')=='system.shutdown.execute']
+    def pending_ppp_restarts(self):
+        terminal={'APPLIED','FAILED','REJECTED','EXPIRED','CONFLICT','CANCELLED','PERSISTED_UNVERIFIED'}
+        with self.lock:
+            rows=self.db.execute('SELECT id,request,stage,result FROM operations').fetchall()
+        pending=[]
+        for id,raw_request,stage,raw_result in rows:
+            request=json.loads(raw_request); result=json.loads(raw_result)
+            if request.get('op')!='ppp.restart' or stage in terminal: continue
+            if stage=='OUTCOME_UNKNOWN' and result.get('confirmed_by'): continue
+            pending.append(dict(id=id,request=request,stage=stage,result=result))
+        return pending
     def recover(self,boot):
         recovered=[]
         with self.lock:
