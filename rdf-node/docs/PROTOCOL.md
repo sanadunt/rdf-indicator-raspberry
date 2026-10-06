@@ -16,7 +16,7 @@ Demo CLI tidak membuka koneksi MQTT. Prefix demo tersedia hanya bagi integration
 | state, capabilities, config/reported, availability | UAV -> Ground | 1 | ya, last-known |
 | ground/receipt | Ground -> UAV | 0 | tidak |
 | cmd/config/get, cmd/config/patch | Ground -> UAV | 1 | tidak |
-| cmd/processing/set, cmd/service/restart | Ground -> UAV | 1 | tidak |
+| cmd/processing/set, cmd/service/restart, cmd/service/ppp/restart | Ground -> UAV | 1 | tidak |
 | cmd/system/reboot/prepare, cmd/system/reboot/execute | Ground -> UAV | 1 | tidak |
 | cmd/system/shutdown/prepare, cmd/system/shutdown/execute | Ground -> UAV | 1 | tidak |
 | cmd/operation/get, cmd/stream/set | Ground -> UAV | 1 | tidak |
@@ -33,7 +33,12 @@ The client supports MQTT 5 over TCP or WebSocket. `tls: true` (the default) sele
 WSS, requires TLS 1.2+, and verifies the certificate chain and hostname/IP. If `ca_file` is unset,
 the system CA store is used; private/self-signed broker roots need an explicit CA file.
 `tls: false` selects plain TCP or `ws://`; broker credentials and MQTT payloads are unencrypted.
-Use plaintext only on an approved trusted link. There is no TLS mode that disables verification.
+Without configured MQTT credentials, the client uses anonymous CONNECT. Edge does not
+authenticate publisher identity or distinguish a Ground principal in MQTT messages. Broker
+ACL and network isolation limit which publishers can reach command topics; if anonymous
+publishers are allowed there, any reachable publisher can use enabled remote operations.
+Plaintext leaves credentials and payloads unencrypted. Use it only on an approved private,
+trusted link. There is no TLS mode that disables verification.
 
 WebSocket uses RFC 6455 and the `mqtt` subprotocol at `mqtt.websocket_path` (default `/mqtt`).
 MQTT Control Packets travel only in WebSocket binary frames; the parser treats the payload as a
@@ -170,6 +175,12 @@ Edge memakai U8. Keduanya terkuantisasi, bukan salinan lossless CSV. Gate LIVE p
 {"v":2,"id":"g01-00001234","sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","issued_ms":1790668800123,"expires_ms":1790668815123,"base_rev":7,"op":"config.patch","changes":{"center_frequency_hz":433920000,"vfo0_frequency_hz":433920000}}
 ```
 
+PPP restart uses the ordinary v2 envelope on `cmd/service/ppp/restart`:
+
+```json
+{"v":2,"id":"g01-00001235","sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","issued_ms":1790668800123,"expires_ms":1790668815123,"base_rev":7,"op":"ppp.restart"}
+```
+
 Semua nilai contoh adalah fixture, jangan dikirim mentah. Ground membuat envelope dari
 identity/revision terbaru. TTL default15s, maksimum30s. Unknown fields ditolak.
 ID sama+payload sama mengembalikan hasil/progress tersimpan, bukan eksekusi ulang.
@@ -178,6 +189,15 @@ ID sama+payload berbeda ditolak. Topic harus sesuai `op` dan command tidak retai
 ACK berisi `v,sid,id,status,t,rev,result`. APPLIED memerlukan bukti sesuai aksi.
 PERSISTED_UNVERIFIED dan OUTCOME_UNKNOWN bukan sinonim gagal atau berhasil.
 Hasil tersedia lewat jurnal setelah reconnect; tidak bergantung broker offline history.
+
+Untuk `ppp.restart`, operasi yang diterima mula-mula mengirim `PPP_RESTART_REQUESTED` dengan
+`accepted_by_systemd: true`, timestamp request, dan nama unit tetap `t900-ppp.service`.
+Ground hanya melaporkan `APPLIED` setelah health yang lebih baru dari request diterima pada
+sesi node yang sama; status ini bukan bukti PPP atau link MQTT pulih. Ground tidak mengulang
+hasil yang tetap unknown. Request baru memerlukan health fresh yang lebih baru dari setiap
+request unresolved serta konfirmasi operator; record lama tetap unknown. Konfirmasi itu adalah
+intent lokal Ground, bukan field envelope MQTT. Request tidak dapat tiba setelah seluruh jalur
+Control putus.
 
 ## API untuk dashboard lama
 
@@ -191,7 +211,7 @@ Receiver Ubuntu: `http://127.0.0.1:8791`.
 - `GET /api/v2/operations/pending-shutdowns`: ringkasan publik `{"pending":true|false}` dari seluruh jurnal operasi shutdown yang belum gagal pasti; tidak dibatasi 20 record terbaru dan tidak memuat ID.
 - `GET /api/v2/capabilities`: capability yang dilaporkan node.
 - `POST /api/v2/login`: PIN lokal enam digit, field JSON `pin`, HttpOnly cookie+CSRF.
-- `POST /api/v2/commands`: authenticated intent, tidak perlu membangun envelope di frontend. Ground API menerima `id` klien opsional agar dapat query operation yang sama bila respons execute hilang; bila tidak diberikan, server membuat ID.
+- `POST /api/v2/commands`: intent lokal terautentikasi; backend membuat envelope v2, frontend tidak. Klien boleh memberi `id` agar dapat query operasi setelah respons execute hilang. Untuk `ppp.restart`, `confirm_previous_unknown` adalah flag konfirmasi lokal yang dihapus sebelum journaling/publish; flag tidak melintasi MQTT. Tanpa `id`, server membuat ID.
 - `POST /api/v2/operation/result`: private result, membutuhkan auth+CSRF.
 
 Saat Ground mengubah sesi node, ia merekonsiliasi seluruh shutdown pending dari jurnal, bukan hanya window latest. Backend Ground hanya menyimpan/mengirim command dengan ID klien yang sudah tervalidasi; browser tidak memilih hasil operasi lain untuk menggantikan ID tersebut.

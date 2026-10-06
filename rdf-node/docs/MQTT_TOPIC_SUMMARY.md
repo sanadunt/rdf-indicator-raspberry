@@ -30,7 +30,13 @@ Edge membuka dua MQTT client:
 | Bulk | `{client_id}-bulk` | Publish `telemetry/angular` normal saja. Tidak subscribe command dan tidak memiliki hak command. |
 | Ground | `{node_id}-ground` | Subscribe data operasional/ACK; publish command dan receipt. |
 
-Kredensial Control dan Bulk terpisah bila digunakan. Jika file kredensial untuk kanal tidak dikonfigurasi, client dapat memakai anonymous CONNECT; ACL broker tetap harus membatasi hak berdasarkan deployment. MQTT memakai Clean Start dan Session Expiry 0. Koneksi ulang membuat sesi baru dan subscribe ulang, tanpa replay history offline. QoS 2 dan persistent broker session tidak didukung.
+Kredensial Control dan Bulk terpisah bila digunakan; tanpa kredensial, client memakai anonymous
+CONNECT. Edge tidak mengautentikasi identitas publisher atau mengikat payload ke principal
+Ground. ACL broker dan isolasi jaringan membatasi publisher yang dapat menjangkau topic command.
+Jika broker mengizinkan publish anonymous ke topic tersebut, publisher yang menjangkaunya dapat
+memakai operasi remote yang aktif. Plaintext mengekspos credential dan payload; gunakan hanya
+pada link privat terisolasi/tepercaya. MQTT memakai Clean Start dan Session Expiry 0; reconnect
+membuat sesi baru tanpa replay offline. QoS 2 dan persistent broker session tidak didukung.
 
 ## Daftar lengkap topic
 
@@ -55,6 +61,7 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | `cmd/config/patch` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Intent perubahan field safe yang diizinkan. |
 | `cmd/processing/set` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Intent `RUNNING` atau `STOPPED` untuk SDR stack yang di-approve. |
 | `cmd/service/restart` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Restart SDR stack yang di-approve. Bukan restart PPP atau bridge. |
+| `cmd/service/ppp/restart` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Minta restart fixed `t900-ppp.service`; memerlukan remote grant dan approval PPP terpisah. |
 | `cmd/system/reboot/prepare` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Meminta challenge reboot sekali pakai. |
 | `cmd/system/reboot/execute` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Eksekusi reboot dengan `prepare_id` dan `challenge` yang masih valid. |
 | `cmd/system/shutdown/prepare` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Meminta challenge shutdown sekali pakai; approval terpisah. |
@@ -83,6 +90,7 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | `cmd/config/patch` | Kirim hanya field allowlist dengan `base_rev` terkini; bedakan `APPLIED` dari `PERSISTED_UNVERIFIED`. |
 | `cmd/processing/set` | Minta start/stop SDR stack hanya jika capability tersedia; verifikasi hasil dari ACK dan telemetry baru. |
 | `cmd/service/restart` | Minta restart SDR stack yang di-approve; tunggu ACK final dengan proof operasi dan telemetry health fresh sebelum menyatakan pulih. |
+| `cmd/service/ppp/restart` | Minta restart hanya dengan `ppp_restart` dan `remote_commands`; butuh health fresh. `PPP_RESTART_REQUESTED` hanya membuktikan systemd menerima request. Jangan retry otomatis; request baru perlu konfirmasi operator dan health yang lebih baru dari semua hasil belum pasti. |
 | `cmd/system/reboot/prepare` | Minta challenge reboot setelah policy/approval terpenuhi; jangan log challenge. |
 | `cmd/system/reboot/execute` | Kirim challenge satu kali sebelum kedaluwarsa; tunggu boot ID baru dan health fresh untuk rekonsiliasi. |
 | `cmd/system/shutdown/prepare` | Minta challenge shutdown hanya saat capability tersedia; jangan log challenge. |
@@ -161,6 +169,7 @@ Ukuran command adalah fixture dengan envelope dan nilai umum yang sama seperti c
 | `cmd/config/patch` | 250 B | 293 B |
 | `cmd/processing/set` | 198 B | 243 B |
 | `cmd/service/restart` | 179 B | 225 B |
+| `cmd/service/ppp/restart` | 175 B | 225 B |
 | `cmd/system/reboot/prepare` | 185 B | 237 B |
 | `cmd/system/reboot/execute` | 260 B | 312 B |
 | `cmd/system/shutdown/prepare` | 187 B | 241 B |
@@ -258,10 +267,10 @@ Detail tidak menggantikan gate health utama. Ground saat ini menyimpan detail te
 ### `capabilities`
 
 ```json
-{"v":2,"sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","version":"1.0.0","mode":"read_only","codecs":["q16","u8"],"angle":"theta_mirror","native_axis":1,"count":360,"profiles":["control","balanced","graph_u8"],"scope":"SDR_STACK","helper_available":true,"maintenance":false,"remote_commands":false,"config_patch":false,"processing":false,"restart":false,"reboot":false,"shutdown":false}
+{"v":2,"sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","version":"1.0.0","mode":"read_only","codecs":["q16","u8"],"angle":"theta_mirror","native_axis":1,"count":360,"profiles":["control","balanced","graph_u8"],"scope":"SDR_STACK","helper_available":true,"maintenance":false,"remote_commands":false,"config_patch":false,"processing":false,"restart":false,"reboot":false,"shutdown":false,"ppp_restart":false}
 ```
 
-Capability boolean (`remote_commands`, `config_patch`, `processing`, `restart`, `reboot`, `shutdown`) adalah izin/runtime availability yang dilaporkan node, bukan otorisasi broker. Ground harus cek capability node dan `remote_commands` sebelum menampilkan atau mengirim mutation. Nilainya dapat berbeda antar perangkat karena approval lokal. Profile yang didukung saat ini:
+Boolean capability (`remote_commands`, `config_patch`, `processing`, `restart`, `reboot`, `shutdown`, `ppp_restart`) adalah izin/runtime availability yang dilaporkan node, bukan otorisasi broker. Untuk operasi remote Ground, cek juga `remote_commands`; PPP restart memerlukan `ppp_restart`. Nilainya dapat berbeda antar perangkat karena approval lokal. Profile yang didukung saat ini:
 
 | Profile | DoA | Angular |
 |---|---|---|
