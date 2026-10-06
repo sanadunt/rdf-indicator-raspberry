@@ -24,6 +24,7 @@ DEFAULT_POLICY={
     'state_dir':'/var/lib/rdf-node-control', 'settings_path':None,
     'engine_service':None, 'allow_config':False, 'single_writer_confirmed':False,
     'allow_lifecycle':False, 'lifecycle_audited':False, 'allow_reboot':False, 'allow_shutdown':False,
+    'allow_remote_control':False,
     'frequency_min_hz':24000000, 'frequency_max_hz':1766000000,
     'bandwidth_max_hz':2400000,
     'gain_values_db':[0.0,0.9,1.4,2.7,3.7,7.7,8.7,12.5,14.4,15.7,16.6,19.7,20.7,22.9,25.4,28.0,29.7,32.8,33.8,36.4,37.2,38.6,40.2,42.1,43.4,43.9,44.5,48.0,49.6],
@@ -196,7 +197,8 @@ class Controller:
         return dict(maintenance=self.maintenance(),desired=desired,
                     allow_config=self.policy['allow_config'] and self.policy['single_writer_confirmed'],
                     allow_lifecycle=self.policy['allow_lifecycle'] and self.policy['lifecycle_audited'],
-                    allow_reboot=self.policy['allow_reboot'],allow_shutdown=self.policy['allow_shutdown'])
+                    allow_reboot=self.policy['allow_reboot'],allow_shutdown=self.policy['allow_shutdown'],
+                    allow_remote_control=self.policy['allow_remote_control'])
     def reconcile_intent(self):
         if not (self.policy['allow_lifecycle'] and self.policy['lifecycle_audited'] and self.policy['engine_service']):
             return
@@ -214,13 +216,21 @@ class Controller:
         if not isinstance(req,dict) or not isinstance(req.get('op'),str): raise HelperError('INVALID_RPC')
         op=req['op']
         keys={'status':{'op'},'maintenance.open':{'op','seconds'},'maintenance.close':{'op'},
-              'config.patch':{'op','changes','expected_digest'},'processing.set':{'op','desired'},
-              'service.restart':{'op'},'system.reboot.prepare':{'op','id'},
-              'system.reboot.execute':{'op','id','challenge'},
-              'system.shutdown.prepare':{'op','id'},'system.shutdown.execute':{'op','id','challenge'},
+              'config.patch':{'op','changes','expected_digest'},'processing.set':{'op','desired','origin'},
+              'service.restart':{'op','origin'},'system.reboot.prepare':{'op','id','origin'},
+              'system.reboot.execute':{'op','id','challenge','origin'},
+              'system.shutdown.prepare':{'op','id','origin'},
+              'system.shutdown.execute':{'op','id','challenge','origin'},
               'system.shutdown.reconcile':{'op'}}
         if op not in keys: raise HelperError('UNSUPPORTED_RPC')
         if set(req)-keys[op]: raise HelperError('INVALID_RPC_ARGUMENT')
+        if op in ('processing.set','service.restart','system.reboot.prepare','system.reboot.execute',
+                  'system.shutdown.prepare','system.shutdown.execute'):
+            origin=req.get('origin')
+            if origin not in ('ground-controller','local-admin'):
+                raise HelperError('INVALID_RPC_ARGUMENT')
+            if origin=='ground-controller' and not self.policy['allow_remote_control']:
+                raise HelperError('REMOTE_CONTROL_NOT_APPROVED')
         if op=='status': return self.state_info()
         if op.startswith('maintenance.'):
             if uid!=0: raise HelperError('MAINTENANCE_REQUIRES_LOCAL_SUDO')
@@ -245,7 +255,7 @@ class Controller:
             if op in ('processing.set','service.restart'):
                 if not self.policy['allow_lifecycle'] or not self.policy['lifecycle_audited'] or not self.policy['engine_service']:
                     raise HelperError('LIFECYCLE_NOT_APPROVED')
-                if not self.maintenance(): raise HelperError('MAINTENANCE_REQUIRED')
+                if origin!='ground-controller' and not self.maintenance(): raise HelperError('MAINTENANCE_REQUIRED')
                 desired=req.get('desired') if op=='processing.set' else 'RUNNING'
                 if desired not in ('RUNNING','STOPPED'): raise HelperError('INVALID_DESIRED_STATE')
                 atomic_write(self.state/'intent.json',compact({'desired':desired,'boot':self.boot}))
@@ -262,7 +272,7 @@ class Controller:
                 action='shutdown' if shutdown else 'reboot'
                 if not self.policy['allow_shutdown' if shutdown else 'allow_reboot']:
                     raise HelperError('SHUTDOWN_DISABLED' if shutdown else 'REBOOT_DISABLED')
-                if not self.maintenance(): raise HelperError('MAINTENANCE_REQUIRED')
+                if origin!='ground-controller' and not self.maintenance(): raise HelperError('MAINTENANCE_REQUIRED')
                 id=req.get('id')
                 if not isinstance(id,str) or not 1<=len(id)<=80:
                     raise HelperError('INVALID_SHUTDOWN_ID' if shutdown else 'INVALID_REBOOT_ID')
@@ -325,7 +335,7 @@ def serve(policy_file):
     policy=dict(DEFAULT_POLICY)
     if not isinstance(value,dict) or set(value)-set(policy): raise SystemExit('Unknown helper policy key.')
     policy.update(value)
-    for k in ('allow_config','single_writer_confirmed','allow_lifecycle','lifecycle_audited','allow_reboot','allow_shutdown'):
+    for k in ('allow_config','single_writer_confirmed','allow_lifecycle','lifecycle_audited','allow_reboot','allow_shutdown','allow_remote_control'):
         if type(policy[k]) is not bool: raise SystemExit('Boolean policy required.')
     c=Controller(policy)
     c.reconcile_intent()

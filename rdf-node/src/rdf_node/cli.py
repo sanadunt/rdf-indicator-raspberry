@@ -160,13 +160,14 @@ def controls(args):
         if args.shutdown:
             if input('Izinkan fitur shutdown terproteksi (tetap memerlukan lease sudo)? ketik SHUTDOWN: ').strip()!='SHUTDOWN': raise SystemExit('Tidak diubah.')
             policy['allow_shutdown']=True; cfg['control']['shutdown_enabled']=True
+        policy['allow_remote_control']=args.remote
         cfg['runtime_mode']='controlled'
         cfg['control']['remote_commands_enabled']=args.remote
         atomic_write(path,yaml.safe_dump(policy,sort_keys=False).encode(),0o600)
         save_config(Path(args.config),cfg); chown_config(args.config)
         subprocess.run(['systemctl','daemon-reload'],check=True)
         subprocess.run(['systemctl','restart','rdf-control-helper.service','rdf-edge.service'],check=True)
-        print('Approval tersimpan. Buka lease maintenance terpisah untuk lifecycle, reboot, atau shutdown.')
+        print('Approval tersimpan. Lease maintenance tetap terpisah dan wajib untuk kontrol lifecycle lokal.')
     elif args.action=='shutdown-reconcile':
         from .helper import call_helper
         print('Helper hanya menghapus intent setelah systemd melaporkan unit timer/service shutdown tidak aktif.')
