@@ -127,7 +127,7 @@ def doctor(args):
 
 def controls(args):
     require_root()
-    from .helper import DEFAULT_POLICY
+    from .helper import DEFAULT_POLICY, HelperError, require_ppp_service_ready
     path=Path('/etc/rdf-node/helper.yaml'); policy=dict(DEFAULT_POLICY)
     if path.exists(): policy.update(yaml.safe_load(path.read_text()) or {})
     cfg=load_config(args.config)
@@ -160,6 +160,13 @@ def controls(args):
         if args.shutdown:
             if input('Izinkan fitur shutdown terproteksi (tetap memerlukan lease sudo)? ketik SHUTDOWN: ').strip()!='SHUTDOWN': raise SystemExit('Tidak diubah.')
             policy['allow_shutdown']=True; cfg['control']['shutdown_enabled']=True
+        if args.ppp_restart:
+            try: require_ppp_service_ready()
+            except HelperError as error: raise SystemExit(str(error)) from error
+            if input('Ketik T900 PPP RESTART untuk mengizinkan restart PPP dari Ground: ').strip()!='T900 PPP RESTART':
+                raise SystemExit('PPP restart belum approved.')
+            policy['allow_ppp_restart']=True
+            cfg['control']['ppp_restart_enabled']=True
         policy['allow_remote_control']=args.remote
         cfg['runtime_mode']='controlled'
         cfg['control']['remote_commands_enabled']=args.remote
@@ -243,7 +250,7 @@ def main():
         if name=='import-bundle': s.add_argument('directory')
         if name=='controls':
             s.add_argument('action',choices=['approve','maintenance-open','maintenance-close','shutdown-reconcile']);s.add_argument('--settings',action='store_true')
-            s.add_argument('--lifecycle',action='store_true');s.add_argument('--reboot',action='store_true');s.add_argument('--shutdown',action='store_true');s.add_argument('--remote',action='store_true')
+            s.add_argument('--lifecycle',action='store_true');s.add_argument('--reboot',action='store_true');s.add_argument('--shutdown',action='store_true');s.add_argument('--remote',action='store_true');s.add_argument('--ppp-restart',action='store_true')
             s.add_argument('--seconds',type=int,default=300)
     s=sub.add_parser('demo');s.add_argument('--port',type=int,default=8790);s.add_argument('--state-dir')
     s=sub.add_parser('helper');s.add_argument('--policy',default='/etc/rdf-node/helper.yaml')

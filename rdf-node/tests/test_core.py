@@ -61,6 +61,10 @@ class ConfigTests(unittest.TestCase):
         c=load_config()
         self.assertEqual(c['api']['port'],8790)
         self.assertFalse(c['control']['shutdown_enabled'])
+        self.assertFalse(c['control']['ppp_restart_enabled'])
+    def test_ppp_restart_requires_controlled_mode(self):
+        c=load_config();c['control']['ppp_restart_enabled']=True
+        with self.assertRaisesRegex(ValueError,'MUTATION_REQUIRES_CONTROLLED_MODE'):validate_config(c)
     def test_shutdown_requires_controlled_mode(self):
         c=load_config();c['control']['shutdown_enabled']=True
         with self.assertRaisesRegex(ValueError,'MUTATION_REQUIRES_CONTROLLED_MODE'):validate_config(c)
@@ -327,6 +331,125 @@ class HelperTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'MAINTENANCE_REQUIRED'):
                 self.ctrl.dispatch(request,os.getuid())
 
+    def test_ppp_restart_rejects_invalid_rpc_shape(self):
+        self.p.update(allow_ppp_restart=True,allow_remote_control=True)
+        requests=([],{'op':'wrong','origin':'ground-controller'},{'op':'ppp.restart'},
+                  {'op':'ppp.restart','origin':'ground-controller','service':'other.service'})
+        with mock.patch('rdf_node.helper.subprocess.run') as status, \
+                mock.patch.object(self.ctrl,'_run') as restart:
+            for request in requests:
+                with self.assertRaises(ValueError):
+                    self.ctrl.dispatch(request,os.getuid())
+        status.assert_not_called()
+        restart.assert_not_called()
+
+    def test_ppp_restart_requires_active_idle_unit(self):
+        self.p.update(allow_ppp_restart=True,allow_remote_control=True)
+        request={'op':'ppp.restart','origin':'ground-controller'}
+        for result,error in (
+                (mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=not-found','ActiveState=inactive','Job=0'))),
+                 'PPP_SERVICE_NOT_LOADED'),
+                (mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=inactive','Job=0'))),
+                 'PPP_SERVICE_NOT_ACTIVE'),
+                (mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=17'))),
+                 'PPP_RESTART_PENDING'),
+                (mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active'))),
+                 'PPP_SERVICE_STATUS_UNKNOWN'),
+                (mock.Mock(returncode=1,stdout=''),'PPP_SERVICE_STATUS_UNKNOWN')):
+            with mock.patch('rdf_node.helper.subprocess.run',return_value=result), \
+                    mock.patch.object(self.ctrl,'_run') as restart:
+                with self.assertRaisesRegex(ValueError,error):
+                    self.ctrl.dispatch(request,os.getuid())
+            restart.assert_not_called()
+
+    def test_ppp_restart_separates_local_lease_from_remote_approval(self):
+        self.p.update(allow_ppp_restart=True,allow_remote_control=False)
+        remote={'op':'ppp.restart','origin':'ground-controller'}
+        with mock.patch('rdf_node.helper.subprocess.run') as show, \
+                mock.patch.object(self.ctrl,'_run') as restart:
+            with self.assertRaisesRegex(ValueError,'REMOTE_CONTROL_NOT_APPROVED'):
+                self.ctrl.dispatch(remote,os.getuid())
+            with mock.patch.object(self.ctrl,'maintenance',return_value=False):
+                with self.assertRaisesRegex(ValueError,'MAINTENANCE_REQUIRED'):
+                    self.ctrl.dispatch({'op':'ppp.restart','origin':'local-admin'},os.getuid())
+            show.assert_not_called()
+            restart.assert_not_called()
+
+    def test_ppp_restart_action_failure_is_outcome_unknown(self):
+        self.p.update(allow_ppp_restart=True,allow_remote_control=True)
+        request={'op':'ppp.restart','origin':'ground-controller'}
+        status=mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=0')))
+        with mock.patch('rdf_node.helper.subprocess.run',return_value=status), \
+                mock.patch.object(self.ctrl,'_run',side_effect=HelperError('SYSTEMD_ACTION_FAILED')):
+            with self.assertRaisesRegex(TimeoutError,'SYSTEMD_ACTION_OUTCOME_UNKNOWN'):
+                self.ctrl.dispatch(request,os.getuid())
+
+    def test_ppp_restart_requests_only_fixed_unit(self):
+        self.p.update(allow_ppp_restart=True,allow_remote_control=True)
+        request={'op':'ppp.restart','origin':'ground-controller'}
+        status=mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=0')))
+        with mock.patch('rdf_node.helper.subprocess.run',return_value=status) as show, \
+                mock.patch.object(self.ctrl,'_run') as restart:
+            result=self.ctrl.dispatch(request,os.getuid())
+        self.assertEqual(result,{'requested':True,'service':'t900-ppp.service'})
+        self.assertEqual(show.call_args.args[0],
+                         ['/usr/bin/systemctl','show','--no-pager',
+                          '--property=LoadState,ActiveState,Job','t900-ppp.service'])
+        restart.assert_called_once_with(
+            ['/usr/bin/systemctl','--no-block','restart','t900-ppp.service'])
+
+    def test_concurrent_ppp_restart_requests_are_serialized(self):
+        import threading
+        self.p.update(allow_ppp_restart=True,allow_remote_control=True)
+        request={'op':'ppp.restart','origin':'ground-controller'}
+        status_calls=[];restart_calls=[];pending={'value':False}
+        restart_entered=threading.Event();release_restart=threading.Event()
+
+        class ObservedLock:
+            def __init__(self):
+                self.lock=threading.Lock();self.second_waiting=threading.Event()
+            def __enter__(self):
+                if threading.current_thread().name=='ppp-second': self.second_waiting.set()
+                self.lock.acquire()
+                return self
+            def __exit__(self,*_):
+                self.lock.release()
+
+        def systemctl_show(args,**kwargs):
+            status_calls.append(args)
+            job='17' if pending['value'] else '0'
+            return mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active',f'Job={job}')))
+
+        def systemctl_restart(args):
+            restart_calls.append(args)
+            restart_entered.set()
+            if not release_restart.wait(2): raise TimeoutError('test restart release timed out')
+            pending['value']=True
+
+        lock=ObservedLock();self.ctrl.lock=lock;outcomes={}
+        def dispatch(name):
+            try: outcomes[name]=self.ctrl.dispatch(dict(request),os.getuid())
+            except Exception as error: outcomes[name]=error
+
+        first=threading.Thread(target=dispatch,args=('first',),name='ppp-first')
+        second=threading.Thread(target=dispatch,args=('second',),name='ppp-second')
+        with mock.patch('rdf_node.helper.subprocess.run',side_effect=systemctl_show), \
+                mock.patch.object(self.ctrl,'_run',side_effect=systemctl_restart):
+            first.start()
+            self.assertTrue(restart_entered.wait(2))
+            second.start()
+            try:
+                self.assertTrue(lock.second_waiting.wait(2))
+                self.assertEqual(len(status_calls),1)
+            finally:
+                release_restart.set()
+                first.join(2);second.join(2)
+        self.assertFalse(first.is_alive());self.assertFalse(second.is_alive())
+        self.assertEqual(outcomes['first']['service'],'t900-ppp.service')
+        self.assertEqual(str(outcomes['second']),'PPP_RESTART_PENDING')
+        self.assertEqual(len(restart_calls),1)
+
+
     def test_helper_schedule_timeout_maps_to_unknown(self):
         from rdf_node.helper import call_helper
         connection=mock.MagicMock()
@@ -483,7 +606,7 @@ class ControlApprovalTests(unittest.TestCase):
                 return real_path(value)
 
             args=SimpleNamespace(action='approve',config=str(config),settings=False,lifecycle=False,
-                                 reboot=False,shutdown=False,remote=True)
+                                 reboot=False,shutdown=False,remote=True,ppp_restart=False)
             with mock.patch.object(cli,'require_root'),mock.patch.object(cli,'chown_config'), \
                     mock.patch.object(cli,'Path',side_effect=mapped_path), \
                     mock.patch.object(cli.subprocess,'run'),mock.patch('builtins.input',return_value='APPROVE'):
@@ -507,6 +630,44 @@ class ControlApprovalTests(unittest.TestCase):
             self.assertFalse(load_config(config)['control']['remote_commands_enabled'])
             self.assertTrue(saved['allow_reboot'])
             self.assertTrue(load_config(config)['control']['reboot_enabled'])
+
+    def test_ppp_restart_requires_root_unit_approval(self):
+        import sys
+        from types import SimpleNamespace
+        from rdf_node import cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);config=root/'config.yaml';policy_path=root/'helper.yaml'
+            config.write_text(cli.yaml.safe_dump(load_config(),sort_keys=False))
+            real_path=Path
+
+            def mapped_path(value):
+                if str(value)=='/etc/rdf-node/helper.yaml': return policy_path
+                return real_path(value)
+
+            with mock.patch.object(cli,'controls') as parsed, \
+                    mock.patch.object(sys,'argv',['rdf-node','controls','approve','--config',str(config),
+                                                  '--remote','--ppp-restart']):
+                cli.main()
+            self.assertTrue(parsed.call_args.args[0].ppp_restart)
+
+            args=SimpleNamespace(action='approve',config=str(config),settings=False,lifecycle=False,
+                                 reboot=False,shutdown=False,remote=True,ppp_restart=True)
+            status=mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=0')))
+            with mock.patch.object(cli,'require_root'),mock.patch.object(cli,'chown_config'), \
+                    mock.patch.object(cli,'Path',side_effect=mapped_path), \
+                    mock.patch('rdf_node.helper.subprocess.run',return_value=status) as systemctl, \
+                    mock.patch('builtins.input',side_effect=('APPROVE','T900 PPP RESTART')):
+                cli.controls(args)
+
+            saved=cli.yaml.safe_load(policy_path.read_text())
+            approved=load_config(config)
+            self.assertTrue(saved['allow_ppp_restart'])
+            self.assertTrue(saved['allow_remote_control'])
+            self.assertTrue(approved['control']['ppp_restart_enabled'])
+            self.assertEqual(systemctl.call_args_list[0].args[0],
+                             ['/usr/bin/systemctl','show','--no-pager',
+                              '--property=LoadState,ActiveState,Job','t900-ppp.service'])
 
 class MqttWireTests(unittest.TestCase):
     def test_varints(self):

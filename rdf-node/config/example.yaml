@@ -49,6 +49,7 @@ control:
   restart_enabled: false
   reboot_enabled: false
   shutdown_enabled: false
+  ppp_restart_enabled: false
   remote_commands_enabled: false
   helper_socket: /run/rdf-node-control/control.sock
   verify_seconds: 12

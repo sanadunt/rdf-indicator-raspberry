@@ -24,7 +24,7 @@ DEFAULT_POLICY={
     'state_dir':'/var/lib/rdf-node-control', 'settings_path':None,
     'engine_service':None, 'allow_config':False, 'single_writer_confirmed':False,
     'allow_lifecycle':False, 'lifecycle_audited':False, 'allow_reboot':False, 'allow_shutdown':False,
-    'allow_remote_control':False,
+    'allow_ppp_restart':False, 'allow_remote_control':False,
     'frequency_min_hz':24000000, 'frequency_max_hz':1766000000,
     'bandwidth_max_hz':2400000,
     'gain_values_db':[0.0,0.9,1.4,2.7,3.7,7.7,8.7,12.5,14.4,15.7,16.6,19.7,20.7,22.9,25.4,28.0,29.7,32.8,33.8,36.4,37.2,38.6,40.2,42.1,43.4,43.9,44.5,48.0,49.6],
@@ -123,6 +123,26 @@ def call_helper(sock_path,request,timeout=8):
             raise HelperError(error)
         return result['result']
 
+def require_ppp_service_ready():
+    """Fail closed unless the fixed PPP unit is loaded, active, and has no job."""
+    try:
+        result=subprocess.run(['/usr/bin/systemctl','show','--no-pager',
+            '--property=LoadState,ActiveState,Job','t900-ppp.service'],timeout=5,
+            stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+    except (OSError,subprocess.TimeoutExpired) as error:
+        raise HelperError('PPP_SERVICE_STATUS_UNKNOWN') from error
+    if result.returncode:
+        raise HelperError('PPP_SERVICE_STATUS_UNKNOWN')
+    state=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
+    if any(key not in state or not state[key] for key in ('LoadState','ActiveState','Job')):
+        raise HelperError('PPP_SERVICE_STATUS_UNKNOWN')
+    if state['LoadState']!='loaded':
+        raise HelperError('PPP_SERVICE_NOT_LOADED')
+    if state['ActiveState']!='active':
+        raise HelperError('PPP_SERVICE_NOT_ACTIVE')
+    if state['Job']!='0':
+        raise HelperError('PPP_RESTART_PENDING')
+
 class Controller:
     def __init__(self,policy):
         import re
@@ -198,6 +218,7 @@ class Controller:
                     allow_config=self.policy['allow_config'] and self.policy['single_writer_confirmed'],
                     allow_lifecycle=self.policy['allow_lifecycle'] and self.policy['lifecycle_audited'],
                     allow_reboot=self.policy['allow_reboot'],allow_shutdown=self.policy['allow_shutdown'],
+                    allow_ppp_restart=self.policy['allow_ppp_restart'],
                     allow_remote_control=self.policy['allow_remote_control'])
     def reconcile_intent(self):
         if not (self.policy['allow_lifecycle'] and self.policy['lifecycle_audited'] and self.policy['engine_service']):
@@ -217,14 +238,15 @@ class Controller:
         op=req['op']
         keys={'status':{'op'},'maintenance.open':{'op','seconds'},'maintenance.close':{'op'},
               'config.patch':{'op','changes','expected_digest'},'processing.set':{'op','desired','origin'},
-              'service.restart':{'op','origin'},'system.reboot.prepare':{'op','id','origin'},
+              'service.restart':{'op','origin'},'ppp.restart':{'op','origin'},
+              'system.reboot.prepare':{'op','id','origin'},
               'system.reboot.execute':{'op','id','challenge','origin'},
               'system.shutdown.prepare':{'op','id','origin'},
               'system.shutdown.execute':{'op','id','challenge','origin'},
               'system.shutdown.reconcile':{'op'}}
         if op not in keys: raise HelperError('UNSUPPORTED_RPC')
         if set(req)-keys[op]: raise HelperError('INVALID_RPC_ARGUMENT')
-        if op in ('processing.set','service.restart','system.reboot.prepare','system.reboot.execute',
+        if op in ('processing.set','service.restart','ppp.restart','system.reboot.prepare','system.reboot.execute',
                   'system.shutdown.prepare','system.shutdown.execute'):
             origin=req.get('origin')
             if origin not in ('ground-controller','local-admin'):
@@ -241,6 +263,16 @@ class Controller:
             if op=='system.shutdown.reconcile':
                 if uid!=0: raise HelperError('SHUTDOWN_RECONCILE_REQUIRES_ROOT')
                 return self._reconcile_shutdown()
+            if op=='ppp.restart':
+                if not self.policy['allow_ppp_restart']: raise HelperError('PPP_RESTART_NOT_APPROVED')
+                if origin!='ground-controller' and not self.maintenance(): raise HelperError('MAINTENANCE_REQUIRED')
+                require_ppp_service_ready()
+                try:
+                    self._run(['/usr/bin/systemctl','--no-block','restart','t900-ppp.service'])
+                except (OSError,TimeoutError,subprocess.TimeoutExpired,HelperError) as error:
+                    raise TimeoutError('SYSTEMD_ACTION_OUTCOME_UNKNOWN') from error
+                return {'requested':True,'service':'t900-ppp.service'}
+
             if op=='config.patch':
                 if not self.policy['allow_config'] or not self.policy['single_writer_confirmed'] or not self.policy['settings_path']:
                     raise HelperError('CONFIG_ADAPTER_NOT_APPROVED')
@@ -335,7 +367,7 @@ def serve(policy_file):
     policy=dict(DEFAULT_POLICY)
     if not isinstance(value,dict) or set(value)-set(policy): raise SystemExit('Unknown helper policy key.')
     policy.update(value)
-    for k in ('allow_config','single_writer_confirmed','allow_lifecycle','lifecycle_audited','allow_reboot','allow_shutdown','allow_remote_control'):
+    for k in ('allow_config','single_writer_confirmed','allow_lifecycle','lifecycle_audited','allow_reboot','allow_shutdown','allow_ppp_restart','allow_remote_control'):
         if type(policy[k]) is not bool: raise SystemExit('Boolean policy required.')
     c=Controller(policy)
     c.reconcile_intent()
