@@ -1,5 +1,5 @@
 'use strict';
-const $=id=>document.getElementById(id);let csrf=null,snapshot={},pollPending=false,pollAgain=false,pollTimer=null,apiSnapshotAvailable=false,shutdownPending=false,shutdownUncertain=false,shutdownHistoryChecked=false,shutdownHistoryAt=0,shutdownHistoryRequest=null,pppPending=false,pppRecords=[],pppHistoryAt=0,pppHistoryRequest=null,pppHistoryAvailable=false,pppRenderKey='',pppServerGate={required:false,freshAfter:0,message:''};
+const $=id=>document.getElementById(id);let csrf=null,snapshot={},pollPending=false,pollAgain=false,pollTimer=null,apiSnapshotAvailable=false,shutdownPending=false,shutdownUncertain=false,shutdownHistoryChecked=false,shutdownHistoryAt=0,shutdownHistoryRequest=null,pppPending=false,pppRecords=[],pppHistoryAt=0,pppHistoryRequest=null,pppHistoryAvailable=false,pppRenderKey='',pppServerGate={required:false,freshAfter:0,message:''},settingsPending=false,settingsDirty=false,settingsBase={},settingsTarget={},settingsOperationId=null,settingsAwaitingRevision=null;
 async function get(p){const r=await fetch(p,{cache:'no-store',signal:AbortSignal.timeout(2000)});if(!r.ok)throw Error(`HTTP ${r.status}`);return r.json();}
 function apiStatus(message){$('api-status').hidden=!message;$('api-message').textContent=message;}
 async function post(p,j,timeout=6000){const r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf||''},body:JSON.stringify(j),signal:AbortSignal.timeout(timeout)});const out=await r.json();if(!r.ok){const e=Error(out.error||'Gagal');e.status=r.status;throw e;}return out;}
@@ -231,9 +231,208 @@ async function checkShutdownHistory(force=false,clearIfEmpty=false){
 }
 async function shutdownOutcome(id){for(let i=0;i<12;i++){try{const outcome=await post('/api/v2/operation/result',{id},1500);if(['SHUTDOWN_SCHEDULED','FAILED','REJECTED','OUTCOME_UNKNOWN'].includes(outcome.stage))return outcome;}catch{return null;}await new Promise(r=>setTimeout(r,250));}return null;}
 async function command(op,extra={}){try{$('operation').textContent=JSON.stringify(await post('/api/v2/commands',{op,base_rev:snapshot.config?.sdr_revision??null,...extra}),null,2);}catch(e){$('operation').textContent=e.message;}}
+const approvedGainValuesDb=[0.0,0.9,1.4,2.7,3.7,7.7,8.7,12.5,14.4,15.7,16.6,19.7,20.7,22.9,25.4,28.0,29.7,32.8,33.8,36.4,37.2,38.6,40.2,42.1,43.4,43.9,44.5,48.0,49.6];
+const settingsFieldIds=['frequency','bandwidth','gain','squelch'];
+const settingsTerminalStages=new Set(['APPLIED','PERSISTED_UNVERIFIED','FAILED','REJECTED','EXPIRED','CONFLICT','CANCELLED','OUTCOME_UNKNOWN']);
+function renderSettings(config){
+ const safe=config?.safe_settings&&typeof config.safe_settings==='object'&&!Array.isArray(config.safe_settings)?config.safe_settings:{};
+ const report=JSON.stringify({revision:Number.isSafeInteger(config?.sdr_revision)?config.sdr_revision:null,edge_report_proof:config?.proof??config?.reported?.proof??'UNVERIFIED',safe_settings:safe},null,2);
+ if($('settings-reported').textContent!==report)$('settings-reported').textContent=report;
+ if(settingsAwaitingRevision!==null&&Number.isSafeInteger(config?.sdr_revision)&&config.sdr_revision>=settingsAwaitingRevision)settingsAwaitingRevision=null;
+ const target=Object.entries(settingsTarget);
+ if(settingsDirty&&!settingsPending&&target.length&&target.every(([key,value])=>safe[key]===value)){
+  settingsDirty=false;
+  settingsTarget={};
+ }
+ if(settingsDirty||settingsPending)return;
+ const center=safe.center_frequency_hz,vfo=safe.vfo0_frequency_hz;
+ settingsBase={
+  frequency_hz:Number.isSafeInteger(center)&&center===vfo?center:null,
+  bandwidth_hz:Number.isSafeInteger(safe.vfo0_bandwidth_hz)?safe.vfo0_bandwidth_hz:null,
+  gain_db:Number.isFinite(safe.gain_db)?safe.gain_db:null,
+  squelch_db:Number.isFinite(safe.vfo0_squelch_db)?safe.vfo0_squelch_db:null
+ };
+ $('frequency').value=settingsBase.frequency_hz===null?'':String(settingsBase.frequency_hz/1e6);
+ $('bandwidth').value=settingsBase.bandwidth_hz===null?'':String(settingsBase.bandwidth_hz);
+ $('gain').value=settingsBase.gain_db===null?'':String(settingsBase.gain_db);
+ $('squelch').value=settingsBase.squelch_db===null?'':String(settingsBase.squelch_db);
+}
+function updateSettingsButton(){
+ const button=$('settings-apply');
+ if(!button)return;
+ const ready=!!csrf&&apiSnapshotAvailable&&settingsAwaitingRevision===null&&snapshot.capabilities?.remote_commands===true&&
+  snapshot.capabilities?.config_patch===true&&snapshot.health_fresh===true&&
+  snapshot.link?.mqtt_control?.ready===true&&Number.isSafeInteger(snapshot.config?.sdr_revision);
+ button.disabled=settingsPending||!ready;
+ button.textContent=settingsPending?'Applying settings...':'Apply safe settings';
+ for(const id of settingsFieldIds)$(id).disabled=settingsPending;
+ let reason='Settings siap. Periksa Edge report dan proof setelah setiap perubahan.';
+ if(settingsPending)reason='Mengirim atau memeriksa hasil settings. Jangan klik ulang.';
+ else if(!csrf)reason='Login Ground diperlukan untuk mengirim settings.';
+ else if(!apiSnapshotAvailable)reason='Snapshot Ground tidak tersedia; settings tidak dikirim.';
+ else if(snapshot.capabilities?.remote_commands!==true||snapshot.capabilities?.config_patch!==true)reason='Izin remote control atau config patch belum aktif di node.';
+ else if(snapshot.health_fresh!==true||snapshot.link?.mqtt_control?.ready!==true)reason='Settings memerlukan health fresh dan MQTT Control tersambung.';
+ else if(!Number.isSafeInteger(snapshot.config?.sdr_revision))reason='Revision config node belum dilaporkan; settings tidak dikirim.';
+ else if(settingsAwaitingRevision!==null)reason='Edge sudah menyimpan settings tetapi belum melaporkan revision baru; tunggu report sebelum mengirim perubahan berikutnya.';
+ const status=$('settings-availability');
+ if(status.textContent!==reason)status.textContent=reason;
+}
+function setSettingsErrors(errors){
+ for(const id of settingsFieldIds){
+  const input=$(id),message=errors[id]||'';
+  if(message)input.setAttribute('aria-invalid','true');
+  else input.removeAttribute('aria-invalid');
+  $(`${id}-error`).textContent=message;
+ }
+}
+function readSettingValue(id,base,min,max,integer,errors){
+ const raw=$(id).value.trim();
+ if(!raw){
+  if(base!==null&&base!==undefined)errors[id]='Nilai terlapor harus tetap diisi atau diganti dengan nilai baru.';
+  return null;
+ }
+ const value=Number(raw);
+ if(!Number.isFinite(value)||(integer&&!Number.isSafeInteger(value))||value<min||value>max){
+  errors[id]=`Nilai harus ${integer?'bilangan bulat ':''}dalam rentang ${min} sampai ${max}.`;
+  return null;
+ }
+ if(id==='gain'&&!approvedGainValuesDb.some(approved=>Math.abs(approved-value)<0.001)){
+  errors[id]='Gain harus memakai salah satu tingkat yang disetujui helper.';
+  return null;
+ }
+ return value;
+}
+function validateSettings(){
+ const errors={},changes={},rawFrequency=$('frequency').value.trim();
+ if(!rawFrequency){
+  if(settingsBase.frequency_hz!==null)errors.frequency='Frekuensi terlapor harus tetap diisi atau diganti.';
+ }else{
+  const mhz=Number(rawFrequency),hz=mhz*1e6;
+  if(!Number.isFinite(mhz)||!Number.isSafeInteger(hz)||hz<24000000||hz>1766000000){
+   errors.frequency='Frekuensi harus 24 sampai 1766 MHz dan tepat dalam Hz.';
+  }else if(settingsBase.frequency_hz===null||hz!==settingsBase.frequency_hz){
+   changes.center_frequency_hz=hz;
+   changes.vfo0_frequency_hz=hz;
+  }
+ }
+ const bandwidth=readSettingValue('bandwidth',settingsBase.bandwidth_hz,100,2400000,true,errors);
+ if(bandwidth!==null&&(settingsBase.bandwidth_hz===null||bandwidth!==settingsBase.bandwidth_hz))changes.vfo0_bandwidth_hz=bandwidth;
+ const gain=readSettingValue('gain',settingsBase.gain_db,-10,100,false,errors);
+ if(gain!==null&&(settingsBase.gain_db===null||gain!==settingsBase.gain_db))changes.gain_db=gain;
+ const squelch=readSettingValue('squelch',settingsBase.squelch_db,-200,50,false,errors);
+ if(squelch!==null&&(settingsBase.squelch_db===null||squelch!==settingsBase.squelch_db))changes.vfo0_squelch_db=squelch;
+ return {errors,changes};
+}
+function renderSettingsOperation(operation){
+ if(!operation||operation.op!=='config.patch'||typeof operation.id!=='string')return;
+ settingsOperationId=operation.id;
+ const result=operation.result&&typeof operation.result==='object'?operation.result:{};
+ if(['APPLIED','PERSISTED_UNVERIFIED'].includes(operation.stage)&&result.persisted===true&&Number.isSafeInteger(result.revision)){
+  const reportedRevision=snapshot.config?.sdr_revision;
+  if(!Number.isSafeInteger(reportedRevision)||reportedRevision<result.revision){
+   settingsAwaitingRevision=Math.max(settingsAwaitingRevision??result.revision,result.revision);
+  }
+ }
+ const proof=result.proof&&typeof result.proof==='object'&&!Array.isArray(result.proof)?result.proof:{};
+ const proofCount=Object.keys(proof).length;
+ const runtime=operation.stage==='APPLIED'&&proofCount?'VERIFIED':proofCount?'PARTIAL':operation.stage==='PERSISTED_UNVERIFIED'?'UNVERIFIED':'NOT_REPORTED';
+ const persisted=result.persisted===true?'YES':result.persisted===false?'NO':'NOT_REPORTED';
+ const details=JSON.stringify({id:operation.id,stage:operation.stage,persisted,runtime:{state:runtime,fields:proof},reason:result.reason||result.error||null},null,2);
+ if($('settings-proof').textContent!==details)$('settings-proof').textContent=details;
+ const messages={
+  SUBMITTING:'Request dikirim satu kali. Ground sedang memeriksa journal.',
+  REQUESTED:'Ground mencatat request. Menunggu hasil Edge; persistensi dan runtime belum dilaporkan.',
+  ACCEPTED:'Edge menerima command. Hasil settings belum tersedia.',
+  APPLYING:'Edge sedang menerapkan perubahan settings.',
+  VERIFYING:'File settings tercatat tersimpan; runtime proof masih diperiksa.',
+  PERSISTED_UNVERIFIED:'File settings tersimpan. Runtime proof belum lengkap.',
+  APPLIED:proofCount?'Edge melaporkan APPLIED; runtime proof tersedia di bawah.':'Edge melaporkan APPLIED, tetapi runtime proof tidak dilaporkan.',
+  OUTCOME_UNKNOWN:'Hasil settings belum diketahui. UI tidak mengirim ulang otomatis.',
+  FAILED:'Node melaporkan kegagalan settings.',
+  REJECTED:'Ground atau node menolak perubahan settings.',
+  EXPIRED:'Request settings kedaluwarsa.',
+  CONFLICT:'Revision settings berubah; periksa nilai report sebelum mencoba lagi.',
+  CANCELLED:'Request settings dibatalkan.'
+ };
+ let message=`${operation.stage||'UNKNOWN'} | ID ${operation.id}: ${messages[operation.stage]||'Hasil settings belum tersedia.'}`;
+ if(result.error)message+=` Alasan: ${String(result.error)}`;
+ if($('settings-status').textContent!==message)$('settings-status').textContent=message;
+ updateSettingsButton();
+}
+async function pollSettingsOperation(id,last){
+ let outcome=last;
+ for(let attempt=0;attempt<30&&!settingsTerminalStages.has(outcome.stage);attempt++){
+  await new Promise(resolve=>setTimeout(resolve,500));
+  try{
+   outcome=await post('/api/v2/operation/result',{id},1500);
+   renderSettingsOperation({op:'config.patch',...outcome});
+  }catch(error){
+   if(error.status===404)continue;
+   $('settings-status').textContent=`Hasil ID ${id} tidak dapat dibaca (${error.message}). UI tidak mengirim ulang.`;
+   return;
+  }
+ }
+ if(!settingsTerminalStages.has(outcome.stage))$('settings-status').textContent=`Hasil ID ${id} masih ${outcome.stage||'belum tersedia'}. UI tidak mengirim ulang otomatis.`;
+}
+async function applySafeSettings(){
+ const button=$('settings-apply');
+ if(settingsPending||button.disabled)return;
+ const {errors,changes}=validateSettings();
+ setSettingsErrors(errors);
+ const invalid=settingsFieldIds.find(id=>errors[id]);
+ if(invalid){
+  $('settings-status').textContent='Perbaiki nilai settings yang ditandai sebelum mengirim.';
+  $(invalid).focus();
+  return;
+ }
+ if(!Object.keys(changes).length){
+  settingsDirty=false;
+  settingsTarget={};
+  renderSettings(snapshot.config);
+  $('settings-status').textContent='Tidak ada nilai settings baru; request tidak dikirim.';
+  return;
+ }
+ settingsPending=true;
+ settingsTarget=changes;
+ const id=`ground-${crypto.randomUUID().replace(/-/g,'').slice(0,20)}`;
+ settingsOperationId=id;
+ renderSettingsOperation({id,op:'config.patch',stage:'SUBMITTING',result:{}});
+ updateSettingsButton();
+ try{
+  let accepted;
+  try{
+   accepted=await post('/api/v2/commands',{id,op:'config.patch',base_rev:snapshot.config.sdr_revision,changes});
+   if(accepted.id!==id)throw Error('ID settings tidak cocok');
+   renderSettingsOperation({op:'config.patch',...accepted});
+  }catch(error){
+   if(error.status>=400&&error.status<500){
+    settingsTarget={};
+    renderSettingsOperation({id,op:'config.patch',stage:'REJECTED',result:{error:error.message}});
+    return;
+   }
+   renderSettingsOperation({id,op:'config.patch',stage:'SUBMITTING',result:{error:error.message}});
+   $('settings-status').textContent=`Response ID ${id} tidak diterima. Memeriksa journal tanpa mengirim ulang.`;
+   accepted={id,stage:'SUBMITTING',result:{}};
+  }
+  await pollSettingsOperation(id,accepted);
+ }finally{
+  settingsPending=false;
+  updateSettingsButton();
+ }
+}
+$('settings-form').addEventListener('input',event=>{
+ if(!settingsFieldIds.includes(event.target.id))return;
+ settingsDirty=true;
+ settingsTarget={};
+ event.target.removeAttribute('aria-invalid');
+ $(`${event.target.id}-error`).textContent='';
+ if($('settings-status').textContent==='Perbaiki nilai settings yang ditandai sebelum mengirim.')$('settings-status').textContent='';
+});
+$('settings-form').addEventListener('submit',event=>{event.preventDefault();void applySafeSettings();});
+updateSettingsButton();
 const pinInput=$('pin');const loginButton=$('login');loginButton.disabled=true;
 pinInput.addEventListener('input',()=>{pinInput.value=pinInput.value.replace(/[^0-9]/g,'').slice(0,6);loginButton.disabled=pinInput.value.length!==6;});
-loginButton.onclick=async()=>{try{const r=await post('/api/v2/login',{pin:pinInput.value});csrf=r.csrf;pinInput.value='';loginButton.disabled=true;$('authstate').textContent='ADMIN - operasi tetap memerlukan izin node.';updatePppButton();void refreshPppHistory(true);}catch(e){pinInput.value='';loginButton.disabled=true;$('authstate').textContent=e.message;}};
+loginButton.onclick=async()=>{try{const r=await post('/api/v2/login',{pin:pinInput.value});csrf=r.csrf;pinInput.value='';loginButton.disabled=true;$('authstate').textContent='ADMIN - operasi tetap memerlukan izin node.';updatePppButton();updateSettingsButton();void refreshPppHistory(true);}catch(e){pinInput.value='';loginButton.disabled=true;$('authstate').textContent=e.message;}};
 $('refresh').onclick=()=>command('config.get');$('start').onclick=()=>command('processing.set',{desired:'RUNNING'});$('stop').onclick=()=>{if(confirm('Hentikan stack RDF? Telemetry tetap hidup.'))command('processing.set',{desired:'STOPPED'});};
 $('restart').onclick=()=>{if(confirm('Restart stack RDF yang sudah di-approve?'))command('service.restart');};
  $('reboot').onclick=async()=>{
@@ -299,7 +498,6 @@ $('restart').onclick=()=>{if(confirm('Restart stack RDF yang sudah di-approve?')
    }else $('operation').textContent=e.message;
   }finally{shutdownPending=false;updateShutdownButton();}
  };
- $('tune').onclick=()=>{const f=Math.round(Number($('frequency').value)*1e6);if(f>0&&Number.isFinite(f))command('config.patch',{changes:{center_frequency_hz:f,vfo0_frequency_hz:f}});};
  $('setprofile').onclick=()=>command('stream.set',{profile:$('profile').value});
  $('ppp-restart').onclick=()=>{void requestPppRestart();};
 function plot(a){const c=$('plot').getContext('2d');c.clearRect(0,0,480,480);const cx=240,cy=240,r=180;c.strokeStyle='#31455e';c.lineWidth=1;c.fillStyle='#a6b7cf';c.font='14px system-ui';for(const x of [60,120,180]){c.beginPath();c.arc(cx,cy,x,0,Math.PI*2);c.stroke();}c.beginPath();c.moveTo(50,cy);c.lineTo(430,cy);c.moveTo(cx,50);c.lineTo(cx,430);c.stroke();c.fillText('0',234,35);c.fillText('90',439,244);c.fillText('180',228,455);c.fillText('270',10,244);if(!a)return;const v=a.values;if(!Array.isArray(v)||v.length!==360)return;const min=Math.min(...v),max=Math.max(...v),range=max-min;c.strokeStyle=a.stale?'#778493':'#79dce4';c.lineWidth=2;c.beginPath();v.forEach((x,i)=>{const radius=range===0?r/2:10+(r-10)*(x-min)/range;const theta=i*Math.PI/180;const px=cx+radius*Math.sin(theta),py=cy-radius*Math.cos(theta);if(i===0)c.moveTo(px,py);else c.lineTo(px,py);});c.closePath();c.stroke();}
@@ -310,7 +508,10 @@ async function poll(manual=false){
  try{
   snapshot=await get('/api/v2/snapshot');
   apiSnapshotAvailable=true;
+  renderSettings(snapshot.config);
+  updateSettingsButton();
   if(snapshot.last_operation){$('operation').textContent=JSON.stringify(snapshot.last_operation,null,2);rememberShutdownState(snapshot.last_operation);}
+  if(snapshot.last_operation?.op==='config.patch'&&(!settingsPending||snapshot.last_operation.id===settingsOperationId))renderSettingsOperation(snapshot.last_operation);
   if(snapshot.last_operation?.op==='ppp.restart')rememberPppOperation(snapshot.last_operation);
   renderPppRecords();
   updatePppButton();
@@ -333,7 +534,7 @@ async function poll(manual=false){
    apiStatus(`Snapshot tersedia; API grafik angular gagal (${e.message}). Data grafik terakhir tetap STALE.`);
   }
  }catch(e){
-  apiSnapshotAvailable=false;
+  updateSettingsButton();
   updateShutdownButton();
   updatePppButton();
   $('state').textContent='GROUND API UNAVAILABLE';document.querySelector('main').classList.add('data-stale');
@@ -352,4 +553,4 @@ $('retry').onclick=()=>{
  if(pollPending){pollAgain=true;return;}
  void poll(true);
 };
-get('/api/v2/session').then(r=>{csrf=r.csrf;updatePppButton();if(csrf)void refreshPppHistory(true);}).catch(()=>{});poll();
+get('/api/v2/session').then(r=>{csrf=r.csrf;updatePppButton();updateSettingsButton();if(csrf)void refreshPppHistory(true);}).catch(()=>{});poll();

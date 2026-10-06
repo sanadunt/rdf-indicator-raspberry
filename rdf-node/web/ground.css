@@ -15,10 +15,25 @@ main.data-stale section{border-color:#f1c16e}
 .ppp-control p{margin:6px 0}
 .ppp-control ul{margin:8px 0;padding-left:20px}
 .ppp-control li{margin:8px 0}
+.settings-form{margin:14px 0;padding:12px;border:1px solid #233349;border-radius:8px;background:#0e1927;min-width:0}
+.settings-form h3{margin:0 0 6px;color:#79dce4;font-size:16px}
+.settings-form h4{margin:10px 0 4px;font-size:14px}
+.settings-form>p{margin:6px 0;line-height:1.5;overflow-wrap:anywhere}
+.settings-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.settings-field{min-width:0}
+.settings-field label{display:block;color:#eaf3ff;font-size:13px}
+.settings-field input{min-height:44px;margin:4px 0;width:100%;padding:8px}
+.settings-field input:focus-visible{outline:2px solid #79dce4;outline-offset:2px}
+.settings-field .field-error{display:block;min-height:1.4em;color:#ffb3b3;letter-spacing:0;overflow-wrap:anywhere}
+.settings-field input[aria-invalid=true]{border-color:#ff9696}
+.settings-form button{min-height:44px}
+.settings-form #settings-availability,.settings-form #settings-status{margin:6px 0;line-height:1.5;overflow-wrap:anywhere}
+.settings-form pre{max-height:160px}
 .diagnostic{margin:16px 0;padding:12px 14px;border:1px solid #d7a94c;border-radius:8px;background:#241f16}
 .diagnostic h2{margin:0 0 8px;color:#f3cf78}
 .diagnostic h2 span{margin-left:6px;font-size:11px;letter-spacing:.06em}
 .diagnostic p{margin:4px 0;overflow-wrap:anywhere;font-size:13px}
 #diagnostic-angle{font-size:22px;font-weight:700;color:#f3cf78}
 #diagnostic-reasons{border-top:1px solid #594824;padding-top:7px}
-@media(max-width:480px){header{padding:12px;gap:8px;font-size:12px}main{padding:8px;gap:10px}section{padding:12px}.diagnostic{margin:10px 0;padding:10px}}
+@media(max-width:480px){header{padding:12px;gap:8px;font-size:12px}main{padding:8px;gap:10px;grid-template-columns:1fr}section{padding:12px}.diagnostic{margin:10px 0;padding:10px}}
+@media(max-width:480px){.settings-fields{grid-template-columns:1fr}}
