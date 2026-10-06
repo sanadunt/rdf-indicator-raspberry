@@ -352,7 +352,7 @@ yang sama dan tidak membuktikan unit PPP/link pulih. Ground tidak mengirim ulang
 request baru memerlukan health fresh dan konfirmasi tambahan. Uji unit serta waktu pemulihan
 tetap perlu dilakukan pada Raspberry.
 Form Ground hanya mengirim perubahan pada field allowlist: center+VFO0 bersama, bandwidth,
-gain, dan squelch. Nilai helper serta batas runtime evidence ada di [CONTROL.md](docs/CONTROL.md).
+gain, dan squelch. Rentang helper dan batas bukti runtime dijelaskan di [CONTROL.md](docs/CONTROL.md).
 Read-back file saja menghasilkan **PERSISTED_UNVERIFIED**, bukan APPLIED. Beberapa engine tidak
 menyediakan bukti runtime center/gain pada `status.json`.
 
