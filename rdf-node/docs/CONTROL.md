@@ -7,48 +7,67 @@ credential peer diverifikasi dengan SO_PEERCRED. Tidak ada shell command, arbitr
 atau nama service dalam payload MQTT. Konfigurasi helper root-owned dan tidak writable
 oleh group/world. Read-only configuration query tetap dapat digunakan sebelum write enabled.
 
-Approval dari terminal Raspberry yang dipercaya:
+Approval berjalan dari terminal Raspberry sebagai root. `remote_commands_enabled` pada config
+Edge dan `allow_remote_control` pada helper sama-sama mati secara default. `--remote`
+mengaktifkan keduanya dan merestart helper/Edge; Ground tetap memerlukan capability tiap
+operasi yang menyediakannya.
+
+Contoh approval lengkap:
 
 ```bash
-sudo rdf-node controls approve --settings --remote
+sudo rdf-node controls approve --settings --lifecycle --reboot --shutdown --remote --ppp-restart
 ```
 
-Pilih flags sesuai kebutuhan. Lifecycle dan reboot tetap terpisah:
+CLI meminta `APPROVE`. `--settings` meminta `SINGLE` untuk mengonfirmasi single writer;
+`--lifecycle` meminta `AUDITED` untuk unit SDR/watchdog; `--reboot`, `--shutdown`, dan
+`--ppp-restart` meminta masing-masing `REBOOT`, `SHUTDOWN`, dan `T900 PPP RESTART`.
+`--ppp-restart` juga menolak approval bila `t900-ppp.service` tidak loaded dan active atau
+memiliki systemd job pending. Gunakan hanya flags untuk operasi yang memang diizinkan.
+
+Ground memakai actor internal `ground-controller`; payload MQTT tidak dapat memilih actor.
+Dengan kedua remote grant aktif, helper mengizinkan actor Ground melewati maintenance lease
+untuk operasi yang disetujui. Operasi lifecycle, reboot, dan shutdown dari panel Edge lokal
+tetap memerlukan lease 30..900 detik. Ground tidak dapat membuka, memperpanjang, atau menutup
+lease. Settings dan stream lokal tetap mengikuti policy sebelumnya.
+
+Buka lease 300 detik untuk aksi lokal dari panel Edge, lalu tutup setelah selesai:
 
 ```bash
-sudo rdf-node controls approve --lifecycle --reboot --remote
 sudo rdf-node controls maintenance-open --seconds 300
+sudo rdf-node controls maintenance-close
 ```
 
-Shutdown OS memerlukan opt-in terpisah:
+Cabut remote access secara lokal:
 
 ```bash
-sudo rdf-node controls approve --shutdown --remote
+sudo rdf-node controls approve
 ```
 
-Wizard meminta ketikan `SHUTDOWN`; `allow_shutdown` dan `shutdown_enabled` default false.
-Ground hanya dapat mengirimnya bila `remote_commands_enabled` juga aktif. Shutdown tidak
-memerlukan atau mengubah ownership unit SDR.
+Ketik `APPROVE`. Tanpa `--remote`, CLI mematikan kedua remote grant dan merestart helper/Edge;
+approval per-action yang sudah tersimpan tetap ada untuk operasi lokal. Jangan memakai
+penyembunyian tombol browser sebagai pencabutan izin.
 
-Catatan: flags approval menambah capability yang disetujui; remote flag mengatur apakah
-permintaan mutating dari Ground boleh diterima. Untuk mencabut capability, edit
-`/etc/rdf-node/config.yaml` DAN `/etc/rdf-node/helper.yaml` dengan sudo, kemudian restart
-kedua service baru. Jangan mengandalkan menyembunyikan tombol di browser.
+Ground PIN dan CSRF mengotorisasi API lokal, bukan publisher MQTT. Edge tidak membuktikan
+identitas publisher dari payload. Broker ACL dan isolasi jaringan membatasi siapa dapat
+mengirim command. Jika broker menerima publish anonymous ke topic command, setiap publisher
+yang menjangkaunya dapat memakai operasi remote yang aktif. MQTT plaintext mengekspos
+credential dan payload; gunakan hanya pada link privat terisolasi/tepercaya. TLS bukan syarat
+remote approval.
 
 ## Supported settings
 
-| Contract | Native | Konversi |
+| Contract | Native | Batas helper |
 |---|---|---|
-| center_frequency_hz | center_freq | Hz -> MHz |
-| vfo0_frequency_hz | vfo_freq_0 | Hz |
-| gain_db | uniform_gain | dB; tabel gain helper |
-| vfo0_bandwidth_hz | vfo_bw_0 | Hz |
-| vfo0_squelch_db | vfo_squelch_0 | native dB |
+| `center_frequency_hz`, `vfo0_frequency_hz` | `center_freq`, `vfo_freq_0` | Integer 24,000,000..1,766,000,000 Hz; kedua field wajib disertakan dengan nilai sama. |
+| `vfo0_bandwidth_hz` | `vfo_bw_0` | Integer 100..2,400,000 Hz. |
+| `gain_db` | `uniform_gain` | Finite -10..100 dB dan selisih <0.001 dari tabel gain helper. |
+| `vfo0_squelch_db` | `vfo_squelch_0` | Finite -200..50 dB. |
 
-MVP hanya satu output VFO0 aktif. Retune center wajib menyertakan VFO0 dengan target sama;
-permintaan yang ambigu ditolak. Range default helper24MHz..1766MHz dan tabel gain adalah
-baseline kandidat, bukan kalibrasi hardware Anda. Audit/cocokkan unit/native API serta
-passband/bandwidth terhadap engine sebelum memberikan single-writer approval.
+MVP hanya satu output VFO0 aktif. Nilai gain yang diterima helper: `0.0, 0.9, 1.4, 2.7,
+3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7, 20.7, 22.9, 25.4, 28.0, 29.7, 32.8,
+33.8, 36.4, 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6`. Batas helper
+tidak mengkalibrasi radio. Audit unit/native API, passband, dan bandwidth engine sebelum
+single-writer approval.
 
 Perubahan algoritma, antenna geometry, sample rate, calibration, system reboot lewat field
 settings generic, endpoint eksternal, dan secret tidak didukung. Aktifkan hanya command
@@ -80,6 +99,27 @@ Pada native status yang tidak menyediakan center/gain evidence, retune tetap dap
 terpersist dan engine watcher dapat menerapkannya, tetapi aplikasi tidak mengklaim telah
 memverifikasi seluruh efek. Ini terlihat pada panel/ACK. Freshness DoA tetap diperiksa.
 
+## Restart layanan PPP T900
+
+RDF Node tidak memasang, mengubah konfigurasi, atau mengambil ownership PPP. Operasi
+`ppp.restart` hanya menargetkan fixed unit `t900-ppp.service`; tidak ada nama unit atau command
+dari payload. Capability `ppp_restart` mati secara default dan memerlukan approval root
+terpisah pada helper serta config Edge, selain remote grant untuk Ground.
+
+Saat approval dan setiap request, helper memeriksa `LoadState=loaded`, `ActiveState=active`,
+dan `Job=0` lewat `systemctl show`. Pemeriksaan dan pemanggilan tetap
+`/usr/bin/systemctl --no-block restart t900-ppp.service` berjalan di bawah lock helper yang
+sama. Ground hanya dapat mengirim saat MQTT Control tersedia dan health fresh. Jika seluruh
+PPP/MQTT link sudah putus, request tidak dapat mencapai Raspberry.
+
+`PPP_RESTART_REQUESTED` berarti systemd menerima request, bukan bahwa PPP atau MQTT pulih.
+Ground hanya mengubahnya menjadi `APPLIED` setelah menerima health yang lebih baru dalam sesi
+node yang sama; hasil itu tetap bukan bukti unit PPP pulih. Hasil unresolved tidak dikirim
+ulang. Request baru memerlukan health fresh, konfirmasi operator, dan pemeriksaan unit ulang;
+record lama tetap unknown. Verifikasi nama/state unit dan waktu pemulihan memerlukan acceptance
+pada Raspberry.
+
+
 ## Lifecycle stack
 
 `processing.set` memakai desired RUNNING/STOPPED dan menjalankan seluruh unit SDR pada
@@ -105,20 +145,20 @@ manual. Release ini tidak menambahkan recovery loop DSP otomatis yang kedua.
 
 ## Reboot Raspberry
 
-1. `system.reboot.prepare` saat izin+maintenance aktif menghasilkan challenge sekali pakai30s.
+1. `system.reboot.prepare` perlu capability reboot. Actor lokal perlu maintenance lease; actor Ground perlu kedua remote grant.
 2. `system.reboot.execute` membawa prepare_id+challenge, serta envelope session terbaru.
 3. Intent durable dibuat sebelum memanggil helper, kemudian systemd menjadwalkan reboot5s.
 4. UI memberi REBOOT_SCHEDULED, bukan APPLIED sebelum reboot.
 5. Ground menerima boot_id baru dan health fresh, lalu mengonfirmasi APPLIED reboot;
    readiness SDR sesudah boot tetap dinilai terpisah.
 
-Lease maintenance hanya dapat dibuka melalui sudo lokal/trusted management, 30..900 detik,
-terikat boot dan monotonic deadline. Remote Ground tidak bisa membuka lease dengan klaim
-role di payload. Jika Raspberry tidak kembali, outcome tetap belum diketahui.
+Lease maintenance dibuka hanya melalui sudo lokal/trusted management, 30..900 detik, dan
+terikat boot serta monotonic deadline. Remote Ground tidak dapat mengubah lease; izin Ground
+adalah grant root yang terpisah. Jika Raspberry tidak kembali, outcome tetap belum diketahui.
 
 ## Shutdown Raspberry
 
-1. `system.shutdown.prepare` hanya berhasil bila approval helper/config dan maintenance lease lokal aktif; Ground juga memerlukan `remote_commands_enabled`.
+1. `system.shutdown.prepare` perlu capability shutdown. Actor lokal juga perlu maintenance lease; actor Ground perlu kedua remote grant.
 2. Prepare menghasilkan challenge sekali pakai, terikat operation ID, hanya berlaku 30 detik dan tidak dapat dipakai untuk reboot.
 3. UI meminta konfirmasi akhir. `system.shutdown.execute` menulis jurnal durable `SHUTDOWN_SCHEDULED` sebelum helper dipanggil.
 4. Helper menyimpan intent root-only, lalu menjadwalkan `/usr/bin/systemctl poweroff` melalui unit transient tetap setelah 5 detik. Tidak ada shell, nama unit dari payload, atau restart SDR/bridge.

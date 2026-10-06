@@ -16,7 +16,7 @@ Ground MQTT consumer
    -> local API + preview graph + diagnostic display
    -> receipt only for accepted health/DoA/angular sequences
 
-Authenticated command
+Ground command received through the configured broker/link
    -> CommandManager -> SQLite journal -> single worker
    -> restricted Unix helper -> fixed approved settings/unit action
    -> verify evidence -> result/report
@@ -42,6 +42,22 @@ dioperasikan dengan keyboard. Save mengganti kedua client tanpa restart service 
 receipt/sequence lama; Bulk lanjut setelah kedua koneksi MQTT siap dan `resume_stable_seconds`
 berlalu. Receipt Ground tidak menjadi gate publikasi.
 
+### Kontrol Ground dengan approval root
+
+Write Ground mati secara default pada `remote_commands_enabled` Edge dan
+`allow_remote_control` helper. Approval CLI mengaktifkan keduanya; capability tiap operasi
+tetap terpisah. Edge menetapkan actor `ground-controller` saat menerima command dan
+membawanya melalui worker serial; payload tidak dapat memilih actor. Helper melewati lease
+maintenance lokal hanya untuk actor tersebut saat remote grant root aktif. Lifecycle,
+reboot, dan shutdown dari panel Edge lokal tetap memerlukan lease yang terikat boot.
+Approval remote tidak membuka atau memperpanjang lease.
+
+PIN+CSRF Ground melindungi API HTTP lokal, bukan identitas publisher MQTT. Broker dan jaringan
+menjadi batas kepercayaan command. Jika broker mengizinkan anonymous publish ke topic command,
+setiap publisher yang menjangkaunya dapat memakai operasi Ground yang aktif. Plaintext
+mengekspos credential dan payload. Konfigurasi ini hanya digunakan pada link privat tepercaya.
+Aplikasi tidak mengklaim autentikasi publisher atau enkripsi ketika TLS dimatikan.
+
 Runtime menggunakan `/usr/bin/python3`, bukan Conda `base` atau environment SDR.
 Local HTTP server stdlib memiliki client/body caps, Host/Origin checks, cookie admin,
 CSRF, no-store dan CSP. Tidak boleh dibind ke LAN melalui perubahan tidak terkontrol.
@@ -55,11 +71,22 @@ memulai fetch segera, dan polling periodik tetap aktif dengan satu request in-fl
 membedakan kegagalan snapshot dari kegagalan API grafik angular. Tidak ada restart service,
 SDR, reboot, atau shutdown otomatis sebagai respons error.
 
+### Restart T900 PPP
+
+`ppp.restart` hanya menargetkan fixed unit `t900-ppp.service`; RDF Node tidak memasang,
+mengubah konfigurasi, atau memasukkannya ke ownership lifecycle SDR. Approval root dan setiap
+invokasi helper memeriksa `LoadState=loaded`, `ActiveState=active`, dan `Job=0` di bawah lock
+helper. `PPP_RESTART_REQUESTED` berarti systemd menerima request. Ground melaporkan `APPLIED`
+hanya setelah health fresh yang lebih baru pada session sama; status itu tidak membuktikan
+pemulihan PPP/MQTT di level unit. Request tidak bisa dikirim setelah seluruh MQTT Control putus,
+dan hasil unknown tidak diulang otomatis.
+
 ### Shutdown OS
 
-`system.shutdown.prepare/execute` adalah capability terpisah yang mati secara default pada
-config dan helper. Jalurnya memakai command manager/jurnal yang sama dengan Ground, tetapi
-helper hanya menjalankan aksi systemd tetap setelah maintenance lease dan challenge lokal.
+`system.shutdown.prepare/execute` adalah capability terpisah, default mati pada config dan
+helper. Helper menjalankan aksi systemd fixed hanya setelah gate capability dan challenge;
+request dari panel Edge juga perlu maintenance lease, sedangkan request Ground perlu kedua
+remote grant root.
 Helper menyimpan intent shutdown durable dan hanya menjadwalkan aksi systemd tetap. Intent
 current-boot menolak prepare/execute berikutnya sehingga tidak ada jadwal poweroff ganda;
 pemeriksaan helper setelah boot baru menghapus intent boot terdahulu. Hasil schedule tetap
@@ -102,8 +129,9 @@ Perubahan berikut eksplisit, bukan klaim bahwa semuanya identik dengan contoh pl
    yang disetujui, bukan API DSP-only yang belum terbukti tersedia. Helper menangani stop
    intent dan startup reconciliation; recovery crash engine tetap bergantung pada unit yang
    diaudit. Kegagalan tampil sebagai health/error.
-8. **Settings:** hanya lima field allowlist di bawah. Algoritma/geometri/DAQ calibration
-   tidak diubah oleh command generic. Permintaan lain ditolak sebagai unsupported.
+8. **Settings:** form Ground mengekspos hanya lima field yang di-approve helper. Form memasangkan
+   center dan VFO0 frequency, serta membedakan settings yang persisted dari bukti runtime
+   field-specific. Command generic tidak mengubah algoritma, geometri, atau kalibrasi DAQ.
 9. **Display:** theme dan blank timeout didukung. Formulir admin MQTT menyediakan keyboard
    layar sentuh untuk host, port, client ID, Path WSS, dan credential. Brightness hardware,
    rotasi driver, touch calibration, compositor installation dan autologin OS tidak

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add root-approved Ground controls, the five-field safe-settings form, and fixed
+  `t900-ppp.service` restart. Ground separates persistence from runtime proof and systemd
+  acceptance from later fresh health. Edge does not authenticate publisher identity; anonymous
+  topic access depends on broker ACL/network isolation, and plaintext exposes credentials/payloads.
+
 - Publish Bulk angular on the existing schedule without waiting for a Ground application receipt. Existing config files are preserved; the retired `telemetry.require_ground_receipt_for_bulk` field is ignored when loaded.
 
 - Default setup to `rdfsdr.service` for SDR lifecycle controls when the unit is registered; Raspberry reboot and shutdown remain separately approved host actions.

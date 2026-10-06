@@ -2,13 +2,20 @@
 
 **Bridge SDR-DoA/KrakenSDR + panel Raspberry 480x320 + receiver Ground pendamping.**
 
-Paket ini berisi source aplikasi, installer, service systemd, UI lokal, codec grafik 360 titik,
-MQTT 5/TLS, command manager, helper kontrol terbatas, pengujian, dan panduan operasi.
+Paket ini berisi source aplikasi, installer, unit systemd, UI lokal, codec grafik 360 titik,
+MQTT 5 (TLS default; plaintext dapat dipilih), command manager, helper terbatas, pengujian, dan
+panduan operasi.
 Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Conda SDR.
 
-> Mulai dengan mode read-only. Kontrol RF, lifecycle SDR, reboot, dan shutdown memiliki
-> jalur terproteksi, tetapi perlu approval lokal dan maintenance lease; shutdown juga
-> memerlukan opt-in terpisah. Installer tidak menebak kebijakan perangkat.
+> Mulai dalam mode read-only. Ground write memerlukan grant root `controls approve --remote`
+> dan approval capability per-action bila tersedia. Ground lifecycle, reboot, dan shutdown
+> tidak memakai maintenance lease lokal setelah grant; operasi lokal dari Edge tetap memerlukan
+> lease. PPP restart punya approval tersendiri.
+>
+> Edge tidak mengautentikasi identitas publisher MQTT. Jika broker menerima publish anonymous
+> ke topic command, setiap publisher yang menjangkaunya dapat memakai operasi remote yang aktif.
+> Plaintext mengekspos credential dan payload; gunakan hanya pada link privat yang terisolasi
+> dan tepercaya.
 >
 > Pengujian lokal paket bukan bukti uji pada Raspberry/layar/T900 milik Anda.
 > Baca [TEST_REPORT.md](docs/TEST_REPORT.md) dan [batas implementasi](docs/IMPLEMENTATION.md).
@@ -28,8 +35,8 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
   Pengaturan disimpan lokal, diterapkan tanpa restart layanan, dan perubahan koneksi menghapus bukti receipt lama.
 - Daftar Data memuat topic/payload keluar dan command dari Ground; angular terkompresi, raw IQ tidak dikirim.
 - Jurnal command SQLite, ID dedup, expiry/session/revision validation, satu mutasi aktif.
-- Safe settings patch, Start/Stop seluruh stack SDR yang di-approve, Restart stack,
-  reboot Raspberry prepare/execute, serta shutdown Pi dengan approval terpisah.
+- Safe settings patch untuk lima field helper dan Start/Stop/Restart stack SDR yang di-approve.
+- Reboot/shutdown dengan approval terpisah; Ground juga dapat meminta restart fixed `t900-ppp.service`.
 - Receiver Ground dan preview grafik/API di port **8791**, terpisah dari dashboard lama.
 - Mode DEMO yang tidak mengirim MQTT dan tidak menulis hardware.
 - Kedua panel mempertahankan snapshot terakhir sebagai STALE saat API gagal; Retry melakukan fetch segera, polling rutin tetap berjalan, dan tidak ada recovery mutatif otomatis.
@@ -271,24 +278,32 @@ data lama dibuang dan grafik dipause. Tidak ada jaminan performa T900 tanpa capt
 
 ## 7. Mengaktifkan command write secara terkontrol
 
-Seluruh alur sudah ada, tetapi ditutup default sampai diperbolehkan pada perangkat.
-Jangan memberi helper kewenangan unit yang belum diaudit.
+Ground write tetap mati sampai root memberi remote grant dan menyetujui capability yang
+dibutuhkan. Jalankan approval dari terminal Raspberry:
 
 ```bash
-sudo rdf-node controls approve --settings --lifecycle --reboot --remote
+sudo rdf-node controls approve --settings --lifecycle --reboot --shutdown --remote --ppp-restart
 ```
 
-Shutdown OS opsional dan tidak diaktifkan oleh flags lain:
+CLI meminta `APPROVE`; `--settings` juga meminta `SINGLE`, `--lifecycle` meminta `AUDITED`,
+`--reboot` meminta `REBOOT`, `--shutdown` meminta `SHUTDOWN`, dan `--ppp-restart` meminta
+`T900 PPP RESTART` setelah memeriksa unit. Pilih hanya flags yang dibutuhkan. `--remote`
+menyimpan izin pada config Edge dan policy helper; izin per operasi tetap terpisah. CLI
+merestart `rdf-control-helper.service` dan `rdf-edge.service` setelah menyimpan approval.
+Remote grant tidak membuka atau memperpanjang maintenance lease.
+
+Untuk mencabut semua write Ground:
 
 ```bash
-sudo rdf-node controls approve --shutdown --remote
+sudo rdf-node controls approve
 ```
 
-Wizard meminta konfirmasi terpisah. `--shutdown` meminta jawaban `SHUTDOWN`; fitur ini
-memerlukan opt-in helper/config tersendiri dan tidak bergantung pada approval lifecycle.
-Pengambilalihan lifecycle mendeteksi watchdog lama yang dikenal dan meminta izin
-sebelum menonaktifkannya; watchdog lain tetap harus diaudit. Ia memasang stop-intent guard
-pada **unit SDR yang disetujui**, bukan unit PPP atau bridge.
+Ketik `APPROVE`. Tanpa `--remote`, CLI mencabut remote grant pada config Edge dan helper,
+merestart kedua service, serta mempertahankan approval capability lokal yang sudah ada.
+
+`--lifecycle` mengaudit unit SDR yang dipilih dan watchdog yang dikenal sebelum memasang
+stop-intent guard; guard tidak menargetkan unit PPP atau bridge. Jangan memberi helper
+kewenangan pada unit yang belum diaudit.
 
 Untuk panel lokal tanpa perintah Ground, jalankan dari terminal Raspberry:
 
@@ -301,19 +316,24 @@ Approval meminta `APPROVE`, `AUDITED`, `REBOOT`, dan `SHUTDOWN`; `--remote` seng
 dipakai. Jika lifecycle sebelumnya disetujui untuk unit lain, audit unit, drop-in, dan intent
 lama sebelum mengganti target.
 
-Untuk Start/Stop/Restart stack, reboot, atau shutdown, buka lease dari sesi maintenance
-terpercaya:
+Untuk Start/Stop/Restart stack, reboot, atau shutdown dari panel Edge lokal, buka lease
+maintenance dari sesi Raspberry tepercaya:
 
 ```bash
 sudo rdf-node controls maintenance-open --seconds 300
 ```
 
+Lease lokal berlaku 30..900 detik. Ground tidak membuka atau memerlukan lease ini setelah
+remote grant dan capability terkait disetujui.
+
 Panel Config -> Login -> Kontrol menggunakan manager yang sama dengan Ground.
 Start/Stop/Restart mengelola seluruh unit `link.engine_service` yang disetujui (`rdfsdr.service`
 untuk konfigurasi ini), bukan `rdf-edge.service` atau unit PPP.
-Reboot memerlukan Prepare lalu konfirmasi Execute, challenge sekali pakai 30 detik, lease aktif,
-jurnal durable, dan verifikasi boot baru.
-Shutdown Pi memakai prepare/execute, challenge sekali pakai, konfirmasi terakhir, dan lease aktif.
+Reboot dari panel Edge lokal memerlukan lease; Ground memerlukan remote grant dan approval
+reboot. Keduanya memakai Prepare/Execute, challenge sekali pakai 30 detik, jurnal durable,
+dan verifikasi boot baru.
+Shutdown dari panel Edge lokal juga memerlukan lease; Ground memerlukan remote grant dan
+approval shutdown.
 Sebelum menjadwalkan, helper menyimpan intent durable dan menolak semua prepare/execute shutdown
 berikutnya pada boot yang sama, termasuk dari sesi UI lain. Helper menjadwalkan
 `/usr/bin/systemctl poweroff` melalui unit transient tetap dalam 5 detik; `SHUTDOWN_SCHEDULED`
@@ -324,10 +344,17 @@ meminta konfirmasi ketik `SHUTDOWN RECONCILED` dan helper hanya menghapus intent
 `systemctl show` memastikan unit timer serta service tidak aktif; status aktif/tidak diketahui
 ditolak. Marker boot sebelumnya dibersihkan pada pemeriksaan helper berikutnya. Perangkat harus
 dinyalakan lagi secara lokal.
-
-Pengubahan frekuensi memasukkan center dan VFO0 secara bersamaan. Read-back file saja
-menghasilkan **PERSISTED_UNVERIFIED**, bukan APPLIED. Beberapa engine tidak menyediakan
-bukti runtime center/gain pada `status.json`; lihat [CONTROL.md](docs/CONTROL.md).
+Restart T900 PPP di Ground menargetkan hanya `t900-ppp.service`. Saat approval dan setiap
+request, helper memerlukan unit `loaded`, `active`, dan tanpa systemd job pending. Jika MQTT
+Control sudah terputus, Ground tidak dapat mengirim request. `PPP_RESTART_REQUESTED` hanya
+berarti systemd menerima permintaan; `APPLIED` menunggu health node yang lebih baru dalam sesi
+yang sama dan tidak membuktikan unit PPP/link pulih. Ground tidak mengirim ulang hasil unknown;
+request baru memerlukan health fresh dan konfirmasi tambahan. Uji unit serta waktu pemulihan
+tetap perlu dilakukan pada Raspberry.
+Form Ground hanya mengirim perubahan pada field allowlist: center+VFO0 bersama, bandwidth,
+gain, dan squelch. Nilai helper serta batas runtime evidence ada di [CONTROL.md](docs/CONTROL.md).
+Read-back file saja menghasilkan **PERSISTED_UNVERIFIED**, bukan APPLIED. Beberapa engine tidak
+menyediakan bukti runtime center/gain pada `status.json`.
 
 ## 8. Tes tanpa hardware dan troubleshooting
 
@@ -356,14 +383,15 @@ Tidak ada perintah reboot atau shutdown nyata dari test suite. Jalankan tanpa su
 | Permission source | `sudo -u rdf-edge rdf-node doctor`; setup ACL |
 | SOURCE/ANGLE UNVERIFIED | Validasi asli, lalu `setup --verify-source` |
 | CLOCK UNTRUSTED | Periksa time sync OS; jangan bypass freshness |
-| MQTT DISABLED | Provision/import bundle atau set broker TLS |
-| TLS error | CA/SAN/clock broker benar; jangan disable verification |
+| MQTT DISABLED | Provision/import bundle atau konfigurasi broker; plaintext hanya untuk link privat tepercaya |
+| TLS error | Periksa CA/SAN/clock broker; jangan matikan verifikasi |
 | Ground belum terbukti | Jalankan receiver, cek topic v2 dan receipt |
 | Ping peer PPP | Tab Link: satu ping ICMP tiap sekitar 5 detik dipaksa melalui interface PPP; tanpa balasan bukan bukti link mati. |
 | Grafik tidak mulai | Tab Link: source gate, receipt, bootstrap 20 detik, CONTROL profile |
-| CAPABILITY DISABLED | Approval lokal belum diberikan |
-| MAINTENANCE REQUIRED | Buka lease sudo terbatas waktu |
-| PERSISTED_UNVERIFIED | Perlu runtime evidence; bukan masalah ACK MQTT |
+| CAPABILITY DISABLED | Ground: periksa remote grant dan capability tindakan pada config/helper; lokal: approval belum diberikan |
+| MAINTENANCE REQUIRED | Untuk lifecycle/reboot/shutdown lokal dari Edge, buka lease terbatas waktu; Ground memakai grant root |
+| PPP restart tidak tersedia | Cek capability, health fresh, MQTT Control, dan status unit fixed pada Raspberry |
+| PERSISTED_UNVERIFIED | Settings tersimpan; runtime evidence belum lengkap, bukan masalah ACK MQTT |
 | Browser tidak muncul | Jalankan `rdf-kiosk-session` dari desktop grafis; launcher memakai `--disable-gpu`. Pastikan `rdf-edge.service` aktif pada `127.0.0.1:8790`. |
 
 Log secukupnya saja, terutama melalui radio:
