@@ -24,7 +24,8 @@ Menu Data memerlukan PIN admin dan CSRF. Pengaturan MQTT tersimpan di
 `/var/lib/rdf-node/mqtt-ui-settings.json`; akun control/bulk tersimpan terpisah dengan mode 0600.
 API hanya melaporkan apakah credential tersedia, tidak mengembalikan username/password. TLS/CA
 tetap mengikuti provisioning bundle; halaman lokal tidak menyediakan bypass verifikasi sertifikat.
-Perubahan broker/credential mengganti kedua client dan menghapus receipt lama; bulk menunggu bukti Ground baru.
+Perubahan broker/credential mengganti kedua client dan menghapus receipt lama. Bulk lanjut setelah
+kedua koneksi MQTT siap dan masa `resume_stable_seconds` berlalu; receipt Ground bukan gate.
 Source permission memakai ACL terbatas pada _share; tidak chmod777 atau recursive home read.
 
 ACL perlu diperiksa kembali jika deployment engine membuat file dengan mode yang menolak
@@ -51,7 +52,10 @@ history besar yang dibangun aplikasi.
 ## Upgrade
 
 Ekstrak ZIP release baru ke folder terpisah, jalankan installer yang sama.
-Installer mempertahankan config, hash PIN, dan journal serta menyimpan symlink previous.
+Installer mempertahankan config, hash PIN, journal serta menyimpan symlink previous.
+Konfigurasi lama tidak ditimpa oleh default release. Field lama
+`telemetry.require_ground_receipt_for_bulk` diterima untuk migrasi tetapi diabaikan saat
+config dibaca. Tidak perlu mengedit config lama untuk membuka gate receipt Bulk yang dihapus.
 Sesudah upgrade dari versi password, jalankan `sudo rdf-node set-pin` lalu restart service
 yang sesuai untuk mengganti credential lama dan mencabut sesi admin aktif.
 Checksum diverifikasi sebelum copy. Script tidak mengganti path source otomatis.

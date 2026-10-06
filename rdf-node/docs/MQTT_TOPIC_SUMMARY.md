@@ -1,6 +1,6 @@
-# RDF Node MQTT topic summary
+# RDF Node MQTT topic guide
 
-Ringkasan ini mengikuti implementasi RDF Node MQTT v2 dan ditujukan sebagai referensi saat memperbarui receiver Ground. Contoh payload di bawah bersifat sintetis, bukan capture dari Raspberry atau broker produksi.
+Panduan implementasi MQTT v2 Edge/Ground ini menjelaskan tujuan tiap topic, arah, kanal, QoS, retained, expiry, payload, dan contoh pemakaian. Payload sintetis; bukan capture Raspberry atau broker produksi.
 
 ## Namespace dan identitas
 
@@ -180,7 +180,7 @@ Asumsi steady-state: source valid, normal Bulk angular path tersedia, DoA baru t
 
 State periodik tiap 60 s sudah masuk tabel; receipt Ground sekitar 19.6 PUBLISH B/s pada arah balik. Pada `balanced`, Control memakai sekitar 795.3 cost-B/s dari budget 850 saat Bulk normal. Saat valid-source Bulk blocked, Q16 diagnostic menaikkan Control ke sekitar 834.7 cost-B/s; saat source invalid, DoA normal berhenti dan diagnostic 6 s memberi sekitar 703.3 cost-B/s. QoS 0 tetap dapat expiry saat event/backlog; angka ini bukan hard cap link.
 
-Health dan DoA normal dijadwalkan 1/s; detail 10 s, state 60 s, diagnostic DoA 3 s, capabilities/config saat event, command/ACK saat diminta atau ada progress. Angular normal dapat tertahan oleh receipt, command, freshness, atau koneksi Bulk. Hanya saat jalur Bulk angular tidak tersedia Edge mengirim kandidat terpisah: 6 s jika strict source validity gagal, 30 s jika source valid tetapi Bulk terblokir. QoS 0/expiry 3 s bisa membuang chunk; profile `control` menahan array diagnostik.
+Health dan DoA normal dijadwalkan 1/s; detail 10 s, state 60 s, diagnostic DoA 3 s, capabilities/config saat event, command/ACK saat diminta atau ada progress. Angular normal dapat tertahan oleh source tidak eligible/fresh, command berjalan, Bulk tidak siap, backlog Control, atau masa stabilisasi; receipt Ground bukan gate publish. Saat jalur Bulk angular tidak tersedia, Edge mengirim kandidat terpisah: 6 s jika strict source validity gagal, 30 s jika source valid tetapi Bulk terblokir. QoS 0/expiry 3 s bisa membuang chunk; profile `control` menahan array diagnostik.
 
 
 ## Payload yang dipublish Edge
@@ -269,7 +269,7 @@ Capability boolean (`remote_commands`, `config_patch`, `processing`, `restart`, 
 | `balanced` | sekitar 1 s | Q16 sekitar 4 s |
 | `graph_u8` | sekitar 1 s | U8 sekitar 2 s |
 
-Interval hanya berlaku saat data valid, client siap, scheduler stabil, dan gate receipt/command mengizinkan bulk. Ini bukan jaminan rate aktual.
+Interval hanya berlaku saat data valid, client siap, scheduler stabil, dan gate Bulk/command/control-backlog lolos; Edge tidak menunggu receipt Ground. Ini bukan jaminan rate aktual.
 
 ### `config/reported`
 
@@ -295,7 +295,7 @@ Last Will saat koneksi MQTT hilang:
 {"v":2,"sid":"7a8b9c0d","online":false,"reason":"CONNECTION_LOST"}
 ```
 
-Availability adalah nilai terakhir, bukan heartbeat dan bukan bukti DAQ sehat. Tetap cek `state`, `health`, timestamp, dan receipt.
+Availability adalah nilai terakhir, bukan heartbeat dan bukan bukti DAQ sehat. Cek `state`, `health`, dan timestamp; receipt adalah bukti pemrosesan aplikasi Ground yang terpisah, bukan syarat publish.
 
 ### `telemetry/angular` (binary)
 
@@ -366,14 +366,24 @@ Flags menyimpan bukti parsial saat publish: bit 0 parsed, bit 1 clock/fresh, bit
 - `aq`: sequence angular terakhir yang selesai dirakit dan lolos gate, `0` bila belum ada.
 - `rev`: revision config report yang digunakan Ground; dapat `null` sebelum report diterima.
 
-Ground mengirim receipt sekitar tiap 5 s selama health-nya masih fresh (<8 s). Edge menolak retained receipt, `sid` berbeda, sequence yang tidak pernah dikirim, dan `hq` yang mundur. Saat `require_ground_receipt_for_bulk` aktif (default), Edge menahan Angular sampai receipt baru diterima. Receipt membuktikan pemrosesan aplikasi Ground, bukan MQTT PUBACK dan bukan bukti operator melihat dashboard.
+Ground mengirim receipt sekitar tiap 5 s selama health-nya masih fresh (<8 s). Edge menolak retained receipt, `sid` berbeda, sequence yang tidak pernah dikirim, dan `hq` yang mundur. Receipt hanya menunjukkan pemrosesan aplikasi Ground, bukan PUBACK dan bukan bukti operator melihat dashboard. Pengiriman telemetry DoA dan Angular tidak menunggu receipt atau keberadaan subscriber Ground; konfigurasi lama `telemetry.require_ground_receipt_for_bulk` diabaikan saat config dimuat.
+
+### Membaca receipt di Edge
+
+`GET /api/v2/link` pada API Edge mengembalikan status receipt pada `ground`. Cuplikan contoh:
+
+```json
+{"ground":{"state":"RECEIVING","age_ms":1000,"last":{"v":2,"sid":"7a8b9c0d","dq":1245,"hq":86,"aq":1238,"rev":7},"rejected":0}}
+```
+
+`age_ms` mengukur waktu sejak progress sequence health, bukan umur paket MQTT. `UNCONFIRMED` berarti belum ada progress receipt; `LOST`/`LATE` adalah indikator Ground, bukan gate publish. MQTT PUBACK tetap terpisah dari receipt aplikasi.
 
 ### Command envelope
 
 Semua command memakai envelope v2 berikut. Ground harus mengisi identitas dan revision yang benar-benar terakhir diterima; contoh ini fixture dan jangan dikirim mentah.
 
 ```json
-{"v":2,"id":"g01-00001234","sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","issued_ms":1790668800123,"expires_ms":1790668815123,"base_rev":7,"op":"config.patch","changes":{"center_frequency_hz":433920000,"vfo0_frequency_hz":433920000}}
+{"v":2,"id":"g01-00001234","sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","issued_ms":1790668800123,"expires_ms":1790668815123,"base_rev":7,"op":"config.get"}
 ```
 
 | Field | Makna |
@@ -387,17 +397,30 @@ Semua command memakai envelope v2 berikut. Ground harus mengisi identitas dan re
 Ground HTTP API juga menerima `id` klien opsional dan meneruskannya tanpa perubahan ke envelope MQTT; Ground UI memakainya untuk memulihkan hasil shutdown berdasarkan ID yang sama bila respons HTTP execute hilang.
 
 
-| Topic suffix | `op` | Field tambahan |
+| Topic suffix | `op` | Field tambahan (contoh) |
 |---|---|---|
 | `cmd/config/get` | `config.get` | Tidak ada. Read-only; meminta report config baru. |
-| `cmd/config/patch` | `config.patch` | `changes`: object tidak kosong dengan subset `center_frequency_hz`, `gain_db`, `vfo0_frequency_hz`, `vfo0_bandwidth_hz`, `vfo0_squelch_db`. |
-| `cmd/processing/set` | `processing.set` | `desired`: `RUNNING` atau `STOPPED`. |
+| `cmd/config/patch` | `config.patch` | `{"changes":{"center_frequency_hz":433920000,"vfo0_frequency_hz":433920000}}`; subset field safe dan tidak kosong. |
+| `cmd/processing/set` | `processing.set` | `{"desired":"STOPPED"}` atau `{"desired":"RUNNING"}`. |
 | `cmd/service/restart` | `service.restart` | Tidak ada. Hanya unit SDR stack yang di-approve. |
 | `cmd/system/reboot/prepare` | `system.reboot.prepare` | Tidak ada. ACK mengembalikan `prepare_id`, `challenge`, `valid_seconds` (30). |
-| `cmd/system/reboot/execute` | `system.reboot.execute` | `prepare_id` dan `challenge` dari ACK prepare yang masih berlaku. Challenge sekali pakai; jangan log atau simpan sebagai credential permanen. |
+| `cmd/system/reboot/execute` | `system.reboot.execute` | `{"prepare_id":"<prepare-id>","challenge":"<one-time-challenge>"}` dari ACK prepare. Challenge sekali pakai; jangan log atau simpan sebagai credential permanen. |
 | `cmd/system/shutdown/prepare` | `system.shutdown.prepare` | Tidak ada. ACK mengembalikan `prepare_id`, `challenge`, `valid_seconds` (30). |
-| `cmd/system/shutdown/execute` | `system.shutdown.execute` | `prepare_id` dan challenge sekali pakai dari ACK prepare. Memerlukan helper `allow_shutdown`, config `shutdown_enabled`, maintenance; Ground juga memerlukan policy remote command. |
-| `cmd/stream/set` | `stream.set` | `profile`: `control`, `balanced`, atau `graph_u8`. |
+| `cmd/system/shutdown/execute` | `system.shutdown.execute` | `{"prepare_id":"<prepare-id>","challenge":"<one-time-challenge>"}` dari ACK prepare. Memerlukan helper `allow_shutdown`, config `shutdown_enabled`, maintenance; Ground juga memerlukan policy remote command. |
+| `cmd/operation/get` | `operation.get` | `{"target_id":"<operation-id>"}`; query jurnal, hasil dapat `null` bila ID tidak ditemukan. |
+| `cmd/stream/set` | `stream.set` | `{"profile":"balanced"}`; profile valid: `control`, `balanced`, atau `graph_u8`. |
+
+### Contoh command melalui Ground
+
+Gunakan intent HTTP Ground yang terautentikasi (session dan CSRF), bukan membangun envelope MQTT secara manual. Contoh body `POST /api/v2/commands` untuk query read-only:
+
+```json
+{"op":"config.get"}
+```
+
+Ground memeriksa kesiapan MQTT dan health, mengisi `id`, `sid`, `boot`, deadline, serta revision, lalu publish QoS 1 ke `cmd/config/get`. Respons HTTP `202 REQUESTED` berarti intent masuk antrean lokal, bukan hasil command. Hasil datang melalui `ack/config`; report terbaru dipublish terpisah di `config/reported`. Untuk mencari operation tertentu, body-nya `{"op":"operation.get","target_id":"<operation-id>"}` dan hasilnya melalui `ack/operation`.
+
+Gunakan API/UI Ground untuk semua mutation agar policy, identity, revision, journal, dan challenge tetap dikelola backend. Contoh field mutation pada tabel di atas bukan pesan mandiri dan tidak boleh dipublish tanpa common envelope serta policy yang valid.
 
 Command selain `config.get` dan `operation.get` subject ke identity, boot, deadline, clock trusted, revision dan capability/policy lokal. Perintah mutation tidak diaktifkan hanya karena topic dapat dipublish. Konfigurasi default bersifat read-only. Retained command ditolak. Jika `id` sama dan payload sama, Edge mengembalikan progress/hasil jurnal tanpa menjalankan ulang; `id` sama dengan payload berbeda adalah conflict.
 `config.patch` hanya menerima field safe pada tabel. Saat mengganti `center_frequency_hz`, sertakan `vfo0_frequency_hz` dengan target yang sama; batas frekuensi, bandwidth dan gain berasal dari policy helper lokal.

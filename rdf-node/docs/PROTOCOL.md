@@ -112,6 +112,14 @@ Kurva parsial tidak dirender. Konvensi1 mempertahankan index native; tidak otoma
 Dikirim setiap5s oleh satu receiver yang benar-benar mendecode. `aq` baru maju setelah
 frame selesai dan lolos. Bukan PUBACK MQTT, bukan bukti operator melihat browser.
 Unknown sid, q yang tidak pernah terkirim, regressi, dan retained receipt ditolak.
+`telemetry/doa` dan `telemetry/angular` tidak dibatasi receipt atau keberadaan subscriber
+Ground. Edge publish saat source/profile dan koneksi MQTT ke broker memenuhi syarat; receipt
+adalah observasi aplikasi, bukan PUBACK. Koneksi Edge ke broker hanya membuktikan koneksi
+Edge ke broker, bukan Ground terhubung atau menerima pesan QoS 0 non-retained. Clean Start
+dan tidak adanya offline replay berarti telemetry dapat terlewat saat Ground offline; MQTT
+Message Expiry yang dikonfigurasi tetap berlaku.
+Validitas/freshness source, profile, backlog, budget, dan stabilisasi resume tetap menjadi gate lokal.
+
 `telemetry/diagnostic/doa` dikirim tiap 3 s selama XML tersedia, terlepas dari validitas DoA
 normal. `q` bertambah tiap publish; timestamp sumber/observasi tetap menunjuk pembacaan file
 yang sama. Ground menyimpan sampel sebagai `UNVERIFIED`, tidak masuk ke `dq`, DoA valid,

@@ -218,11 +218,14 @@ class ApplicationTests(unittest.TestCase):
         self._run_agent_scheduler_once(agent,snapshot,queued_diagnostic=True)
         self.assertEqual(agent.clients['control'].outbox.status()['depth'],0)
 
-    def test_diagnostic_angular_bypasses_bulk_receipt_gate(self):
+    def test_live_bulk_ignores_legacy_ground_receipt_gate(self):
         agent=self.a;agent.profile='balanced';agent.bulk_resume_after=0
+        agent.cfg['telemetry']['require_ground_receipt_for_bulk']=True
         snapshot=agent.snapshot();snapshot['link']['ground']['state']='UNCONFIRMED'
         offers=self._run_agent_scheduler_once(agent,snapshot)
-        self.assertIn('diagnostic-angular',[item[0] for item in offers])
+        keys=[item[0] for item in offers]
+        self.assertIn('angular',keys)
+        self.assertNotIn('diagnostic-angular',keys)
 
     def test_stopped_source_resets_valid_blocked_diagnostic_interval(self):
         from rdf_node.codec import CHUNK,FLAG_DAQ,HEADER
@@ -233,7 +236,7 @@ class ApplicationTests(unittest.TestCase):
         stopped['detection']['valid']=False;stopped['daq']['healthy']=False
         stopped['processing']['observed']='STOPPED'
         control=Client(cfg={},client_id='scheduler-control');bulk=Client(cfg={},client_id='scheduler-bulk')
-        control.ready=True;bulk.ready=True;agent.clients={'control':control,'bulk':bulk}
+        control.ready=True;bulk.ready=False;agent.clients={'control':control,'bulk':bulk}
         agent._generation=0;agent.stop_event.clear()
         offers=[];snapshots=[live]*7+[stopped]
         def next_snapshot():
@@ -595,6 +598,57 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(json.loads(response)['error'],'INVALID_MQTT_WEBSOCKET_PATH')
 
 class EndToEndTests(unittest.TestCase):
+    def test_telemetry_publishes_without_ground_consumer_and_legacy_gate(self):
+        from rdf_node.codec import Assembler
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp);initial=make_agent(path);initial.journal.close()
+            legacy=path/'legacy-config.yaml'
+            legacy.write_text('telemetry:\n  require_ground_receipt_for_bulk: true\n')
+            cfg=load_config(legacy)
+            cfg['state_dir']=str(path/'state')
+            cfg['source']['share_dir']=str(path/'share')
+            cfg['source'].update(authority_verified=True,angle_verified=True)
+            cfg['api']['admin_hash_file']=str(path/'admin.json');cfg['api']['port']=0
+            broker=Broker();creds=path/'mqtt.json'
+            creds.write_bytes(compact({'username':'test','password':'test-password'}))
+            cfg['mqtt'].update(enabled=True,host='127.0.0.1',port=broker.port,tls=False,allow_insecure_loopback=True,
+                               control_credentials_file=str(creds),bulk_credentials_file=str(creds))
+            cfg['telemetry']['resume_stable_seconds']=1
+            agent=Agent(cfg);agent.monitor=FakeMonitor(cfg)
+            stop=threading.Event()
+            def writer():
+                index=1
+                while not stop.wait(.25):
+                    index+=1
+                    atomic_write(path/'share'/'status.json',compact(status(idx=index)))
+                    atomic_write(path/'share'/'DOA_value.html',csv_bytes(record()))
+            thread=threading.Thread(target=writer,daemon=True);thread.start()
+            agent.start()
+            prefix='sdr/v2/uav-01/'
+            def received(suffix):
+                with broker.lock:
+                    return [m for m in broker.messages if m['topic']==prefix+suffix]
+            try:
+                self.assertTrue(wait(lambda:received('telemetry/health') and
+                                     received('telemetry/doa') and
+                                     len(received('telemetry/angular'))>=2,15),
+                                [agent.snapshot(),broker.errors])
+                self.assertEqual(broker.mqtt_connect_count,2)
+                self.assertEqual(agent.receipt_view()['state'],'UNCONFIRMED')
+                health=received('telemetry/health');doa=received('telemetry/doa')
+                angular=received('telemetry/angular')
+                for messages in (health,doa,angular):
+                    self.assertTrue(all(m['qos']==0 and not m['retain'] for m in messages))
+                assembler=Assembler();frame=None
+                for message in angular:
+                    frame=assembler.add(message['payload']) or frame
+                    if frame: break
+                self.assertIsNotNone(frame)
+                self.assertEqual(len(frame['values']),360)
+                self.assertFalse(broker.errors)
+            finally:
+                stop.set();thread.join(2);agent.stop();broker.stop()
+
     def test_agent_graph_receipt_query_and_stopped_health(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp);a=make_agent(path)

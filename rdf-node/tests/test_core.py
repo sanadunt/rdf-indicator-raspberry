@@ -57,7 +57,10 @@ class PppProbeTests(unittest.TestCase):
         self.assertEqual(state['interface'],'ppp0')
 
 class ConfigTests(unittest.TestCase):
-    def test_default_config(self): self.assertEqual(load_config()['api']['port'],8790);self.assertFalse(load_config()['control']['shutdown_enabled'])
+    def test_default_config(self):
+        c=load_config()
+        self.assertEqual(c['api']['port'],8790)
+        self.assertFalse(c['control']['shutdown_enabled'])
     def test_shutdown_requires_controlled_mode(self):
         c=load_config();c['control']['shutdown_enabled']=True
         with self.assertRaisesRegex(ValueError,'MUTATION_REQUIRES_CONTROLLED_MODE'):validate_config(c)

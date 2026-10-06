@@ -38,8 +38,9 @@ Transport tanpa TLS mengirim credential dan payload tanpa enkripsi; gunakan hany
 yang disetujui dan tepercaya.
 `Data > Atur` menyediakan pilihan transport/TLS, host, port, path WebSocket, serta username dan
 password CTRL/BULK terpisah. Keyboard sentuh melayani kolom teks; selector native tetap dapat
-dioperasikan dengan keyboard. Save mengganti kedua client tanpa restart service, menghapus bukti
-receipt/sequence lama, lalu menunggu bukti Ground baru sebelum bulk berjalan kembali.
+dioperasikan dengan keyboard. Save mengganti kedua client tanpa restart service dan menghapus bukti
+receipt/sequence lama; Bulk lanjut setelah kedua koneksi MQTT siap dan `resume_stable_seconds`
+berlalu. Receipt Ground tidak menjadi gate publikasi.
 
 Runtime menggunakan `/usr/bin/python3`, bukan Conda `base` atau environment SDR.
 Local HTTP server stdlib memiliki client/body caps, Host/Origin checks, cookie admin,

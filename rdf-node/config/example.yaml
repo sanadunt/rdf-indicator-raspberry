@@ -35,7 +35,6 @@ mqtt:
 telemetry:
   profile: balanced
   resume_stable_seconds: 20
-  require_ground_receipt_for_bulk: true
   control_budget_bytes_s: 850
   bulk_budget_bytes_s: 350
 freshness:

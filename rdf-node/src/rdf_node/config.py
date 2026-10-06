@@ -43,6 +43,11 @@ def load_config(path: str | Path | None = None) -> dict:
         if len(text) > 65536:
             raise ValueError('CONFIG_TOO_LARGE')
         value = yaml.safe_load(text)
+        telemetry = value.get('telemetry') if isinstance(value, dict) else None
+        if isinstance(telemetry, dict) and 'require_ground_receipt_for_bulk' in telemetry:
+            legacy_gate = telemetry.pop('require_ground_receipt_for_bulk')
+            if type(legacy_gate) is not bool:
+                raise ValueError('telemetry.require_ground_receipt_for_bulk: BOOLEAN_REQUIRED')
         _merge(base, value)
     validate_config(base)
     return base

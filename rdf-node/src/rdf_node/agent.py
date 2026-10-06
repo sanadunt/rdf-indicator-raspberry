@@ -432,7 +432,6 @@ class Agent:
                 elif not d['valid']: reason='SOURCE_NOT_ELIGIBLE'
                 elif self.commands.busy: reason='CONTROL_IN_PROGRESS'
                 elif not bulk or not bulk.ready: reason='BULK_NOT_READY'
-                elif self.cfg['telemetry']['require_ground_receipt_for_bulk'] and s['link']['ground']['state']!='RECEIVING': reason='GROUND_RECEIPT_REQUIRED'
                 elif ctrl.pending_age_ms>500: reason='CONTROL_BACKLOG'
                 diagnostic_needed=reason is not None or now<self.bulk_resume_after
                 r=self.source.record

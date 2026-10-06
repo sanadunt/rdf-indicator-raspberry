@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Publish Bulk angular on the existing schedule without waiting for a Ground application receipt. Existing config files are preserved; the retired `telemetry.require_ground_receipt_for_bulk` field is ignored when loaded.
+
 - Default setup to `rdfsdr.service` for SDR lifecycle controls when the unit is registered; Raspberry reboot and shutdown remain separately approved host actions.
 
 - Publish diagnostic `doa.xml` every 3 s when available, independent of normal DoA validity. Ground keeps it `UNVERIFIED`, separate from live DoA, receipts, and commands.
