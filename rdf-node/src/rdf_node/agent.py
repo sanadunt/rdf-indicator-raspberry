@@ -331,7 +331,7 @@ class Agent:
                 'angle':self.cfg['source']['angle_mode'],'native_axis':1,'count':360,
                 'profiles':list(PROFILES),'scope':'SDR_STACK','helper_available':bool(self.helper_status),
                 'maintenance':self.helper_status.get('maintenance',False),
-                'remote_commands':c['remote_commands_enabled'],
+                'remote_commands':c['remote_commands_enabled'] and self.helper_status.get('allow_remote_control',False),
                 'config_patch':c['config_patch_enabled'] and self.helper_status.get('allow_config',False),
                 'processing':c['processing_enabled'] and self.helper_status.get('allow_lifecycle',False),
                 'restart':c['restart_enabled'] and self.helper_status.get('allow_lifecycle',False),

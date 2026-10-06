@@ -93,7 +93,7 @@ class ApplicationTests(unittest.TestCase):
             observed.append((self.a.journal.lookup(request['id'])['stage'],payload))
             return {'scheduled':True,'delay_seconds':5}
         with mock.patch.object(self.a.commands,'_helper',side_effect=helper):
-            stage,result=self.a.commands._execute(request)
+            stage,result=self.a.commands._execute(request,'local-admin')
         self.assertEqual(stage,'SHUTDOWN_SCHEDULED')
         self.assertEqual(observed[0][0],'SHUTDOWN_SCHEDULED')
         self.assertEqual(observed[0][1]['op'],'system.shutdown.execute')
@@ -381,6 +381,67 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(agent.cfg['mqtt']['host'],'ground.example')
         self.assertEqual(agent.receipt_view()['state'],'UNCONFIRMED')
 
+
+class CommandTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.path=Path(os.path.realpath(self.tmp.name))
+        self.a=make_agent(self.path);self.addCleanup(self.a.journal.close)
+
+    def request(self,op,**extras):
+        return dict(v=2,id='command-'+uuid.uuid4().hex,sid=self.a.sid,boot=self.a.boot,
+                    issued_ms=now_ms(),expires_ms=now_ms()+15000,base_rev=self.a.source.revision,
+                    op=op,**extras)
+
+    def test_ground_actor_is_internal_and_reaches_helper(self):
+        from rdf_node.helper import Controller,DEFAULT_POLICY
+        self.a.cfg['runtime_mode']='controlled'
+        self.a.cfg['control'].update(remote_commands_enabled=True,reboot_enabled=True)
+        self.a.helper_status={'allow_remote_control':True,'allow_reboot':True}
+        helper=Controller(dict(DEFAULT_POLICY,state_dir=str(self.path/'remote-helper'),allowed_user=None,
+                               allow_remote_control=True,allow_reboot=True))
+        self.a.commands.start();self.addCleanup(self.a.commands.stop)
+        with mock.patch.object(self.a.commands,'_helper',
+                               side_effect=lambda request:helper.dispatch(request,os.getuid())):
+            request=self.request('system.reboot.prepare')
+            accepted=self.a.commands.submit(request,'ground-controller')
+            self.a.commands.queue.join()
+        operation=self.a.journal.lookup(request['id'])
+        self.assertEqual(accepted['stage'],'ACCEPTED')
+        self.assertEqual(operation['stage'],'APPLIED')
+        self.assertEqual(helper.challenges[request['id']][2],'reboot')
+
+    def test_remote_payload_cannot_choose_origin(self):
+        request=self.request('stream.set',profile='balanced',origin='ground-controller')
+        result=self.a.commands.submit(request,'ground-controller')
+        self.assertEqual(result['result']['error'],'UNKNOWN_COMMAND_FIELD')
+
+    def test_remote_stream_requires_edge_and_helper_grants(self):
+        self.a.cfg['control']['remote_commands_enabled']=True
+        self.a.helper_status={'allow_remote_control':False}
+        self.assertFalse(self.a.capabilities()['remote_commands'])
+        denied=self.a.commands.submit(self.request('stream.set',profile='balanced'),'ground-controller')
+        self.assertEqual(denied['result']['error'],'REMOTE_COMMANDS_DISABLED')
+
+        self.a.helper_status={'allow_remote_control':True}
+        self.a.cfg['control']['remote_commands_enabled']=False
+        self.assertFalse(self.a.capabilities()['remote_commands'])
+        denied=self.a.commands.submit(self.request('stream.set',profile='balanced'),'ground-controller')
+        self.assertEqual(denied['result']['error'],'REMOTE_COMMANDS_DISABLED')
+
+        self.a.cfg['control']['remote_commands_enabled']=True
+        self.assertTrue(self.a.capabilities()['remote_commands'])
+        self.a.commands.start();self.addCleanup(self.a.commands.stop)
+        request=self.request('stream.set',profile='balanced')
+        accepted=self.a.commands.submit(request,'ground-controller')
+        self.a.commands.queue.join()
+        self.assertEqual(accepted['stage'],'ACCEPTED')
+        self.assertEqual(self.a.journal.lookup(request['id'])['stage'],'APPLIED')
+        self.assertEqual(self.a.profile,'balanced')
+
+    def test_unrecognized_actor_is_rejected(self):
+        result=self.a.commands.submit(self.request('stream.set',profile='balanced'),'untrusted-caller')
+        self.assertEqual(result['result']['error'],'INVALID_COMMAND_ACTOR')
 
 class AuthTests(unittest.TestCase):
     def test_session_expiry_slides_on_authenticated_activity(self):

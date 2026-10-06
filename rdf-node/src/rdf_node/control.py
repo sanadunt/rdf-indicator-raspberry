@@ -33,6 +33,7 @@ class CommandManager:
         a=self.agent
         try:
             if retained: raise ValueError('RETAINED_COMMAND_REJECTED')
+            if actor not in ('ground-controller','local-admin'): raise ValueError('INVALID_COMMAND_ACTOR')
             if not isinstance(request,dict): raise ValueError('COMMAND_OBJECT_REQUIRED')
             allowed={'v','id','sid','boot','issued_ms','expires_ms','base_rev','op','changes','desired','profile','target_id','prepare_id','challenge'}
             if set(request)-allowed: raise ValueError('UNKNOWN_COMMAND_FIELD')
@@ -63,7 +64,7 @@ class CommandManager:
                 self._send(id,op,'APPLIED',result)
                 return {'id':id,'stage':'APPLIED','result':result}
             if a.demo: raise ValueError('DEMO_NO_HARDWARE_CONTROL')
-            if actor.startswith('ground') and not self.cfg['control']['remote_commands_enabled']:
+            if actor=='ground-controller' and not a.capabilities()['remote_commands']:
                 raise ValueError('REMOTE_COMMANDS_DISABLED')
             if not a.monitor.snapshot()['clock_trusted']: raise ValueError('CLOCK_UNTRUSTED')
             # Revision must be explicit; never replace the caller's stale revision.
@@ -86,7 +87,7 @@ class CommandManager:
                 if self.busy: raise ValueError('BUSY')
                 self.journal.accept(request,actor)
                 self.busy=True; self.active_id=id
-                self.queue.put_nowait(request)
+                self.queue.put_nowait((request,actor))
             self._send(id,op,'ACCEPTED')
             return {'id':id,'stage':'ACCEPTED'}
         except Exception as e:
@@ -104,11 +105,11 @@ class CommandManager:
         self.journal.update(r['id'],stage,result)
     def _worker(self):
         while not self.stop_event.is_set():
-            try: r=self.queue.get(timeout=0.2)
+            try: r,actor=self.queue.get(timeout=0.2)
             except queue.Empty: continue
             try:
                 self._stage(r,'APPLYING')
-                stage,result=self._execute(r)
+                stage,result=self._execute(r,actor)
                 self._stage(r,stage,result)
                 self._send(r['id'],r['op'],stage,result)
             except Exception as e:
@@ -122,7 +123,7 @@ class CommandManager:
                 with self.lock: self.busy=False; self.active_id=None
                 self.agent.bulk_resume_after=time.monotonic()+self.cfg['telemetry']['resume_stable_seconds']
                 self.queue.task_done()
-    def _execute(self,r):
+    def _execute(self,r,actor):
         a=self.agent; op=r['op']
         if op=='stream.set':
             a.profile=r['profile']; a.journal.set('profile',a.profile)
@@ -156,7 +157,7 @@ class CommandManager:
                                           'reason':'NATIVE_RUNTIME_EVIDENCE_INCOMPLETE'}
         if op in ('processing.set','service.restart'):
             oldgen=a.monitor.snapshot()['generation']; started=now_ms()
-            rpc={'op':op}
+            rpc={'op':op,'origin':actor}
             if op=='processing.set': rpc['desired']=r['desired']
             result=self._helper(rpc)
             self._stage(r,'VERIFYING',result)
@@ -172,14 +173,14 @@ class CommandManager:
                 self.stop_event.wait(0.25)
             return 'OUTCOME_UNKNOWN',{'reason':'LIFECYCLE_VERIFICATION_TIMEOUT','accepted':True}
         if op in ('system.reboot.prepare','system.shutdown.prepare'):
-            return 'APPLIED',self._helper({'op':op,'id':r['id']})
+            return 'APPLIED',self._helper({'op':op,'id':r['id'],'origin':actor})
         if op in ('system.reboot.execute','system.shutdown.execute'):
             action='shutdown' if op.startswith('system.shutdown.') else 'reboot'
             if not isinstance(r.get('prepare_id'),str) or not isinstance(r.get('challenge'),str):
                 raise ValueError(f'{action.upper()}_PREPARE_REQUIRED')
             stage=f'{action.upper()}_SCHEDULED'
             self._stage(r,stage,{'boot_before':a.boot})
-            result=self._helper({'op':op,'id':r['prepare_id'],'challenge':r['challenge']})
+            result=self._helper({'op':op,'id':r['prepare_id'],'challenge':r['challenge'],'origin':actor})
             if action=='reboot': a.planned_reboot=True
             return stage,result
         raise ValueError('UNSUPPORTED_OPERATION')
