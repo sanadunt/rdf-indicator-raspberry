@@ -7,6 +7,14 @@
 main.data-stale section{border-color:#f1c16e}
 .plot.stale{border:2px solid #f1c16e}
 .actions{flex-wrap:wrap;gap:8px}.actions button{min-height:44px}button:focus-visible{outline:2px solid #79dce4;outline-offset:2px}button:disabled{cursor:not-allowed;opacity:.55}
+.ppp-control{margin:14px 0;padding:12px;border:1px solid #594824;border-radius:8px;background:#241f16;min-width:0}
+.ppp-control h3{margin:0 0 8px;color:#f3cf78;font-size:16px}
+.ppp-control button{min-height:44px;border-color:#f1c16e;background:#312714;color:#fff0c8}
+.ppp-control button:focus-visible{outline:2px solid #f1c16e;outline-offset:2px}
+.ppp-control p,.ppp-control li{font-size:13px;line-height:1.5;overflow-wrap:anywhere}
+.ppp-control p{margin:6px 0}
+.ppp-control ul{margin:8px 0;padding-left:20px}
+.ppp-control li{margin:8px 0}
 .diagnostic{margin:16px 0;padding:12px 14px;border:1px solid #d7a94c;border-radius:8px;background:#241f16}
 .diagnostic h2{margin:0 0 8px;color:#f3cf78}
 .diagnostic h2 span{margin-left:6px;font-size:11px;letter-spacing:.06em}
