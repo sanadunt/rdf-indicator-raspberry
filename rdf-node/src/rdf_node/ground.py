@@ -12,7 +12,7 @@ import re
 import uuid
 from .util import now_ms, strict_json, integer, finite, compact
 from .mqtt import Client
-from .codec import Assembler
+from .codec import Assembler, FLAG_PARSED, FLAG_FRESH, FLAG_DAQ, FLAG_CONVENTION, FLAG_CONFIG
 from .journal import Journal, TERMINAL
 from .control import OPS, CommandManager
 
@@ -21,12 +21,16 @@ class Ground:
         self.cfg=cfg; self.demo=demo; self.prefix=('sdr/demo/v2/' if demo else 'sdr/v2/')+cfg['node_id']
         self.lock=threading.RLock(); self.stop_event=threading.Event(); self.events=queue.Queue(64)
         self.journal=Journal(Path(cfg['state_dir'])/'ground.sqlite3')
-        self.node_state={}; self.node_config={}; self.caps={}; self.health={}; self.doa={}; self.diagnostic_doa=None; self.angular=None; self.detail={}
-        self.health_seen=0; self.doa_seen=0; self.diagnostic_seen=None; self.angular_seen=0; self.state_seen=0; self.sid_map={}
-        self.assembler=Assembler(); self.rejected=0; self.receipt_count=0; self.snapshot_seq=0; self.current_gen=-1
+        self.node_state={}; self.node_config={}; self.caps={}; self.health={}; self.doa={}; self.diagnostic_doa=None
+        self.diagnostic_angular=None; self.angular=None; self.detail={}
+        self.health_seen=0; self.doa_seen=0; self.diagnostic_seen=None; self.diagnostic_angular_seen=None
+        self.angular_seen=0; self.state_seen=0; self.sid_map={}
+        self.assembler=Assembler(); self.diagnostic_assembler=Assembler()
+        self.rejected=0; self.receipt_count=0; self.snapshot_seq=0; self.current_gen=-1
         self.client=Client(cfg=cfg['mqtt'],client_id=cfg['node_id']+'-ground'+('-demo' if demo else ''),
             credentials_file=cfg['mqtt']['control_credentials_file'],rate=1000,
-            subscriptions=[(self.prefix+'/telemetry/'+s,0,True) for s in ('doa','health','health/detail','angular','diagnostic/doa')]+
+            subscriptions=[(self.prefix+'/telemetry/'+s,0,True) for s in
+                ('doa','health','health/detail','angular','diagnostic/doa','diagnostic/angular')]+
                           [(self.prefix+'/'+s,1,False) for s in ('state','capabilities','config/reported','availability','ack/config','ack/operation')],
             on_message=self._incoming)
         self.thread=threading.Thread(target=self._loop,name='ground-consumer',daemon=True)
@@ -47,7 +51,7 @@ class Ground:
             except Exception: self.rejected+=1
             now=time.monotonic()
             if self.client.generation!=self.current_gen:
-                self.current_gen=self.client.generation; self.assembler.clear()
+                self.current_gen=self.client.generation; self.assembler.clear(); self.diagnostic_assembler.clear()
             if now>=next_receipt and self.client.ready:
                 next_receipt=now+5
                 with self.lock:
@@ -64,6 +68,16 @@ class Ground:
         if not topic.startswith(self.prefix+'/'): return
         suffix=topic[len(self.prefix)+1:]
         with self.lock:
+            if suffix=='telemetry/diagnostic/angular':
+                if retained or not self.node_state: return
+                a=self.diagnostic_assembler.add(data)
+                if a is None: return
+                if a['sid']!=self.node_state.get('sid'): raise ValueError('DIAGNOSTIC_ANGULAR_SESSION_MISMATCH')
+                if a['q']==0: raise ValueError('DIAGNOSTIC_ANGULAR_SEQUENCE_INVALID')
+                if self.diagnostic_angular and a['q']<=self.diagnostic_angular.get('q',0): return
+                a['source']='DOA_value.html'; a['trust']='UNVERIFIED'
+                self.diagnostic_angular=a; self.diagnostic_angular_seen=time.monotonic()
+                return
             if suffix=='telemetry/angular':
                 if retained or not self.node_state: return
                 a=self.assembler.add(data)
@@ -86,7 +100,9 @@ class Ground:
                 if self.node_state.get('sid')!=sid:
                     for old in self.journal.pending_shutdowns():
                         self.journal.update(old['id'],'OUTCOME_UNKNOWN',{'reason':'SHUTDOWN_COMPLETION_UNVERIFIED','boot':j['boot']})
-                    self.health={}; self.doa={}; self.diagnostic_doa=None; self.diagnostic_seen=None; self.angular=None; self.node_config={}; self.assembler.clear()
+                    self.health={}; self.doa={}; self.diagnostic_doa=None; self.diagnostic_seen=None
+                    self.diagnostic_angular=None; self.diagnostic_angular_seen=None; self.angular=None
+                    self.node_config={}; self.assembler.clear(); self.diagnostic_assembler.clear()
                 self.node_state=j; self.state_seen=time.monotonic(); return
             if suffix=='capabilities': self.caps=j; return
             if sid!=self.node_state.get('sid'): return
@@ -176,6 +192,32 @@ class Ground:
             if a['revision']!=self.node_config.get('rev'): reasons.append('PREVIOUS_CONFIG')
             a['stale']=bool(reasons); a['reasons']=reasons
             return a
+    def diagnostic_angular_view(self):
+        with self.lock:
+            if not self.diagnostic_angular: return None
+            a=copy.deepcopy(self.diagnostic_angular); now=time.monotonic(); utc=now_ms()
+            age=utc-a['timestamp_ms']; source_age=max(0,age)
+            flags=a['flags']; reasons=[]
+            if not flags&FLAG_PARSED: reasons.append('SOURCE_PARSE_UNVERIFIED')
+            if not flags&FLAG_FRESH: reasons.append('SOURCE_FRESHNESS_UNVERIFIED')
+            if not flags&FLAG_DAQ: reasons.append('DAQ_NOT_HEALTHY_AT_EDGE')
+            if not flags&FLAG_CONVENTION: reasons.append('ANGLE_UNVERIFIED_AT_EDGE')
+            if not flags&FLAG_CONFIG: reasons.append('CONFIG_ATTRIBUTION_UNVERIFIED')
+            if age < -1000: reasons.append('SOURCE_TIME_FUTURE')
+            elif source_age>self.cfg['freshness']['doa_ms']: reasons.append('SOURCE_STALE')
+            if not self.health or now-self.health_seen>8:
+                reasons.append('HEALTH_STALE')
+            else:
+                if self.health.get('daq')!=1: reasons.append('DAQ_NOT_HEALTHY')
+                if self.health.get('run')!=1: reasons.append('PROCESSING_NOT_RUNNING')
+            if (a['revision'] is not None and self.node_config.get('rev') is not None and
+                    a['revision']!=self.node_config.get('rev')):
+                reasons.append('PREVIOUS_CONFIG')
+            a.update(available=True,source_timestamp_ms=a['timestamp_ms'],source_age_ms=source_age,
+                     received_age_ms=round((now-self.diagnostic_angular_seen)*1000),
+                     validation_reasons=list(dict.fromkeys(reasons)),stale=bool(reasons))
+            return a
+
     def config_view(self):
         with self.lock:
             return {'sdr_revision':self.node_config.get('rev'),'proof':self.node_config.get('proof','UNVERIFIED'),

@@ -11,6 +11,11 @@ from .util import finite, integer
 HEADER = struct.Struct('<4sBBHIIQIIBBHffHh')
 CHUNK = struct.Struct('<IIBBH')
 COUNT = 360
+FLAG_PARSED=1
+FLAG_FRESH=2
+FLAG_DAQ=4
+FLAG_CONVENTION=8
+FLAG_CONFIG=16
 UNKNOWN_REV = 0xffffffff
 
 def encode(values, *, sid, seq, timestamp_ms, frequency_hz, revision=UNKNOWN_REV,

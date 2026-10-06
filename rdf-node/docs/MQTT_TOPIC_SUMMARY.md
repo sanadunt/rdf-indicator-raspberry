@@ -18,7 +18,7 @@ Semua topic di tabel berikut adalah suffix setelah prefix tersebut. Topic bersif
 | `q` | Urutan sampel untuk jenis datanya. Bukan satu counter global dan bukan nomor frame DAQ. |
 | `rev` | Revision konfigurasi aman yang dikorelasikan dengan data; dapat `null` bila belum diketahui. |
 
-Payload JSON adalah object v2 langsung, tanpa wrapper tambahan. `telemetry/angular` adalah payload binary, bukan JSON atau Base64. MQTT tidak mengirim raw IQ, raw CSV, koordinat GPS, kredensial broker, atau PIN admin.
+Payload JSON adalah object v2 langsung, tanpa wrapper tambahan. `telemetry/angular` dan `telemetry/diagnostic/angular` adalah payload binary RDF2, bukan JSON atau Base64. MQTT tidak mengirim raw IQ, raw CSV, koordinat GPS, kredensial broker, atau PIN admin.
 
 ## Koneksi dan pemisahan kanal
 
@@ -26,8 +26,8 @@ Edge membuka dua MQTT client:
 
 | Kanal | Client ID | Hak data |
 |---|---|---|
-| Control | `{client_id}-control` | Publish JSON telemetry (termasuk topik diagnostik terpisah), state, capabilities, config report, availability, ACK; subscribe command dan receipt. |
-| Bulk | `{client_id}-bulk` | Publish `telemetry/angular` saja. Tidak subscribe command dan tidak memiliki hak command. |
+| Control | `{client_id}-control` | Publish JSON telemetry (termasuk topik diagnostik terpisah) dan binary `telemetry/diagnostic/angular`, state, capabilities, config report, availability, ACK; subscribe command dan receipt. |
+| Bulk | `{client_id}-bulk` | Publish `telemetry/angular` normal saja. Tidak subscribe command dan tidak memiliki hak command. |
 | Ground | `{node_id}-ground` | Subscribe data operasional/ACK; publish command dan receipt. |
 
 Kredensial Control dan Bulk terpisah bila digunakan. Jika file kredensial untuk kanal tidak dikonfigurasi, client dapat memakai anonymous CONNECT; ACL broker tetap harus membatasi hak berdasarkan deployment. MQTT memakai Clean Start dan Session Expiry 0. Koneksi ulang membuat sesi baru dan subscribe ulang, tanpa replay history offline. QoS 2 dan persistent broker session tidak didukung.
@@ -40,6 +40,7 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 |---|---|---|---:|---|---|---|
 | `telemetry/doa` | Edge -> Ground | Control | 0 | Tidak | Umumnya tiap 1 s bila DoA valid; expiry 3 s | Ringkasan DoA, frekuensi, confidence, power, revision. |
 | `telemetry/diagnostic/doa` | Edge -> Ground | Control | 0 | Tidak | Setiap 3 s selama `doa.xml` tersedia; expiry 3 s | Sudut raw `doa.xml`, timestamp sumber/observasi, frekuensi MHz, status `UNVERIFIED` dan validation reasons. Diulang meski sampel tidak berubah, terlepas dari gate DoA normal. |
+| `telemetry/diagnostic/angular` | Edge -> Ground | Control | 0 | Tidak | Tiap 6 s jika strict source validity gagal; tiap 30 s jika source valid tetapi Bulk terblokir/menunggu stabilisasi; tidak ada duplikasi saat Bulk normal tersedia; profile `control` menahan array. Expiry 3 s | Frame RDF2 candidate dengan source timestamp; Ground menyimpan terpisah sebagai `UNVERIFIED`, tidak menunggu receipt dan tidak mengisi `aq`. |
 | `telemetry/health` | Edge -> Ground | Control | 0 | Tidak | Tiap 1 s; expiry 5 s | Status run, DAQ, clock, umur sumber, temperatur, dropped frames. |
 | `telemetry/health/detail` | Edge -> Ground | Control | 0 | Tidak | Tiap 10 s; expiry 15 s | Detail host, USB, sync DAQ, trafik, parse dan abort counter. |
 | `telemetry/angular` | Edge -> Ground | Bulk | 0 | Tidak | Profile-dependent; expiry 3 s | Frame 360 sampel dalam satu atau lebih payload binary. |
@@ -67,6 +68,7 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 |---|---|
 | `telemetry/doa` | Tampilkan DoA terbaru hanya jika `ok`, revision, sequence, timestamp dan health cocok; jangan anggap `c` sebagai probabilitas. |
 | `telemetry/diagnostic/doa` | Tampilkan terpisah sebagai diagnostik UNVERIFIED dengan timestamp dan reasons; jangan gabungkan ke `telemetry/doa`, receipt, atau keputusan kontrol. |
+| `telemetry/diagnostic/angular` | Simpan frame lengkap terbaru terpisah sebagai UNVERIFIED; expose lewat `GET /api/v2/angular/diagnostic/latest`; jangan gabungkan ke `telemetry/angular`, DoA, detection atau receipt. |
 | `telemetry/health` | Gunakan sebagai sumber utama freshness dan status DAQ; pisahkan MQTT tersambung dari `daq=1`. |
 | `telemetry/health/detail` | Pakai untuk diagnosis host, USB, sync, trafik dan error; jangan jadikan pengganti gate health. |
 | `telemetry/angular` | Rakit semua chunk sebelum menggambar kurva; receipt `aq` baru maju setelah frame lolos gate. |
@@ -128,8 +130,11 @@ Angka berikut diukur dari serializer JSON compact (`util.compact`) dan paket MQT
 | `telemetry/angular` (`balanced`, Q16) | 2 chunk/4 s; tiap chunk | 396 B | 438 B |
 | `telemetry/angular` (`graph_u8`, U8) | 1 chunk/2 s | 420 B | 462 B |
 | `telemetry/angular` (`control`) | Tidak dipublish | — | — |
+| `telemetry/diagnostic/angular` (`balanced`, Q16) | 2 chunk/frame; 6 s saat source invalid, 30 s saat valid-source Bulk blocked; tidak dikirim saat Bulk normal tersedia | 396 B/chunk; 792 B/frame | 449 B/chunk; 898 B/frame |
+| `telemetry/diagnostic/angular` (`graph_u8`, U8) | 1 chunk/frame; 6 s saat source invalid, 30 s saat valid-source Bulk blocked; tidak dikirim saat Bulk normal tersedia | 420 B | 473 B |
+| `telemetry/diagnostic/angular` (`control`) | Tidak dipublish | — | — |
 
-Satu frame Q16 berarti total 792 B payload dan 876 B dalam dua PUBLISH. Angular adalah binary, bukan JSON. Health, normal DoA, detail, dan diagnostic DoA adalah JSON telemetri berkala. Dengan ukuran contoh dan biaya limiter `PUBLISH + 142 B`, cadence 1/s untuk health, DoA, dan diagnostic bersama detail tiap 10 s memerlukan sekitar 1.116 cost-B/s, di atas budget Control default 850. Karena itu Edge mengirim diagnostic setiap 3 s selama XML tersedia, meski DoA normal valid atau sampel tidak berubah; data tetap `UNVERIFIED`.
+Satu frame Q16 normal berarti 792 B payload/876 B dalam dua PUBLISH; diagnostic Q16 memakai 898 B karena topic lebih panjang. Angular adalah binary, bukan JSON. Dengan biaya limiter `PUBLISH + 142 B` (ditambah 144 B untuk QoS 1), cadence 1/s untuk health, DoA, dan diagnostic DoA bersama detail tiap 10 s memerlukan sekitar 1.116 cost-B/s, di atas budget Control default 850. Karena itu diagnostic DoA dikirim setiap 3 s. Diagnostic angular menambah 197 cost-B/s Q16 atau 102.5 cost-B/s U8 saat source validity gagal (interval 6 s); ketika source valid tetapi Bulk diblokir, tambahan turun menjadi 39.4/20.5 cost-B/s (interval 30 s). Tidak ada biaya array diagnostik saat Bulk normal tersedia atau profile `control`.
 
 ### Topic event-driven dan command
 
@@ -165,17 +170,17 @@ Ukuran command adalah fixture dengan envelope dan nilai umum yang sama seperti c
 
 ### Rata-rata periodik per profile
 
-Asumsi: contoh payload di atas, source valid, DoA baru setiap detik, detail tiap 10 s, dan semua gate publish lolos. Nilai belum memasukkan topic retained/event, command/ACK, receipt Ground, MQTT control packets, atau overhead transport.
+Asumsi steady-state: source valid, normal Bulk angular path tersedia, DoA baru tiap detik, detail tiap 10 s, diagnostic DoA tiap 3 s, state tiap 60 s, semua gate lolos. Diagnostic angular tidak diduplikasi saat stream normal tersedia. Nilai belum memasukkan event retained di luar state periodik, command/ACK, receipt Ground, MQTT control packets, atau overhead transport.
 
 | Profile | Payload JSON/binary | MQTT PUBLISH | Biaya limiter |
 |---|---:|---:|---:|
-| `control` | 239.9 B/s | 323.7 B/s (2.59 kbit/s) | 621.9 cost-B/s (4.98 kbit/s) |
-| `balanced` | 437.9 B/s | 542.7 B/s (4.34 kbit/s) | 911.9 cost-B/s (7.30 kbit/s) |
-| `graph_u8` | 449.9 B/s | 554.7 B/s (4.44 kbit/s) | 923.9 cost-B/s (7.39 kbit/s) |
+| `control` | 344.4 B/s | 445.0 B/s (3.56 kbit/s) | 795.3 cost-B/s (6.36 kbit/s) |
+| `balanced` | 542.4 B/s | 664.0 B/s (5.31 kbit/s) | 1,085.3 cost-B/s (8.68 kbit/s) |
+| `graph_u8` | 554.4 B/s | 676.0 B/s (5.41 kbit/s) | 1,097.3 cost-B/s (8.78 kbit/s) |
 
-Biaya limiter memakai `PUBLISH bytes + 142`, ditambah 144 untuk QoS 1; bukan ukuran wire aktual. `state` pada jadwal 60 s menambah sekitar 4 PUBLISH B/s. Receipt Ground sekitar 19.6 PUBLISH B/s pada arah balik. Angka profile ini masih jauh di bawah budget default 1,200 cost-B/s gabungan (9.6 kbit/s), tetapi bukan batas fisik link.
+State periodik tiap 60 s sudah masuk tabel; receipt Ground sekitar 19.6 PUBLISH B/s pada arah balik. Pada `balanced`, Control memakai sekitar 795.3 cost-B/s dari budget 850 saat Bulk normal. Saat valid-source Bulk blocked, Q16 diagnostic menaikkan Control ke sekitar 834.7 cost-B/s; saat source invalid, DoA normal berhenti dan diagnostic 6 s memberi sekitar 703.3 cost-B/s. QoS 0 tetap dapat expiry saat event/backlog; angka ini bukan hard cap link.
 
-Jadi, bukan semua JSON dikirim per detik: health dan DoA saja yang dijadwalkan 1/s; detail 10 s, state berubah/60 s, capability/config saat event, dan command/ACK saat diminta atau ada progress. Angular punya jadwal sendiri dan bisa tertahan oleh receipt, command, freshness, atau koneksi Bulk. QoS 0 dan expiry singkat membuat data lama kedaluwarsa/digantikan, bukan menumpuk untuk replay saat link pulih; karena itu profile tidak menjamin full-speed pada koneksi buruk.
+Health dan DoA normal dijadwalkan 1/s; detail 10 s, state 60 s, diagnostic DoA 3 s, capabilities/config saat event, command/ACK saat diminta atau ada progress. Angular normal dapat tertahan oleh receipt, command, freshness, atau koneksi Bulk. Hanya saat jalur Bulk angular tidak tersedia Edge mengirim kandidat terpisah: 6 s jika strict source validity gagal, 30 s jika source valid tetapi Bulk terblokir. QoS 0/expiry 3 s bisa membuang chunk; profile `control` menahan array diagnostik.
 
 
 ## Payload yang dipublish Edge
@@ -310,7 +315,7 @@ Setelah semua chunk terkumpul, frame dimulai dengan header 48 byte `<4sBBHIIQIIB
 | Field header | Makna |
 |---|---|
 | magic, version, encoding | `RDF2`, versi `2`, encoding `1` Q16 atau `2` U8. |
-| flags | Bit parsed/fresh/DAQ/convention/config; nilai live yang diterima Ground saat ini harus `31`. |
+| flags | Bit parsed/fresh/DAQ/convention/config; frame LIVE harus bernilai `31`, diagnostic boleh membawa subset bukti yang tersedia. |
 | sid, q, timestamp | Identitas sesi, sequence dan source timestamp. |
 | frequency, revision, vfo | Frekuensi Hz, revision (`0xffffffff` berarti unknown), dan index VFO. |
 | convention, count | Konvensi angle dan jumlah sampel, wajib `360`. |
@@ -341,6 +346,12 @@ for payload in mqtt_payloads:  # payload adalah bytes dari telemetry/angular
 ```
 
 Ground menunggu seluruh frame, memeriksa `sid`, `flags==31`, revision, source age maksimum 10 s, health fresh dengan `daq=1`, dan sequence yang maju. Fragment parsial tidak boleh ditampilkan. Assembler menerima maksimal dua frame incomplete dan membuang frame setelah deadline 3 s.
+
+### `telemetry/diagnostic/angular` (binary)
+
+Topic ini memakai framing chunk dan frame RDF2 yang sama seperti `telemetry/angular`; tiap frame membawa 360 sampel terkuantisasi dan timestamp sumber `DOA_value.html`. Edge mengirim candidate hanya saat normal Bulk tidak dapat mengirimnya: tiap 6 s jika strict source validity gagal, tiap 30 s jika source valid tetapi Bulk terblokir/menunggu stabilisasi, dan tidak ada duplikasi saat Bulk normal tersedia. QoS 0, non-retained, expiry 3 s, tanpa menunggu receipt; `control` tidak mengirim array diagnostik. `balanced` memakai Q16, `graph_u8` U8; Q16 overflow memakai U8 tanpa clipping.
+
+Flags menyimpan bukti parsial saat publish: bit 0 parsed, bit 1 clock/fresh, bit 2 DAQ, bit 3 angle convention, bit 4 config attribution. Ground hanya menampilkan frame lengkap dengan `trust=UNVERIFIED`, serta `stale` dan `validation_reasons`; frame tidak mengubah DoA/Angular LIVE atau `aq`. Kandidat terbaru tersedia melalui `GET /api/v2/angular/diagnostic/latest`, termasuk `values`, `encoding`, `source_timestamp_ms`, `source_age_ms`, `received_age_ms`, `flags`, dan alasan validasi.
 
 ## Payload Ground -> Edge
 

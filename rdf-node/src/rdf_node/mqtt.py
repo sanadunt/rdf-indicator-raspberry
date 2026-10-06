@@ -182,6 +182,10 @@ class Outbox:
             self.data.clear()
         if messages:
             for m in messages: _notify_error(m.on_error,reason)
+    def discard(self,key,reason='OUTBOX_DISCARDED'):
+        with self.lock: message=self.data.pop(key,None)
+        if message: _notify_error(message.on_error,reason); return True
+        return False
     def status(self):
         with self.lock:
             return dict(depth=len(self.data),bytes=sum(len(m.payload) for m in self.data.values()),

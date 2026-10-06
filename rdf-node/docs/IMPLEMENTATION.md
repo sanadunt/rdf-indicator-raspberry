@@ -173,12 +173,31 @@ terpisah di `link.ground`. Error seperti `MQTT_DISCONNECTED`, `OUTBOX_FULL`, dan
 jika percobaan terbaru gagal.
 
 `telemetry/diagnostic/doa` memakai client Control, QoS 0, expiry 3 s, tanpa retention.
-Saat `doa.xml` tersedia, Edge mengirim satu sampel setiap 3 s, termasuk saat isi sampel
-tidak berubah dan terlepas dari hasil gate DoA normal. Cadence ini menjaga beban telemetri
-periodik Control di bawah budget default bersama health dan DoA normal. Sequence `q`
-bertambah tiap publish; timestamp sumber dan observasi tetap menunjuk pembacaan file yang
-sama. Ground menyimpan dan menampilkan sampel terpisah sebagai `UNVERIFIED`; ini tidak
-menambah `dq` atau menjadi detection normal.
+Saat `doa.xml` tersedia, Edge mengirim sampel tiap 3 s termasuk jika isinya tidak berubah
+atau DoA normal terblokir. Sequence `q` bertambah tiap publish; timestamp sumber/observasi
+tetap menunjuk pembacaan file yang sama. Ground menyimpan hasil terpisah sebagai `UNVERIFIED`;
+ini tidak menambah `dq` atau menjadi detection normal.
+
+`telemetry/diagnostic/angular` mengirim record 360 sampel terakhir dari `DOA_value.html`
+hanya saat jalur angular Bulk normal tidak dapat mengirimnya. Jika gate validitas source gagal
+(misalnya DAQ berhenti atau stale), Edge menjadwalkan kandidat tiap 6 s; jika source valid
+tetapi Bulk terblokir atau menunggu stabilisasi resume, tiap 30 s. Kandidat tidak diduplikasi
+saat jalur Bulk normal tersedia. Profile `control` tetap menahan array angular.
+
+Kandidat memakai Control QoS 0, expiry 3 s, tanpa retention, dan tidak menunggu receipt Ground.
+Timestamp sumber dipertahankan; publish ulang tidak menyegarkan umur sampel. Flags RDF2
+membawa bukti parsing, clock/freshness, DAQ, konvensi, dan atribusi konfigurasi. Jika Q16
+melewati rentangnya, diagnostic memakai U8 tanpa clipping.
+
+Ground menyimpan frame lengkap terpisah dari Angular LIVE dan menyediakannya melalui
+`GET /api/v2/angular/diagnostic/latest`. Kandidat selalu `UNVERIFIED`; timestamp, health,
+processing, revision, dan flags menentukan `stale`/`validation_reasons`. Kandidat tidak
+memajukan receipt `aq` atau DoA/detection normal.
+
+Kedua topic diagnostic memakai Control token bucket bersama health/DoA (default 850 B/s).
+Broker ACL harus mengizinkan Control Edge publish dan Ground subscribe. Chunk QoS 0 dapat
+expired saat backlog.
+
 
 Panel utama Edge membaca `diagnostic_doa` dari snapshot lokal dan polling API tiap 500 ms.
 Snapshot agent mengikuti `source.poll_ms` (default 250 ms). Saat detection normal invalid,

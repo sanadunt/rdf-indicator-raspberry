@@ -46,7 +46,7 @@ def section(user,pubs,subs):
  acl.extend('topic write '+prefix+'/'+x for x in pubs)
  acl.extend('topic read '+prefix+'/'+x for x in subs)
  acl.append('')
-section(node+'-control',['telemetry/doa','telemetry/diagnostic/doa','telemetry/health','telemetry/health/detail','state','availability','config/reported','capabilities','ack/config','ack/operation'],['cmd/#','ground/receipt'])
+section(node+'-control',['telemetry/doa','telemetry/diagnostic/doa','telemetry/diagnostic/angular','telemetry/health','telemetry/health/detail','state','availability','config/reported','capabilities','ack/config','ack/operation'],['cmd/#','ground/receipt'])
 section(node+'-bulk',['telemetry/angular'],[])
 section('rdf-ground-controller',['ground/receipt','cmd/#'],['telemetry/#','state','availability','config/reported','capabilities','ack/#'])
 section('rdf-ground-viewer',[],['telemetry/#','state','availability','config/reported','capabilities','ack/#'])

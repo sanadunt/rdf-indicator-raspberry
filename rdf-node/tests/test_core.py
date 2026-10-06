@@ -463,6 +463,15 @@ class MqttWireTests(unittest.TestCase):
 
     def test_latest_value_queue(self):
         q=Outbox();q.offer(Message('h','t',b'1',0,False,1,1,time.monotonic()));q.offer(Message('h','t',b'2',0,False,1,1,time.monotonic()));self.assertEqual(q.pop().payload,b'2');self.assertEqual(q.superseded,1)
+    def test_discard_removes_only_matching_queued_message(self):
+        q=Outbox();errors=[]
+        q.offer(Message('diagnostic-angular','diag',b'candidate',0,False,3,3,0,on_error=errors.append))
+        q.offer(Message('health','health',b'live',0,False,3,1,0))
+        self.assertTrue(q.discard('diagnostic-angular','PROFILE_CONTROL'))
+        self.assertEqual(q.status()['depth'],1)
+        self.assertEqual(q.pop(now=1).key,'health')
+        self.assertEqual(errors,['PROFILE_CONTROL'])
+        self.assertFalse(q.discard('missing'))
     def test_expiry_queue(self):
         q=Outbox();q.offer(Message('h','t',b'1',0,False,1,1,0));self.assertIsNone(q.pop(now=10))
     def test_priority(self):

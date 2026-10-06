@@ -12,6 +12,7 @@ Demo CLI tidak membuka koneksi MQTT. Prefix demo tersedia hanya bagi integration
 | telemetry/health | UAV -> Ground | 0 | tidak |
 | telemetry/health/detail | UAV -> Ground | 0 | tidak |
 | telemetry/angular | UAV -> Ground | 0 | tidak |
+| telemetry/diagnostic/angular | UAV -> Ground | 0 | tidak |
 | state, capabilities, config/reported, availability | UAV -> Ground | 1 | ya, last-known |
 | ground/receipt | Ground -> UAV | 0 | tidak |
 | cmd/config/get, cmd/config/patch | Ground -> UAV | 1 | tidak |
@@ -111,12 +112,49 @@ Kurva parsial tidak dirender. Konvensi1 mempertahankan index native; tidak otoma
 Dikirim setiap5s oleh satu receiver yang benar-benar mendecode. `aq` baru maju setelah
 frame selesai dan lolos. Bukan PUBACK MQTT, bukan bukti operator melihat browser.
 Unknown sid, q yang tidak pernah terkirim, regressi, dan retained receipt ditolak.
-`telemetry/diagnostic/doa` dipublikasikan setiap 3 detik selama XML tersedia,
-terlepas dari validitas DoA normal, termasuk untuk sampel yang tidak berubah. Cadence ini
-menjaga beban periodik Control di bawah budget default bersama health dan DoA normal. `q`
-bertambah tiap publish; timestamp sumber/observasi menunjuk pembacaan file, bukan waktu
-heartbeat. Ground menampilkannya pada field API `diagnostic_doa` sebagai `UNVERIFIED`;
-data tidak masuk ke `dq`, DoA valid, angular, atau otorisasi command.
+`telemetry/diagnostic/doa` dikirim tiap 3 s selama XML tersedia, terlepas dari validitas DoA
+normal. `q` bertambah tiap publish; timestamp sumber/observasi tetap menunjuk pembacaan file
+yang sama. Ground menyimpan sampel sebagai `UNVERIFIED`, tidak masuk ke `dq`, DoA valid,
+angular, atau otorisasi command.
+
+Kedua topic diagnostic memakai Control token bucket bersama health/DoA normal (default
+850 B/s), sehingga chunk QoS 0 dapat expired saat backlog. Broker ACL harus mengizinkan
+Control Edge publish dan Control Ground subscribe ke kedua topic. Diagnostic angular tidak
+memenuhi `aq`.
+
+## Diagnostic angular candidate
+
+Topic `telemetry/diagnostic/angular` membawa frame RDF2 terakhir dari 360 sampel `DOA_value.html`
+yang berhasil diparse, hanya saat jalur angular Bulk normal tidak dapat mengirimnya. Jika gate
+validitas source strict gagal, Edge menjadwalkan setiap 6 s; jika source valid tetapi Bulk
+terblokir atau menunggu stabilisasi resume, setiap 30 s. Tidak ada duplikasi saat Bulk normal
+tersedia; profile `control` menahan array. Topic memakai Control QoS 0, non-retained, expiry 3 s,
+dan tidak menunggu receipt Ground. Timestamp sumber dipertahankan; `q` adalah sequence publish
+diagnostic, bukan sequence file sumber.
+
+Bits `flags` menyatakan bukti yang tersedia saat Edge mengirim:
+
+| Bit | Bukti |
+|---:|---|
+| 0 | record berhasil diparse |
+| 1 | clock dipercaya dan source masih fresh |
+| 2 | DAQ sehat |
+| 3 | konvensi sudut diverifikasi lokal |
+| 4 | atribusi konfigurasi cocok |
+
+Ground menyimpan frame lengkap terpisah dari `telemetry/angular`, `telemetry/doa`, dan receipt.
+Nilainya selalu `trust=UNVERIFIED`; timestamp stale, health/processing, revision, dan flags
+menjadi `validation_reasons`/`stale`, bukan alasan membuang sampel. Baca melalui
+`GET /api/v2/angular/diagnostic/latest` (mengembalikan `null` sebelum frame lengkap diterima).
+Frame diagnostic tidak memenuhi receipt `aq` atau detection LIVE.
+
+Response memuat 360 `values`, `encoding`, `frequency_hz`, `raw_doa_deg`,
+`source_timestamp_ms`, `source_age_ms`, `received_age_ms`, `flags`,
+`validation_reasons`, dan `stale`.
+
+Encoding mengikuti profile; bila Q16 tidak dapat merepresentasikan rentang tanpa clipping,
+Edge memakai U8. Keduanya terkuantisasi, bukan salinan lossless CSV. Gate LIVE pada
+`telemetry/angular` tetap mensyaratkan frame flags lengkap dan verifikasi Ground.
 
 ## Command envelope
 

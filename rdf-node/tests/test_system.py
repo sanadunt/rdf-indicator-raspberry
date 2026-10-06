@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest import mock
 from rdf_node.agent import Agent
 from rdf_node.ground import Ground
-from rdf_node.mqtt import Client
+from rdf_node.mqtt import Client,Message
 from rdf_node.config import load_config
 from rdf_node.api import Auth,Server,set_pin
 from rdf_node.util import now_ms,compact,atomic_write
@@ -119,6 +119,136 @@ class ApplicationTests(unittest.TestCase):
         older=dict(newer,q=3,source_timestamp_ms=timestamp+500)
         with self.assertRaises(ValueError):
             ground.receive(ground.prefix+'/telemetry/diagnostic/doa',compact(older))
+
+    def test_ground_keeps_diagnostic_angular_unverified_and_out_of_live_detection(self):
+        from rdf_node.codec import encode,split
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-diagnostic-angular')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd'
+        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test'}))
+        timestamp=now_ms()-30000
+        frame=encode([-10+i/100 for i in range(360)],sid=int(sid,16),seq=1,
+                     timestamp_ms=timestamp,frequency_hz=433920000,revision=None,
+                     flags=1,raw_doa=123.45,confidence=8.2)
+        for chunk in split(frame):
+            ground.receive(ground.prefix+'/telemetry/diagnostic/angular',chunk)
+        view=ground.diagnostic_angular_view()
+        self.assertEqual((view['source'],view['trust'],view['timestamp_ms']),('DOA_value.html','UNVERIFIED',timestamp))
+        self.assertEqual(len(view['values']),360)
+        self.assertAlmostEqual(view['values'][0],-10.0,places=2)
+        self.assertAlmostEqual(view['values'][-1],-6.41,places=2)
+        self.assertEqual(view['raw_doa_deg'],123.45)
+        self.assertTrue(view['stale']);self.assertIn('SOURCE_STALE',view['validation_reasons'])
+        self.assertIsNone(ground.angular_view())
+        self.assertFalse(ground.snapshot()['detection']['valid'])
+
+    def test_ground_diagnostic_angular_api_returns_candidate_values(self):
+        from rdf_node.codec import encode,split
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-angular-api')
+        cfg['api']['admin_hash_file']=str(self.path/'ground-api-auth.json');cfg['api']['port']=0
+        ground=Ground(cfg)
+        sid='12ab34cd'
+        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test'}))
+        timestamp=now_ms()
+        frame=encode([-10+i/100 for i in range(360)],sid=int(sid,16),seq=1,
+                     timestamp_ms=timestamp,frequency_hz=433920000,revision=None,flags=1)
+        for chunk in split(frame):
+            ground.receive(ground.prefix+'/telemetry/diagnostic/angular',chunk)
+        server=Server(ground,cfg,ground=True)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            conn=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=3)
+            conn.request('GET','/api/v2/angular/diagnostic/latest')
+            response=conn.getresponse();payload=json.loads(response.read());conn.close()
+            self.assertEqual(response.status,200)
+            self.assertEqual(payload['source_timestamp_ms'],timestamp)
+            self.assertEqual((payload['trust'],len(payload['values'])),('UNVERIFIED',360))
+            self.assertAlmostEqual(payload['values'][0],-10.0,places=2)
+        finally:
+            server.shutdown();server.server_close();thread.join(2);ground.journal.close()
+
+    def _run_agent_scheduler_once(self,agent,snapshot,queued_diagnostic=False):
+        offers=[]
+        control=Client(cfg={},client_id='scheduler-control')
+        bulk=Client(cfg={},client_id='scheduler-bulk')
+        control.ready=True;bulk.ready=True
+        agent.clients={'control':control,'bulk':bulk}
+        agent._generation=0;agent.stop_event.clear()
+        def offer(*args,**kwargs):
+            offers.append((args[0],args[1],args[2]));return True
+        def one_snapshot():
+            if queued_diagnostic:
+                control.outbox.offer(Message('diagnostic-angular','sdr/v2/test/telemetry/diagnostic/angular',
+                                             b'pending',0,False,3,3,time.monotonic()))
+            agent.stop_event.set()
+            return snapshot
+        agent._offer=offer;agent.snapshot=one_snapshot
+        agent._schedule()
+        return offers
+
+    def test_diagnostic_angular_waits_for_matching_source_snapshot(self):
+        agent=self.a;agent.profile='balanced';r=agent.source.record;snapshot=agent.snapshot()
+        self.assertEqual(snapshot['detection']['q'],r['q'])
+        snapshot['detection']['q']=r['q']-1
+        offers=self._run_agent_scheduler_once(agent,snapshot)
+        self.assertNotIn('diagnostic-angular',[item[0] for item in offers])
+
+    def test_control_profile_discards_inflight_diagnostic_angular_frame(self):
+        from rdf_node.codec import encode,split
+        agent=self.a;r=agent.source.record;snapshot=agent.snapshot()
+        frame=encode(r['values'],sid=int(agent.sid,16),seq=1,
+                     timestamp_ms=r['timestamp_ms'],frequency_hz=r['frequency_hz'],flags=1)
+        agent.profile='control'
+        agent.diagnostic_angular_parts=split(frame)
+        agent.diagnostic_angular_started=time.monotonic()
+        offers=self._run_agent_scheduler_once(agent,snapshot,queued_diagnostic=True)
+        self.assertNotIn('diagnostic-angular',[item[0] for item in offers])
+        self.assertEqual(agent.diagnostic_angular_parts,[])
+        self.assertEqual(agent.clients['control'].outbox.status()['depth'],0)
+
+    def test_diagnostic_angular_not_duplicated_when_live_bulk_is_available(self):
+        agent=self.a;agent.profile='balanced';agent.bulk_resume_after=0
+        snapshot=agent.snapshot();snapshot['link']['ground']['state']='RECEIVING'
+        offers=self._run_agent_scheduler_once(agent,snapshot)
+        self.assertNotIn('diagnostic-angular',[item[0] for item in offers])
+
+    def test_bulk_recovery_discards_queued_diagnostic_angular(self):
+        agent=self.a;agent.profile='balanced';agent.bulk_resume_after=0
+        snapshot=agent.snapshot();snapshot['link']['ground']['state']='RECEIVING'
+        self._run_agent_scheduler_once(agent,snapshot,queued_diagnostic=True)
+        self.assertEqual(agent.clients['control'].outbox.status()['depth'],0)
+
+    def test_diagnostic_angular_bypasses_bulk_receipt_gate(self):
+        agent=self.a;agent.profile='balanced';agent.bulk_resume_after=0
+        snapshot=agent.snapshot();snapshot['link']['ground']['state']='UNCONFIRMED'
+        offers=self._run_agent_scheduler_once(agent,snapshot)
+        self.assertIn('diagnostic-angular',[item[0] for item in offers])
+
+    def test_stopped_source_resets_valid_blocked_diagnostic_interval(self):
+        from rdf_node.codec import CHUNK,FLAG_DAQ,HEADER
+        agent=self.a;agent.profile='balanced';agent.bulk_resume_after=0
+        live=agent.snapshot();live['link']['ground']['state']='UNCONFIRMED'
+        self.assertTrue(live['detection']['valid']);self.assertTrue(live['daq']['healthy'])
+        stopped=copy.deepcopy(live)
+        stopped['detection']['valid']=False;stopped['daq']['healthy']=False
+        stopped['processing']['observed']='STOPPED'
+        control=Client(cfg={},client_id='scheduler-control');bulk=Client(cfg={},client_id='scheduler-bulk')
+        control.ready=True;bulk.ready=True;agent.clients={'control':control,'bulk':bulk}
+        agent._generation=0;agent.stop_event.clear()
+        offers=[];snapshots=[live]*7+[stopped]
+        def next_snapshot():
+            result=snapshots.pop(0)
+            if not snapshots:agent.stop_event.set()
+            return result
+        def offer(*args,**kwargs):
+            offers.append((args[0],args[1],args[2]));return True
+        agent.snapshot=next_snapshot;agent._offer=offer
+        agent._schedule()
+        diagnostic=[payload for key,topic,payload in offers if key=='diagnostic-angular']
+        frames=[(CHUNK.unpack_from(payload),HEADER.unpack_from(payload,12))
+                for payload in diagnostic if CHUNK.unpack_from(payload)[1]==2]
+        self.assertTrue(frames)
+        self.assertEqual(frames[0][1][3]&FLAG_DAQ,0)
 
     def test_ground_rejects_success_ack_for_shutdown_execution(self):
         cfg=load_config();cfg['state_dir']=str(self.path/'ground')
@@ -573,3 +703,42 @@ class EndToEndTests(unittest.TestCase):
                 self.assertFalse(broker.errors)
             finally:
                 stop.set();thread.join(2);agent.stop();ground.stop();broker.stop()
+
+    def test_stopped_angles_flow_as_diagnostic_without_ground_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp);initial=make_agent(path);cfg=initial.cfg;initial.journal.close()
+            timestamp=now_ms();bad_status=status(timestamp,idx=4);bad_status['daq_ok']=False
+            atomic_write(path/'share'/'status.json',compact(bad_status))
+            angle_record=record(timestamp);angle_record[-1]=50000
+            atomic_write(path/'share'/'DOA_value.html',csv_bytes(angle_record))
+            broker=Broker();creds=path/'mqtt.json'
+            creds.write_bytes(compact({'username':'test','password':'test-password'}))
+            cfg['mqtt'].update(enabled=True,host='127.0.0.1',port=broker.port,tls=False,allow_insecure_loopback=True,
+                               control_credentials_file=str(creds),bulk_credentials_file=str(creds))
+            agent=Agent(cfg);agent.monitor=FakeMonitor(cfg)
+            agent.monitor.data.update(service_state='INACTIVE',cgroup_empty=True)
+            agent.source.poll(force=True);agent._snapshot()
+            ground_cfg=copy.deepcopy(cfg);ground_cfg['state_dir']=str(path/'ground-stopped')
+            ground=Ground(ground_cfg);offer=ground.client.offer
+            def without_receipt(key,topic,payload,**kwargs):
+                if key=='receipt': return False
+                return offer(key,topic,payload,**kwargs)
+            ground.client.offer=without_receipt
+            agent.start();ground.start()
+            try:
+                self.assertTrue(wait(lambda:getattr(ground,'diagnostic_angular',None) is not None,10),
+                                [agent.snapshot(),ground.snapshot(),broker.errors])
+                diagnostic=ground.diagnostic_angular_view()
+                self.assertEqual(diagnostic['timestamp_ms'],timestamp)
+                self.assertEqual((len(diagnostic['values']),diagnostic['raw_doa_deg']),(360,10.0))
+                self.assertAlmostEqual(diagnostic['values'][0],-10.0,places=2)
+                self.assertEqual(diagnostic['encoding'],'u8')
+                self.assertAlmostEqual(diagnostic['values'][-1],50000.0,places=2)
+                self.assertEqual(diagnostic['trust'],'UNVERIFIED')
+                self.assertIn('DAQ_NOT_HEALTHY_AT_EDGE',diagnostic['validation_reasons'])
+                self.assertEqual(agent.receipt_view()['state'],'UNCONFIRMED')
+                self.assertFalse(ground.snapshot()['detection']['valid'])
+                self.assertIsNone(ground.angular_view())
+                self.assertFalse(broker.errors)
+            finally:
+                agent.stop();ground.stop();broker.stop()

@@ -4,7 +4,9 @@
 
 - Default setup to `rdfsdr.service` for SDR lifecycle controls when the unit is registered; Raspberry reboot and shutdown remain separately approved host actions.
 
-- Publish diagnostic `doa.xml` every 3 s while a sample is available to keep periodic Control traffic within the default byte budget alongside health and valid DoA. Show raw angle and XML frequency as `UNVERIFIED` on the Edge main panel when strict DoA is blocked. Ground keeps it separate from normal DoA, receipt, and command gates. Existing broker ACLs need the new Control-topic write permission.
+- Publish diagnostic `doa.xml` every 3 s when available, independent of normal DoA validity. Ground keeps it `UNVERIFIED`, separate from live DoA, receipts, and commands.
+
+- Send timestamped diagnostic angular candidates to Ground when the normal Bulk path is blocked: every 6 s when strict source validity fails, every 30 s when valid-source Bulk is paused, and no duplicate while normal Bulk flows. Candidates stay `UNVERIFIED`, separate from LIVE detection and receipt; profile `control` suppresses angular arrays.
 
 - Distinguish local API outage from stale cached data in both panels; add immediate manual retry while regular polling continues, without automatic service or SDR recovery.
 - Prevent duplicate shutdown scheduling per boot, retain unresolved outcomes across all journal pages/sessions, and add root-only systemd-evidence-checked local reconciliation.

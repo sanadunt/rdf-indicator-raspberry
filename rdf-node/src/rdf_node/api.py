@@ -143,6 +143,9 @@ class Handler(BaseHTTPRequestHandler):
                 if self.server.ground: return self.reply(200,app.angular_view())
                 r=app.source.record
                 return self.reply(200,{'q':r['q'],'timestamp_ms':r['timestamp_ms'],'values':r['values'],'live':snap.get('detection',{}).get('valid',False)} if r else None)
+            if p=='/api/v2/angular/diagnostic/latest':
+                if not self.server.ground: return self.reply(404,{'error':'NOT_FOUND'})
+                return self.reply(200,app.diagnostic_angular_view())
             if p=='/api/v2/healthz':
                 age=max(0,__import__('time').time()*1000-snap.get('snapshot_ms',0))
                 return self.reply(200 if age<5000 else 503,{'api':True,'snapshot_progress_age_ms':int(age),'daq_health_not_implied':True})

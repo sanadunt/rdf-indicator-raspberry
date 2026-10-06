@@ -17,7 +17,7 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
 
 - Collector file lokal `DOA_value.html` (CSV 377 field), `status.json`, dan subset aman settings.
 - Gate DAQ, kemajuan frame, freshness, konfigurasi, clock, dan verifikasi konvensi sudut.
-- Dua koneksi MQTT: control/health/DoA dan bulk angular; akun/ACL control dan bulk terpisah.
+- Dua koneksi MQTT: control/health/DoA dan diagnostic angular; bulk membawa angular normal. Akun/ACL control dan bulk terpisah.
 - Q16 360 titik, dua chunk; alternatif U8 tetap 360 titik. Bukan kurva buatan dari satu DoA.
 - Receipt dari backend Ground; MQTT CONNECTED tidak otomatis berarti Ground menerima data.
 - Panel **Utama | Link | Sistem | Config | Data**, logical viewport **480x320**, login PIN 6 digit dengan keypad layar sentuh.

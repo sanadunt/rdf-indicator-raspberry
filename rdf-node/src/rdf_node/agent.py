@@ -17,7 +17,7 @@ from .control import CommandManager, OPS
 from .helper import call_helper
 from .mqtt import Client
 from .mqtt_ws import validate_mqtt_host,validate_websocket_path
-from .codec import encode, split
+from .codec import encode, split, FLAG_PARSED, FLAG_FRESH, FLAG_DAQ, FLAG_CONVENTION, FLAG_CONFIG
 
 class Agent:
     def __init__(self,cfg,demo=False):
@@ -34,7 +34,7 @@ class Agent:
         self.receipt=None; self.receipt_progress=None; self.receipt_last_seen=None; self.receipt_rejects=0
         self.sent_health=deque(maxlen=120); self.sent_doa=deque(maxlen=120); self.sent_angular=deque(maxlen=30)
         self.hq=0; self.last_doa_q=0; self.last_angular_q=0; self.angular_parts=[]; self.angular_started=0
-        self.diagnostic_q=0
+        self.diagnostic_q=0; self.diagnostic_angular_q=0; self.diagnostic_angular_parts=[]; self.diagnostic_angular_started=0
         self.angular_q=0; self.angular_abort=0; self.bulk_reason='BOOTSTRAP'; self.helper_status={}
         self.clients={}; self._generation=-1; self.last_config_rev=None; self.last_sent_state=None
         self.mqtt_state_path=Path(cfg['state_dir'])/'mqtt-ui-settings.json'
@@ -368,21 +368,23 @@ class Agent:
                 'run':s.get('processing',{}).get('observed','UNKNOWN'),'daq':s.get('daq',{}).get('healthy',False),
                 'cfg':self.source.revision,'profile':self.profile,'clock':s.get('host',{}).get('clock_state','UNTRUSTED')}
     def _schedule(self):
-        due={}; last_bootstrap=0; parts_next=0
+        due={}; last_bootstrap=0; parts_next=0; diagnostic_parts_next=0
         while not self.stop_event.is_set():
             try:
                 self._apply_pending_mqtt()
                 s=self.snapshot(); now=time.monotonic(); ctrl=self.clients.get('control'); bulk=self.clients.get('bulk')
                 if not s or not ctrl or not ctrl.ready:
                     if self.angular_parts: self.angular_abort+=1
-                    self.angular_parts=[]; self.bulk_reason='MQTT_NOT_READY'
+                    if ctrl: ctrl.outbox.discard('diagnostic-angular','MQTT_NOT_READY')
+                    self.angular_parts=[]; self.diagnostic_angular_parts=[]; self.bulk_reason='MQTT_NOT_READY'
                     self.stop_event.wait(.1); continue
                 if ctrl.generation!=self._generation:
-                    self._generation=ctrl.generation; self.angular_parts=[]; self.request_config_report=True
+                    self._generation=ctrl.generation; self.angular_parts=[]; self.diagnostic_angular_parts=[]
+                    self.request_config_report=True
                     self.bulk_resume_after=now+self.cfg['telemetry']['resume_stable_seconds']
                     self._offer('available','availability',{'v':2,'sid':self.sid,'online':True,'t':now_ms()},1,True,priority=0)
                     self._offer('caps','capabilities',self.capabilities(),1,True,priority=3)
-                    due['state']=0
+                    due['state']=0; due['diagnostic-angular-invalid']=0; due['diagnostic-angular-blocked']=0
                 def tick(key,seconds):
                     if now>=due.get(key,0): due[key]=now+seconds; return True
                     return False
@@ -432,6 +434,49 @@ class Agent:
                 elif not bulk or not bulk.ready: reason='BULK_NOT_READY'
                 elif self.cfg['telemetry']['require_ground_receipt_for_bulk'] and s['link']['ground']['state']!='RECEIVING': reason='GROUND_RECEIPT_REQUIRED'
                 elif ctrl.pending_age_ms>500: reason='CONTROL_BACKLOG'
+                diagnostic_needed=reason is not None or now<self.bulk_resume_after
+                r=self.source.record
+                diagnostic_period=6 if not d['valid'] else 30
+                diagnostic_schedule='diagnostic-angular-invalid' if not d['valid'] else 'diagnostic-angular-blocked'
+                if (self.profile!='control' and diagnostic_needed and r and r['q']==d['q'] and
+                        not self.diagnostic_angular_parts and tick(diagnostic_schedule,diagnostic_period)):
+                    self.diagnostic_angular_q+=1
+                    if self.diagnostic_angular_q>0xffffffff:
+                        raise RuntimeError('DIAGNOSTIC_ANGULAR_SEQUENCE_EXHAUSTED_RESTART_AGENT')
+                    flags=FLAG_PARSED; utc=now_ms()
+                    if (h['clock_trusted'] and d['source_age_ms'] is not None and
+                            d['source_age_ms']<=self.cfg['freshness']['doa_ms'] and
+                            r['timestamp_ms']<=utc+1000):
+                        flags|=FLAG_FRESH
+                    if daq['healthy']: flags|=FLAG_DAQ
+                    if self.cfg['source']['angle_verified']: flags|=FLAG_CONVENTION
+                    if d['config_attributed']: flags|=FLAG_CONFIG
+                    encoding=PROFILES[self.profile]['encoding']
+                    encode_args=dict(sid=int(self.sid,16),seq=self.diagnostic_angular_q,
+                        timestamp_ms=r['timestamp_ms'],frequency_hz=r['frequency_hz'],
+                        revision=d['revision'] if d['config_attributed'] else None,
+                        vfo=self.cfg['source']['output_vfo'],flags=flags,
+                        raw_doa=r['raw_doa_deg'],confidence=r['confidence_native_db'])
+                    try: frame=encode(r['values'],encoding=encoding,**encode_args)
+                    except ValueError as e:
+                        if encoding!='q16' or str(e)!='Q16_RANGE_NO_CLIPPING': raise
+                        frame=encode(r['values'],encoding='u8',**encode_args)
+                    self.diagnostic_angular_parts=split(frame); self.diagnostic_angular_started=now
+                    diagnostic_parts_next=now
+                if self.profile=='control' or not diagnostic_needed:
+                    self.diagnostic_angular_parts=[]
+                    ctrl.outbox.discard('diagnostic-angular','DIAGNOSTIC_NOT_NEEDED')
+                elif self.diagnostic_angular_parts and now-self.diagnostic_angular_started>3:
+                    self.diagnostic_angular_parts=[]
+                    ctrl.outbox.discard('diagnostic-angular','DIAGNOSTIC_EXPIRED')
+                if (self.profile!='control' and diagnostic_needed and self.diagnostic_angular_parts and
+                        now>=diagnostic_parts_next and ctrl.outbox.status()['depth']==0 and ctrl.pending_age_ms==0):
+                    chunk=self.diagnostic_angular_parts.pop(0)
+                    if not self._offer('diagnostic-angular','telemetry/diagnostic/angular',chunk,
+                                       expiry=3,priority=3):
+                        self.diagnostic_angular_parts=[]
+                    else:
+                        diagnostic_parts_next=now+.3
                 if reason:
                     if self.angular_parts: self.angular_abort+=1
                     self.angular_parts=[]

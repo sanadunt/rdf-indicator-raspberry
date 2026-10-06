@@ -16,8 +16,9 @@ credential/certificate yang sudah ada diam-diam; backup terlebih dahulu saat mig
 ## ACL minimum
 
 Node control:
-- publish telemetry/doa, telemetry/diagnostic/doa, telemetry/health, telemetry/health/detail,
-  state, capabilities, availability, config/reported, ack/config, ack/operation milik node.
+- publish telemetry/doa, telemetry/diagnostic/doa, telemetry/diagnostic/angular,
+  telemetry/health, telemetry/health/detail, state, capabilities, availability,
+  config/reported, ack/config, ack/operation milik node.
 - subscribe cmd/# dan ground/receipt milik node sendiri.
 
 Node bulk:
@@ -35,10 +36,12 @@ Broker harus mempertahankan retained state, tetapi command/receipt/telemetry tid
 Subscription command memakai Retain Handling2 dan Retain As Published; live retained
 command tetap dapat dikenali kemudian ditolak. Jangan mengandalkan policy UI saja.
 
-Provisioner baru memberi Node Control hak tulis `telemetry/diagnostic/doa`. Pada broker
-yang sudah ada, tambahkan `topic write <prefix>/telemetry/diagnostic/doa` ke ACL user
-Node Control; Ground controller/viewer sudah subscribe `telemetry/#`. Jangan beri hak
-diagnostic itu ke Node Bulk.
+Provisioner memberi Node Control hak tulis `telemetry/diagnostic/doa` dan
+`telemetry/diagnostic/angular`. Pada broker yang sudah ada, tambahkan kedua aturan
+`topic write <prefix>/telemetry/diagnostic/doa` dan
+`topic write <prefix>/telemetry/diagnostic/angular` ke ACL user Node Control; Ground
+controller/viewer dengan `telemetry/#` sudah subscribe keduanya. Jangan beri hak diagnostic
+itu ke Node Bulk.
 
 ## Memakai broker existing
 
@@ -113,11 +116,11 @@ Setelah MQTT dikonfigurasi:
 2. Cek health receiver meningkat dan Ground receipt menjadi RECEIVING.
 3. Validasi output source lalu lihat DoA serta array360 pada receiver.
 4. Pastikan `telemetry/diagnostic/doa` berulang setiap 3 detik selama XML tersedia, termasuk saat sampel sama dan DoA normal valid; tetap `UNVERIFIED` serta tidak menambah `dq`. Saat gate normal memblokir, pastikan panel utama Edge menampilkan sudut raw dan frekuensi XML secara terpisah.
-5. Bandingkan peak/konvensi raw CSV dengan graph tanpa menambahkan abs/log transform.
-6. Putuskan radio sementara dengan jalur management aman, lihat stale/lost, reconnect
-   tanpa burst data lama; jangan reset SDR.
-7. Jalankan command config/read-only, lalu subset write yang sudah di-approve.
-8. Ukur actual PPP counters, capture MQTT/TCP terkontrol, latency dan loss >30menit.
-9. Cold boot kedua host, radio belum terpasang, kemudian radio hadir; periksa recovery.
+5. Saat `DOA_value.html` berisi record 360 sampel dan source validity gagal (misalnya service/DAQ berhenti), pastikan `telemetry/diagnostic/angular` tiba tiap 6 detik. Saat source valid tetapi Bulk terblokir, interval diagnostik 30 detik; saat Bulk normal mengalir, tidak ada duplikasi. Periksa timestamp sumber dan 360 values di `/api/v2/angular/diagnostic/latest`; kandidat tetap `UNVERIFIED`, tidak mengubah detection LIVE atau `aq`. Profile `control` sengaja tidak mengirim array diagnostik.
+6. Bandingkan peak/konvensi raw CSV dengan graph tanpa menambahkan abs/log transform.
+7. Putuskan radio sementara dengan jalur management aman, lihat stale/lost, reconnect tanpa burst data lama; jangan reset SDR.
+8. Jalankan command config/read-only, lalu subset write yang sudah di-approve.
+9. Ukur actual PPP counters, capture MQTT/TCP terkontrol, latency dan loss >30menit.
+10. Cold boot kedua host, radio belum terpasang, kemudian radio hadir; periksa recovery.
 
 Paket build diuji dengan broker fixture loopback, bukan uji Mosquitto/T900 nyata.
