@@ -1,5 +1,5 @@
 # MQTT dan Ground companion
-Ringkasan lengkap topic, payload, ACK, receipt, dan contoh Ground: [MQTT_TOPIC_SUMMARY.md](MQTT_TOPIC_SUMMARY.md).
+Ringkasan lengkap topic, payload, command, settings request, dan contoh Ground: [MQTT_TOPIC_SUMMARY.md](MQTT_TOPIC_SUMMARY.md).
 
 ## Pilihan yang paling mudah
 
@@ -18,23 +18,24 @@ credential/certificate yang sudah ada diam-diam; backup terlebih dahulu saat mig
 Node control:
 - publish telemetry/doa, telemetry/diagnostic/doa, telemetry/diagnostic/angular,
   telemetry/health, telemetry/health/detail, state, capabilities, availability,
-  config/reported, ack/config, ack/operation milik node.
-- subscribe cmd/# dan ground/receipt milik node sendiri.
+  settings/reported, ack/config, ack/operation milik node.
+- subscribe cmd/# milik node sendiri.
 
 Node bulk:
 - publish telemetry/angular saja; tidak memperoleh hak reboot/command.
 
 Ground controller:
-- subscribe operational topics/ACK milik node.
-- publish cmd/# dan ground/receipt milik node.
+- subscribe `telemetry/#`, `state`, `availability`, `settings/reported`, `capabilities`, and `ack/#`.
+- publish `cmd/#` milik node sendiri.
 
 Viewer:
-- subscribe saja; tidak mendapat credential controller.
+- subscribe `telemetry/#`, `state`, `availability`, `settings/reported`, `capabilities`, and `ack/#`.
+- tidak publish command dan tidak mendapat credential controller.
 
 Prefix `sdr/v2/uav-01` harus cocok di konfigurasi agent, receiver dan ACL.
-Broker harus mempertahankan retained state, tetapi command/receipt/telemetry tidak retained.
-Subscription command memakai Retain Handling2 dan Retain As Published; live retained
-command tetap dapat dikenali kemudian ditolak. Jangan mengandalkan policy UI saja.
+Broker harus mempertahankan retained state, capabilities, dan availability. Command, telemetry,
+dan `settings/reported` tidak retained. Subscription command memakai Retain Handling 2 dan
+Retain As Published; live retained command tetap dapat dikenali kemudian ditolak.
 
 Provisioner memberi Node Control hak tulis `telemetry/diagnostic/doa` dan
 `telemetry/diagnostic/angular`. Pada broker yang sudah ada, tambahkan kedua aturan
@@ -100,10 +101,12 @@ ACL saat subscribe/publish membuat error, bukan indikator hijau diam-diam.
 
 Maksimum satu outgoing PUBLISH aktif per koneksi. Local latest-value outbox tidak
 mengumpulkan history offline. New connection memakai clean start, sessionexpiry0,
-subscribe ulang, bootstrap state/config/capability lalu telemetry.
+subscribe ulang, bootstrap state/capability lalu telemetry. Edge tidak mengirim settings saat
+bootstrap; Ground meminta `settings/reported` hanya melalui `config.get`.
 
-Command QoS1 acknowledgement dari broker tidak sama dengan hasil tindakan. Local send
-completion QoS0 tidak membuktikan Ground menerima. Receipt adalah lapisan aplikasi.
+Command QoS 1 acknowledgement dari broker tidak sama dengan hasil tindakan. Local send completion
+QoS 0 tidak membuktikan Ground menerima. Edge tidak menerima konfirmasi aplikasi atas telemetry;
+PUBACK hanya membuktikan broker mengakui PUBLISH QoS 1.
 
 Bulk reset/reconnect tidak merestart control atau engine. Dua koneksi tetap berbagi TCP/IP/
 PPP/radio. Token bucket dan coalescing mengurangi burst, bukan menjamin latency RF.
@@ -112,13 +115,14 @@ Default pause setelah command/source/link issue dan resume20s stabil dipertahank
 ## Uji penerimaan nyata
 
 Setelah MQTT dikonfigurasi:
-1. Pastikan kedua client READY pada tab Link.
-2. Cek health receiver meningkat dan Ground receipt menjadi RECEIVING.
+1. Pastikan kedua client READY pada tab Link dan health receiver bertambah dengan DAQ yang benar.
+2. Gunakan `Refresh config` secara eksplisit. TLS harus aktif; pastikan `cmd/config/get` diikuti
+   `settings/reported` yang cocok dengan session dan request ID. Report tidak muncul otomatis.
 3. Validasi output source lalu lihat DoA serta satu PUBLISH `telemetry/angular` berformat JSON,
    dengan `encoding="json"` dan tepat 360 angka pada `values`.
-4. Jika authority/angle approval belum ada tetapi seluruh gate integritas data lulus, pastikan Edge tetap mengirim `telemetry/doa` (`ok=0`, RAW) dan `telemetry/angular` (flags parsial) pada topic normal. Ground menampilkan keduanya sebagai `UNVERIFIED`; detection tetap invalid dan receipt `dq`/`aq` tetap 0.
-5. Pastikan `telemetry/diagnostic/doa` berulang setiap 3 detik selama XML tersedia, termasuk saat sampel sama dan DoA normal valid; tetap `UNVERIFIED` serta tidak menambah `dq`. Saat gate normal memblokir, pastikan panel utama Edge menampilkan sudut raw dan frekuensi XML secara terpisah.
-6. Saat `DOA_value.html` berisi record 360 sampel dan gate integritas source gagal (misalnya service/DAQ berhenti atau source stale), pastikan `telemetry/diagnostic/angular` tiba. Interval 6 detik saat source tidak eligible dan 30 detik saat source eligible tetapi Bulk terblokir adalah minimum; ukuran JSON dan headroom Control dapat memperpanjangnya. Saat Bulk normal mengalir, tidak ada duplikasi. Periksa timestamp sumber dan 360 values di `/api/v2/angular/diagnostic/latest`; kandidat tetap `UNVERIFIED`, tidak mengubah detection LIVE atau `aq`. Profile `control` sengaja tidak mengirim array diagnostik.
+4. Jika authority/angle approval belum ada tetapi seluruh gate integritas data lulus, pastikan Edge tetap mengirim `telemetry/doa` (`ok=0`, RAW) dan `telemetry/angular` (flags parsial) pada topic normal. Ground menampilkan keduanya sebagai `UNVERIFIED`; detection tetap invalid.
+5. Pastikan `telemetry/diagnostic/doa` berulang setiap 3 detik selama XML tersedia, termasuk saat sampel sama dan DoA normal valid; data tetap `UNVERIFIED`. Saat gate normal memblokir, pastikan panel utama Edge menampilkan sudut raw dan frekuensi XML secara terpisah.
+6. Saat `DOA_value.html` berisi record 360 sampel dan gate integritas source gagal (misalnya service/DAQ berhenti atau source stale), pastikan `telemetry/diagnostic/angular` tiba. Interval 6 detik saat source tidak eligible dan 30 detik saat source eligible tetapi Bulk terblokir adalah minimum; ukuran JSON dan headroom Control dapat memperpanjangnya. Saat Bulk normal mengalir, tidak ada duplikasi. Periksa timestamp sumber dan 360 values di `/api/v2/angular/diagnostic/latest`; kandidat tetap `UNVERIFIED`, tidak mengubah detection LIVE. Profile `control` sengaja tidak mengirim array diagnostik.
 7. Putuskan radio sementara dengan jalur management aman, lihat stale/lost, reconnect tanpa burst data lama; jangan reset SDR.
 8. Jalankan command config/read-only, lalu subset write yang sudah di-approve.
 9. Ukur actual PPP counters, capture MQTT/TCP terkontrol, latency dan loss >30menit.

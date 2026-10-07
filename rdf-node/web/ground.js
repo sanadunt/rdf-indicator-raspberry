@@ -208,7 +208,7 @@ updatePppButton();
 function diagnosticTimestamp(ms){return Number.isSafeInteger(ms)?`${new Date(ms).toISOString()} (${ms} ms)`:'--';}
 function renderDiagnostic(d){
  if(!d?.available){$('diagnostic-state').textContent='Belum ada data diagnostik dari node.';$('diagnostic-angle').textContent='DoA raw: --';$('diagnostic-frequency').textContent='Frekuensi: --';$('diagnostic-source-time').textContent='TIME sumber: --';$('diagnostic-observed-time').textContent='Observasi Edge: --';$('diagnostic-age').textContent='Usia: --';$('diagnostic-reasons').textContent='Gate: --';return;}
- $('diagnostic-state').textContent=d.stale?`UNVERIFIED / STALE RECEIPT (${d.received_age_ms??'--'} ms)`:'UNVERIFIED / RECEIVED';
+ $('diagnostic-state').textContent=d.stale?`UNVERIFIED / STALE DATA (${d.received_age_ms??'--'} ms)`:'UNVERIFIED / RECEIVED';
  $('diagnostic-angle').textContent=`DoA raw: ${Number.isFinite(d.raw_doa_deg)?d.raw_doa_deg.toFixed(1):'--'}°`;
  $('diagnostic-frequency').textContent=`Frekuensi: ${Number.isFinite(d.frequency_mhz)?d.frequency_mhz.toFixed(3):'--'} MHz`;
  $('diagnostic-source-time').textContent=`TIME sumber: ${diagnosticTimestamp(d.source_timestamp_ms)}`;
@@ -236,8 +236,8 @@ const settingsFieldIds=['frequency','bandwidth','gain','squelch'];
 const settingsTerminalStages=new Set(['APPLIED','PERSISTED_UNVERIFIED','FAILED','REJECTED','EXPIRED','CONFLICT','CANCELLED','OUTCOME_UNKNOWN']);
 function renderSettings(config){
  const safe=config?.safe_settings&&typeof config.safe_settings==='object'&&!Array.isArray(config.safe_settings)?config.safe_settings:{};
- const report=JSON.stringify({revision:Number.isSafeInteger(config?.sdr_revision)?config.sdr_revision:null,edge_report_proof:config?.proof??config?.reported?.proof??'UNVERIFIED',safe_settings:safe},null,2);
- if($('settings-reported').textContent!==report)$('settings-reported').textContent=report;
+ const raw=typeof config?.settings_json==='string'?config.settings_json:'Belum meminta settings dari node. Tekan Refresh config.';
+ if($('settings-reported').textContent!==raw)$('settings-reported').textContent=raw;
  if(settingsAwaitingRevision!==null&&Number.isSafeInteger(config?.sdr_revision)&&config.sdr_revision>=settingsAwaitingRevision)settingsAwaitingRevision=null;
  const target=Object.entries(settingsTarget);
  if(settingsDirty&&!settingsPending&&target.length&&target.every(([key,value])=>safe[key]===value)){
@@ -523,11 +523,11 @@ async function poll(manual=false){
   renderDiagnostic(snapshot.diagnostic_doa);
   $('state').textContent=`${snapshot.mode} / ${snapshot.health_fresh?'HEALTH FRESH':'HEALTH STALE'} / MQTT ${snapshot.link?.mqtt_control?.state||'--'}`;
   $('angle').textContent=d.valid?`${d.relative_doa_deg.toFixed(1)}\u00b0`:'--';
-  $('metadata').textContent=`VFO ${d.frequency_hz?(d.frequency_hz/1e6).toFixed(3):'--'} MHz; PAPR ${d.confidence_native_db??'--'} dB; data umur terima ${d.receipt_age_ms??'--'} ms`;
+  $('metadata').textContent=`VFO ${d.frequency_hz?(d.frequency_hz/1e6).toFixed(3):'--'} MHz; PAPR ${d.confidence_native_db??'--'} dB; data diterima ${d.received_age_ms??'--'} ms`;
   $('health').textContent=JSON.stringify({health:snapshot.health,health_age_ms:snapshot.health_age_ms,config:snapshot.config,capabilities:snapshot.capabilities},null,2);
   try{
    const a=await get('/api/v2/angular/latest');plot(a);$('plot').classList.remove('stale');
-   $('curve').textContent=a?`${a.encoding.toUpperCase()} / 360 titik / age ${(a.source_age_ms/1000).toFixed(1)} s / ${a.stale?'STALE':'RECEIVED'} / axis native / peak ${a.peak_index} deg. Radius dinormalisasi untuk tampilan; nilai native tetap di API.`:'Belum ada kurva lengkap. Tunggu receipt + source gate + interval.';
+   $('curve').textContent=a?`${a.encoding.toUpperCase()} / 360 titik / age ${(a.source_age_ms/1000).toFixed(1)} s / ${a.stale?'STALE':'RECEIVED'} / axis native / peak ${a.peak_index} deg. Radius dinormalisasi untuk tampilan; nilai native tetap di API.`:'Belum ada kurva lengkap. Tunggu telemetry, source gate, dan interval.';
    apiStatus('');
   }catch(e){
    $('plot').classList.add('stale');$('curve').textContent='Grafik terakhir tetap ditampilkan sebagai STALE; data angular terbaru gagal dimuat.';

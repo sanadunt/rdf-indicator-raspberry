@@ -21,7 +21,7 @@ nav{grid-template-columns:repeat(5,1fr)}
 .data-page{padding:0 8px}
 .data-page .pagetitle{height:34px}
 .data-page .smallbtn{height:30px;min-height:30px;padding:2px 8px}
-.data-summary{height:44px;display:grid;grid-template-columns:1fr 1fr;gap:8px;border-bottom:1px solid var(--line)}
+.data-summary{height:44px;display:grid;grid-template-columns:1fr;gap:8px;border-bottom:1px solid var(--line)}
 .data-summary>div{min-width:0}
 .data-summary b{display:block;font-size:12px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .topic-heading{height:22px;display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--dim);white-space:nowrap;overflow:hidden}
@@ -94,3 +94,4 @@ nav{grid-template-columns:repeat(5,1fr)}
 .mqtt-numeric-keyboard .mqtt-keyboard-row{display:grid;grid-template-columns:repeat(3,44px);justify-content:center;gap:2px}
 .dialog input:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}
 .mqtt-key:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.linkstrip{grid-template-columns:repeat(2,minmax(0,1fr))}

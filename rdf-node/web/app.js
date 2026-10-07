@@ -3,7 +3,7 @@ const $=id=>document.getElementById(id);
 function readShutdownUncertainty(){try{return localStorage.getItem('rdf-node-edge-shutdown-uncertain')==='1';}catch{return false;}}
 function setShutdownUncertainty(value){shutdownUncertain=value;try{if(value)localStorage.setItem('rdf-node-edge-shutdown-uncertain','1');else localStorage.removeItem('rdf-node-edge-shutdown-uncertain');}catch{}}
 let snapshot={}, csrf=null, authenticated=false, lastSeq=null, lastProgress=0, lastApi=0, linkData=false, hostPage=false, lastTouch=Date.now(), lastAdminSessionRefresh=0, adminSessionRefreshPending=false, pinKeyHandler=null, modalReturnFocus=null, mqttKeyboardDismiss=null, pollPending=false, pollAgain=false, pollTimer=null, shutdownUncertain=readShutdownUncertainty(), shutdownHistoryChecked=false, shutdownHistoryAt=0, shutdownHistoryRequest=null;
-const good=['UP','CONNECTED','RECEIVING','HEALTHY','SYNCED','APPLIED','REPLY'];
+const good=['UP','CONNECTED','HEALTHY','SYNCED','APPLIED','REPLY'];
 const bad=['ERROR','LOST','DEGRADED','FAILED','UNAVAILABLE'];
 const ADMIN_SESSION_REFRESH_MS=20000, ADMIN_SESSION_ACTIVITY_MS=30000, ADMIN_SESSION_CHECK_MS=10000;
 const pppProbeNames={UNKNOWN:'BELUM DICEK',NO_INTERFACE:'TANPA INTERFACE',REPLY:'BALASAN',NO_REPLY:'TANPA BALASAN',ERROR:'ERROR PROBE'};
@@ -17,18 +17,17 @@ const mqttTopics=[
   ['availability','QoS 1 / retained','Online JSON: v,sid,online,t; offline LWT: v,sid,online,reason.'],
   ['capabilities','QoS 1 / retained','Payload: v,sid,boot,instance,version,mode,codecs,angle,native_axis,count,profiles,scope,helper_available,maintenance,remote_commands,config_patch,processing,restart,reboot,shutdown.'],
   ['state','QoS 1 / retained','Payload: v,sid,boot,instance,t,run,daq,cfg,profile,clock.'],
-  ['config/reported','QoS 1 / retained','Payload: v,sid,rev,t,proof,digest,effective (hanya safe settings, bukan full settings).'],
+  ['settings/reported','QoS 1 / non-retained / request-only','Payload: v,sid,boot,id,rev,t,settings_json; TLS wajib, maks. 8192 byte, expiry 30 dtk.'],
   ['telemetry/health','QoS 0 / ~1 dtk','Payload: v,sid,q,t,run,daq,drop,age,temp,clk,rev; run/DAQ/clock dikirim sebagai kode.'],
   ['telemetry/health/detail','QoS 0 / ~10 dtk','Payload: v,sid,t,usb,sync,cpu,mem,disk_free,throt,uv,tx,rx,adrop,parse.'],
   ['telemetry/doa','QoS 0','Payload: v,sid,q,t,f,a,c,p,rev,ok. f=Hz, a=DoA relatif, c=confidence dB, p=power dB.'],
-  ['telemetry/diagnostic/doa','QoS 0 / heartbeat tiap 3 dtk bila XML tersedia','Sampel doa.xml diulang meski tidak berubah; raw angle + source/observation timestamps; UNVERIFIED; bukan receipt.'],
+  ['telemetry/diagnostic/doa','QoS 0 / heartbeat tiap 3 dtk bila XML tersedia','Sampel doa.xml diulang meski tidak berubah; raw angle + source/observation timestamps; UNVERIFIED; bukan deteksi LIVE.'],
   ['telemetry/angular','QoS 0 / JSON','Satu object per pesan, metadata dan tepat 360 nilai source. Flags 63 untuk LIVE; flags parsial untuk UNVERIFIED. Bukan raw IQ.'],
   ['ack/config','QoS 1','Payload ACK: v,sid,id,status,t,rev,result.'],
   ['ack/operation','QoS 1','Payload ACK: v,sid,id,status,t,rev,result.']
  ],true],
  ['MASUK / GROUND -> RASPBERRY',[
-  ['ground/receipt','QoS 0','Konfirmasi hq/dq/aq dan revision; retained tidak diterima sebagai bukti.'],
-  ['cmd/config/get','QoS 1','Permintaan safe config view.'],
+  ['cmd/config/get','QoS 1','Minta file settings asli; balasan settings/reported hanya via TLS.'],
   ['cmd/config/patch','QoS 1','Perubahan config yang hanya diterima bila policy mengizinkan.'],
   ['cmd/processing/set','QoS 1','Intent start/stop RDF bila diaktifkan lokal.'],
   ['cmd/service/restart','QoS 1','Restart stack yang disetujui lokal.'],
@@ -49,7 +48,7 @@ function renderTopicList(){
   if(outbound){
    const table=document.createElement('table');table.className='topic-table';
    const caption=document.createElement('caption');caption.className='sr-only';
-   caption.textContent='Topik keluar dari Raspberry ke Ground. QoS 0 berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker, bukan receipt Ground.';
+   caption.textContent='Topik keluar dari Raspberry ke Ground. QoS 0 berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker, bukan konfirmasi pemrosesan Ground.';
    const thead=document.createElement('thead'),header=document.createElement('tr');
    for(const text of ['Topik','QoS','Payload','Status kirim']){
     const th=document.createElement('th');th.scope='col';th.textContent=text;header.append(th);
@@ -113,26 +112,24 @@ function updateTopicStatuses(statuses){
  for(const [suffix,entry] of topicStatusCells)setTopicDelivery(entry,statuses?.[suffix]);
 }
 function renderData(s){
- const l=s.link||{},g=l.ground||{};
+ const l=s.link||{};
  const control=l.mqtt_control||{},bulk=l.mqtt_bulk||{};
  const states=[control.state||'DISABLED',bulk.state||'DISABLED'];
  const state=states.includes('ERROR')?'ERROR':states.every(value=>value==='CONNECTED')?'CONNECTED':states.every(value=>value==='DISABLED')?'':'CONNECTING';
  label('mqttclients',`${control.state||'DISABLED'} / ${bulk.state||'DISABLED'}`,state);
- label('mqttreceipt',g.state==='RECEIVING'?age(g.age_ms):g.state||'UNCONFIRMED',g.state);
  if($('mqttsettings'))$('mqttsettings').textContent=authenticated?'Atur':'Login';
  const node=s.node_id||'--',prefix=`${s.mode==='DEMO'?'sdr/demo/v2':'sdr/v2'}/${node}/`;
  if(prefix!==renderedTopicPrefix){renderedTopicPrefix=prefix;$('topicprefix').textContent=prefix;renderTopicList();}
  updateTopicStatuses(l.mqtt_topic_delivery||{});
 }
 function render(s){
- const d=s.detection||{},l=s.link||{},h=s.host||{},q=s.daq||{},c=s.config||{},g=l.ground||{},p=s.processing||{};
+ const d=s.detection||{},l=s.link||{},h=s.host||{},q=s.daq||{},c=s.config||{},p=s.processing||{};
  const diag=s.diagnostic_doa||{},showDiagnostic=!d.valid&&diag.available;
  const diagnosticReason=Array.isArray(diag.validation_reasons)&&diag.validation_reasons.find(reason=>reason!=='DIAGNOSTIC_UNVERIFIED')||'UNVERIFIED';
  $('mode').textContent=s.mode==='DEMO'?'DEMO':'';
  const names={RUNNING:'RDF BERJALAN',STOPPED:'RDF BERHENTI',STARTING:'MEMULAI RDF',STOPPING:'MENGHENTIKAN',ERROR:'RDF ERROR',UNKNOWN:'RDF UNKNOWN'};
  label('run',names[p.observed]||'MENUNGGU',p.observed==='RUNNING'?'HEALTHY':p.observed);
  label('ppp',l.ppp||'--',l.ppp);label('mqtt',l.mqtt_control?.state||'DISABLED',l.mqtt_control?.state);
- label('ground',g.state==='RECEIVING'?age(g.age_ms):g.state==='UNCONFIRMED'?'BELUM TERBUKTI':g.state||'--',g.state);
  $('angle-label').textContent=showDiagnostic?'DOA RAW / UNVERIFIED':'ARAH RELATIF';
  $('angle').textContent=showDiagnostic?`${fmt(diag.raw_doa_deg)}\u00b0`:d.valid?`${fmt(d.relative_doa_deg)}\u00b0`:'--';
  $('angle').className=showDiagnostic?'warn':d.valid?'good':'neutral';
@@ -141,14 +138,13 @@ function render(s){
  $('freq').textContent=showDiagnostic?`${fmt(diag.frequency_mhz,3)} MHz`:d.frequency_hz?`${fmt(d.frequency_hz/1e6,3)} MHz`:'-- MHz';
  $('quality').textContent=showDiagnostic?`Gate: ${diagnosticReason}`:`PAPR ${fmt(d.confidence_native_db,2)} dB / P ${fmt(d.power_native_db)} dB`;
  label('daq',q.state==='HEALTHY'?'SINKRON':q.state||'UNKNOWN',q.state);
- const syncnames={SYNCED:'SAMA',REPORTED_SAME:'REPORT SAMA',UNVERIFIED:'BELUM TERVERIFIKASI',PENDING:'BELUM SAMA',LAST_KNOWN:'TERAKHIR SAMA'};
- label('sync',`${syncnames[c.ground_sync]||'UNVERIFIED'}${c.sdr_revision?` r${c.sdr_revision}`:''}`,c.ground_sync);
+ label('sync',c.sdr_revision==null?'--':`r${c.sdr_revision}`,'');
  const op=s.last_operation;$('command').textContent=op?`${op.op} / ${op.stage}`:'Belum ada operasi';
  const alerts=s.active_alerts||[];const a=alerts.find(x=>x.severity==='error')||alerts[0];
  $('alert').textContent=a?a.text:'Status lokal normal';$('alertbox').className=`alert ${a?(a.severity==='error'?'bad':'warn'):'good'}`;
  $('alerticon').textContent=a?'!':'\u2713';$('temp').textContent=`${fmt(h.temperature_c)}\u00b0C`;
- if(!linkData){rows('linkrows',[["T900 USB",l.usb],["PPP / interface",`${l.ppp||'--'} / ${l.interface||'--'}`],[`Ping ${l.ppp_peer||'peer'}`,pppProbeNames[l.ppp_probe]||'BELUM DICEK',l.ppp_probe],["MQTT CTRL / BULK",`${l.mqtt_control?.state||'--'} / ${l.mqtt_bulk?.state||'--'}`],["Ground backend",`${g.state||'--'} / ${age(g.age_ms)}`,g.state],["TX / RX (PPP/IP)",`${fmt(l.tx_kbit_s,2)} / ${fmt(l.rx_kbit_s,2)} kbit/s`]]);}
- else rows('linkrows',[["Profil diminta",l.profile],["Grafik pause",l.bulk_pause||'STREAMING'],["Queue CTRL / BULK",`${l.mqtt_control?.depth||0} / ${l.mqtt_bulk?.depth||0}`],["Receipt hq / aq",`${g.last?.hq??'--'} / ${g.last?.aq??'--'}`],["Parse / angular drop",`${d.parse_errors||0} / ${l.angular_aborted||0}`]]);
+ if(!linkData){rows('linkrows',[["T900 USB",l.usb],["PPP / interface",`${l.ppp||'--'} / ${l.interface||'--'}`],[`Ping ${l.ppp_peer||'peer'}`,pppProbeNames[l.ppp_probe]||'BELUM DICEK',l.ppp_probe],["MQTT CTRL / BULK",`${l.mqtt_control?.state||'--'} / ${l.mqtt_bulk?.state||'--'}`],["TX / RX (PPP/IP)",`${fmt(l.tx_kbit_s,2)} / ${fmt(l.rx_kbit_s,2)} kbit/s`]]);}
+ else rows('linkrows',[["Profil diminta",l.profile],["Grafik pause",l.bulk_pause||'STREAMING'],["Queue CTRL / BULK",`${l.mqtt_control?.depth||0} / ${l.mqtt_bulk?.depth||0}`],["Parse / angular drop",`${d.parse_errors||0} / ${l.angular_aborted||0}`]]);
  const syn=q.sync||{};
  if(!hostPage) rows('sysrows',[["Engine / desired",`${p.observed||'--'} / ${p.desired||'BELUM DIAMBIL'}`],["Frame / Delay / IQ",`${syn.frame??'?'} / ${syn.sample_delay??'?'} / ${syn.iq??'?'}`],["Frame / progress",`${q.frame_index??'--'} / ${q.frame_progressing?'MAJU':'BELUM'}`],["Drop total / delta",`${q.dropped_frames??'--'} / ${q.drop_delta??'--'}`],["DAQ umur / USB SDR",`${age(q.source_age_ms)} / ${h.usb_count??'--'} terdeteksi`]]);
  else rows('sysrows',[["CPU / RAM",`${fmt(h.cpu_percent)}% / ${fmt(h.memory_percent)}%`],["Suhu / disk kosong",`${fmt(h.temperature_c)} C / ${fmt(h.disk_free_percent)}%`],["Throttle / under-voltage",`${h.throttled??'unknown'} / ${h.undervoltage??'unknown'}`],["Uptime",h.uptime_s==null?'--':`${Math.floor(h.uptime_s/60)} menit`],["Jam sistem",h.clock_state,h.clock_state]]);
@@ -360,7 +356,7 @@ async function openMqttSettings(){
    bulk:{username:bulkUser.value,password:bulkPassword.value}
   });
   controlUser.value='';controlPassword.value='';bulkUser.value='';bulkPassword.value='';
-  $('modalmsg').textContent=saved.apply_pending?'Tersimpan; koneksi MQTT diperbarui. Ground receipt harus terbukti lagi.':'Tersimpan.';
+  $('modalmsg').textContent=saved.apply_pending?'Tersimpan; koneksi MQTT diperbarui. Tunggu telemetry dan source evidence yang baru.':'Tersimpan.';
   renderData(snapshot);
  });
  const entries=[
@@ -546,7 +542,6 @@ $('controlbtn').onclick=()=>{if(needLogin())return;const box=modal('Kontrol RDF'
  action(box,'Restart SDR service',()=>confirmOperation('RESTART SDR SERVICE','service.restart',{}),true).disabled=!caps.restart;
  const row=document.createElement('div');box.append(row);
  action(row,'Frekuensi',()=>frequency()).disabled=!caps.config_patch;
- action(row,'Refresh config',()=>command('config.get'));
   action(row,'Reboot Raspberry',()=>prepareReboot(),true).disabled=!caps.reboot;
   const shutdown=action(row,'Shutdown Raspberry',()=>prepareShutdown(),true);
   shutdown.disabled=!caps.shutdown||!shutdownHistoryChecked;

@@ -41,8 +41,6 @@ freshness:
   source_status_ms: 3000
   doa_ms: 2500
   frame_progress_ms: 5000
-  receipt_warn_ms: 10000
-  receipt_lost_ms: 15000
 control:
   config_patch_enabled: false
   processing_enabled: false

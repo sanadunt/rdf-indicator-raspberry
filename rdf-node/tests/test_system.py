@@ -56,17 +56,72 @@ class ApplicationTests(unittest.TestCase):
                          ('ERROR','MQTT_DISCONNECTED',0))
         self.assertEqual(delivery['confirmation'],'SOCKET_WRITE')
         self.assertIsNone(delivery['sent_ms'])
-    def test_receipt_unknown_session_rejected(self):
-        self.a.sent_health.append(1);self.a.accept_receipt({'v':2,'sid':'00000000','hq':1});self.assertEqual(self.a.receipt_rejects,1)
-    def test_receipt_unsent_sequence_rejected(self):
-        self.a.accept_receipt({'v':2,'sid':self.a.sid,'hq':1});self.assertEqual(self.a.receipt_view()['state'],'UNCONFIRMED')
-    def test_duplicate_receipt_does_not_refresh_progress(self):
-        self.a.sent_health.append(1);r={'v':2,'sid':self.a.sid,'hq':1};self.a.accept_receipt(r);n=self.a.receipt_progress
-        time.sleep(.005);self.a.accept_receipt(r);self.assertEqual(n,self.a.receipt_progress)
-    def test_receipt_during_stopped_engine_uses_health(self):
-        self.a.monitor.data['service_state']='INACTIVE';self.a.sent_health.append(4)
-        self.a.accept_receipt({'v':2,'sid':self.a.sid,'hq':4,'dq':0,'aq':0});self.assertEqual(self.a.receipt_view()['state'],'RECEIVING')
-    def test_read_only_query_works(self):self.assertEqual(self.a.commands.submit(self.request(),'local-admin')['stage'],'APPLIED')
+    def test_config_get_returns_raw_settings_once_without_auto_report(self):
+        agent=self.a
+        raw=b' \n'+compact(settings())+b'\n'
+        (agent.source.path/'settings.json').write_bytes(raw);agent.source.poll(force=True)
+        messages=[]
+        control=Client(cfg={},client_id='settings-capture-control');bulk=Client(cfg={},client_id='settings-capture-bulk')
+        control.ready=True;bulk.ready=True
+        def capture(key,topic,payload,**options):messages.append((key,topic,payload,options));return True
+        control.offer=capture;bulk.offer=capture;agent.clients={'control':control,'bulk':bulk};agent._generation=-1
+        snapshot=agent.snapshot();real_snapshot=agent.snapshot
+        def run_once():
+            agent.stop_event.clear()
+            def one_snapshot():
+                agent.stop_event.set()
+                return snapshot
+            agent.snapshot=one_snapshot;agent._schedule();agent.snapshot=real_snapshot
+        run_once()
+        self.assertFalse(any(topic.endswith(('config/reported','settings/reported')) for _,topic,_,_ in messages))
+        result=agent.commands.submit(self.request(),'ground-controller',topic=agent.prefix+'/cmd/config/get')
+        self.assertEqual(result['stage'],'APPLIED')
+        messages.clear();run_once()
+        response=next((item for item in messages if item[1].endswith('/settings/reported')),None)
+        self.assertIsNotNone(response)
+        _,_,payload,options=response
+        payload=json.loads(payload)
+        self.assertEqual(payload['settings_json'],raw.decode('utf-8'))
+        self.assertEqual((payload['v'],payload['sid'],payload['boot'],payload['id'],payload['rev']),
+                         (2,agent.sid,agent.boot,result['id'],agent.source.revision))
+        self.assertEqual((options['qos'],options['retain'],options['expiry']),(1,False,30))
+        messages.clear();control.generation+=1;run_once()
+        self.assertFalse(any(topic.endswith(('config/reported','settings/reported')) for _,topic,_,_ in messages))
+
+    def test_local_config_get_cannot_queue_unmatched_settings_response(self):
+        result=self.a.commands.submit(self.request(),'local-admin')
+        self.assertEqual(result['stage'],'REJECTED')
+        self.assertEqual(result['result']['error'],'SETTINGS_REQUEST_GROUND_ONLY')
+        self.assertIsNone(getattr(self.a,'settings_request_id',None))
+
+    def test_config_get_rejects_unavailable_tls_or_oversized_settings(self):
+        agent=self.a
+        cases=(
+            ('tls', 'TLS_REQUIRED_FOR_SETTINGS_REPORT'),
+            ('unavailable', 'SETTINGS_UNAVAILABLE'),
+            ('stale', 'SETTINGS_STALE'),
+            ('oversized', 'SETTINGS_REPORT_TOO_LARGE'),
+        )
+        for case,error in cases:
+            agent.cfg['mqtt']['tls']=True;agent.source.config_error=None
+            agent.source.raw_settings=compact(settings())
+            agent.source.settings_seen=time.monotonic()
+            if case=='tls':agent.cfg['mqtt']['tls']=False
+            elif case=='unavailable':
+                agent.source.raw_settings=None;agent.source.config_error='OSError:SETTINGS_UNAVAILABLE'
+            elif case=='stale':agent.source.settings_seen-=4
+            elif case=='oversized':
+                raw=b' '*9000+compact(settings())
+                (agent.source.path/'settings.json').write_bytes(raw);agent.source.poll(force=True)
+            agent.commands.last_rate.clear()
+            result=agent.commands.submit(self.request(),'ground-controller',topic=agent.prefix+'/cmd/config/get')
+            self.assertEqual(result['stage'],'REJECTED',case)
+            self.assertEqual(result['result']['error'],error,case)
+        self.assertIsNone(getattr(agent,'settings_request_id',None))
+
+    def test_read_only_query_works(self):
+        self.assertEqual(self.a.commands.submit(
+            self.request('operation.get',target_id='missing'),'local-admin')['stage'],'APPLIED')
     def test_retained_command_rejected(self):self.assertEqual(self.a.commands.submit(self.request(),'ground',retained=True)['stage'],'REJECTED')
     def test_command_topic_mismatch(self):self.assertEqual(self.a.commands.submit(self.request(),'ground',topic=self.a.prefix+'/cmd/service/restart')['stage'],'REJECTED')
     def test_stale_session_rejected(self):
@@ -130,9 +185,7 @@ class ApplicationTests(unittest.TestCase):
         cfg=load_config();cfg['state_dir']=str(self.path/'ground-unverified-doa')
         ground=Ground(cfg);self.addCleanup(ground.journal.close)
         sid='12ab34cd';timestamp=now_ms()
-        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test'}))
-        ground.receive(ground.prefix+'/config/reported',compact(
-            {'v':2,'sid':sid,'rev':7,'t':timestamp,'proof':'test','effective':{}}))
+        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test','cfg':7}))
         ground.receive(ground.prefix+'/telemetry/health',compact(
             {'v':2,'sid':sid,'q':1,'t':timestamp,'run':1,'daq':1,'drop':0,'age':0,'temp':None,'clk':1,'rev':7}))
         sample={'v':2,'sid':sid,'q':1,'t':timestamp,'f':433920000,'a':10.0,'c':8.27,'p':-90.17,'rev':7,
@@ -155,9 +208,7 @@ class ApplicationTests(unittest.TestCase):
         cfg=load_config();cfg['state_dir']=str(self.path/'ground-json-angular')
         ground=Ground(cfg);self.addCleanup(ground.journal.close)
         sid='12ab34cd';timestamp=now_ms();values=[-10+i/100 for i in range(360)]
-        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test'}))
-        ground.receive(ground.prefix+'/config/reported',compact(
-            {'v':2,'sid':sid,'rev':7,'t':timestamp,'proof':'test','effective':{}}))
+        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test','cfg':8}))
         ground.receive(ground.prefix+'/telemetry/health',compact(
             {'v':2,'sid':sid,'q':1,'t':timestamp,'run':1,'daq':1,'drop':0,'age':0,'temp':None,'clk':1,'rev':7}))
         payload={'v':2,'encoding':'json','sid':sid,'q':1,'timestamp_ms':timestamp,
@@ -169,13 +220,75 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(view['encoding'],'json')
         self.assertEqual(view['peak_index'],359)
 
+    def test_live_doa_accepts_revision_mismatch_with_valid_evidence(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-live-doa-revision')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd';timestamp=now_ms()
+        ground.receive(ground.prefix+'/state',compact(
+            {'v':2,'sid':sid,'boot':'boot-test','instance':'test','cfg':8}))
+        ground.receive(ground.prefix+'/telemetry/health',compact(
+            {'v':2,'sid':sid,'q':1,'t':timestamp,'run':1,'daq':1,'drop':0,'age':0,'temp':None,'clk':1,'rev':8}))
+        payload={'v':2,'sid':sid,'q':1,'t':timestamp,'f':433920000,'a':10.0,'c':8.27,'p':-90.17,'rev':7,'ok':1}
+        ground.receive(ground.prefix+'/telemetry/doa',compact(payload))
+        self.assertEqual(ground.doa['rev'],7)
+        self.assertTrue(ground.snapshot()['detection']['valid'])
+
+    def test_angular_live_accepts_revision_mismatch_and_keeps_other_gates(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-live-angular-revision')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd';timestamp=now_ms()
+        ground.receive(ground.prefix+'/state',compact(
+            {'v':2,'sid':sid,'boot':'boot-test','instance':'test','cfg':8}))
+        ground.receive(ground.prefix+'/telemetry/health',compact(
+            {'v':2,'sid':sid,'q':1,'t':timestamp,'run':1,'daq':1,'drop':0,'age':0,'temp':None,'clk':1,'rev':8}))
+        payload=angular_payload(sid,1,timestamp,7,63)
+        ground.receive(ground.prefix+'/telemetry/angular',compact(payload))
+        self.assertEqual(ground.angular_view()['revision'],7)
+        self.assertFalse(ground.angular_view()['stale'])
+        with self.assertRaises(ValueError):
+            ground.receive(ground.prefix+'/telemetry/angular',compact(dict(payload,q=2,sid='98ab76cd')))
+        ground.health_seen=time.monotonic()-9
+        with self.assertRaisesRegex(ValueError,'ANGULAR_WITHOUT_HEALTH'):
+            ground.receive(ground.prefix+'/telemetry/angular',compact(dict(payload,q=3)))
+        with self.assertRaisesRegex(ValueError,'ANGULAR_EVIDENCE_INCOMPLETE'):
+            ground.receive(ground.prefix+'/telemetry/angular',compact(dict(payload,q=4,flags=7)))
+        self.assertEqual(ground.angular_view()['q'],1)
+
+    def test_settings_report_requires_current_request_session_and_boot(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-settings-report')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd';boot='boot-current';request_id='settings-request-1';timestamp=now_ms()
+        ground.receive(ground.prefix+'/state',compact(
+            {'v':2,'sid':sid,'boot':boot,'instance':'test','cfg':7}))
+        ground.settings_request_id=request_id
+        raw=compact(settings()).decode('utf-8')
+        report={'v':2,'sid':sid,'boot':boot,'id':request_id,'rev':7,'t':timestamp,'settings_json':raw}
+        for changes in ({'sid':'98ab76cd'},{'boot':'boot-old'},{'id':'other-request'}):
+            with self.assertRaises(ValueError):
+                ground.receive(ground.prefix+'/settings/reported',compact({**report,**changes}))
+            self.assertEqual(ground.settings_request_id,request_id)
+            self.assertIsNone(ground.config_view().get('settings_json'))
+        with self.assertRaisesRegex(ValueError,'SOURCE_TIMESTAMP_NOT_FRESH'):
+            ground.receive(ground.prefix+'/settings/reported',
+                           compact({**report,'t':timestamp-30001}))
+        with self.assertRaisesRegex(ValueError,'RETAINED_SETTINGS_REPORT'):
+            ground.receive(ground.prefix+'/settings/reported',compact(report),retained=True)
+        ground.receive(ground.prefix+'/settings/reported',compact(report))
+        view=ground.config_view()
+        self.assertEqual(view['settings_json'],raw)
+        self.assertEqual(view['safe_settings']['center_frequency_hz'],433920000)
+        self.assertIsNone(ground.settings_request_id)
+        ground.receive(ground.prefix+'/state',compact(
+            {'v':2,'sid':sid,'boot':boot,'instance':'test','cfg':8}))
+        view=ground.config_view()
+        self.assertEqual(view['settings_json'],raw)
+        self.assertEqual(view['safe_settings'],{})
+
     def test_ground_routes_json_angular_without_authority_to_diagnostics(self):
         cfg=load_config();cfg['state_dir']=str(self.path/'ground-unverified-angular')
         ground=Ground(cfg);self.addCleanup(ground.journal.close)
         sid='12ab34cd';timestamp=now_ms()
-        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test'}))
-        ground.receive(ground.prefix+'/config/reported',compact(
-            {'v':2,'sid':sid,'rev':7,'t':timestamp,'proof':'test','effective':{}}))
+        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test','cfg':7}))
         ground.receive(ground.prefix+'/telemetry/health',compact(
             {'v':2,'sid':sid,'q':1,'t':timestamp,'run':1,'daq':1,'drop':0,'age':0,'temp':None,'clk':1,'rev':7}))
         payload={'v':2,'encoding':'json','sid':sid,'q':1,'timestamp_ms':timestamp,
@@ -291,20 +404,20 @@ class ApplicationTests(unittest.TestCase):
 
     def test_diagnostic_angular_not_duplicated_when_live_bulk_is_available(self):
         agent=self.a;agent.profile='balanced';agent.bulk_resume_after=0
-        snapshot=agent.snapshot();snapshot['link']['ground']['state']='RECEIVING'
+        snapshot=agent.snapshot()
         offers=self._run_agent_scheduler_once(agent,snapshot)
         self.assertNotIn('diagnostic-angular',[item[0] for item in offers])
 
     def test_bulk_recovery_discards_queued_diagnostic_angular(self):
         agent=self.a;agent.profile='balanced';agent.bulk_resume_after=0
-        snapshot=agent.snapshot();snapshot['link']['ground']['state']='RECEIVING'
+        snapshot=agent.snapshot()
         self._run_agent_scheduler_once(agent,snapshot,queued_diagnostic=True)
         self.assertEqual(agent.clients['control'].outbox.status()['depth'],0)
 
-    def test_live_bulk_ignores_legacy_ground_receipt_gate(self):
+    def test_live_bulk_does_not_require_ground_receipt(self):
         agent=self.a;agent.profile='balanced';agent.bulk_resume_after=0
-        agent.cfg['telemetry']['require_ground_receipt_for_bulk']=True
-        snapshot=agent.snapshot();snapshot['link']['ground']['state']='UNCONFIRMED'
+        snapshot=agent.snapshot()
+        self.assertNotIn('ground',snapshot['link'])
         offers=self._run_agent_scheduler_once(agent,snapshot)
         keys=[item[0] for item in offers]
         self.assertIn('angular',keys)
@@ -312,7 +425,7 @@ class ApplicationTests(unittest.TestCase):
 
     def test_stopped_source_resets_valid_blocked_diagnostic_interval(self):
         agent=self.a;agent.profile='balanced';agent.bulk_resume_after=0
-        live=agent.snapshot();live['link']['ground']['state']='UNCONFIRMED'
+        live=agent.snapshot()
         self.assertTrue(live['detection']['valid']);self.assertTrue(live['daq']['healthy'])
         stopped=copy.deepcopy(live)
         stopped['detection']['valid']=False;stopped['daq']['healthy']=False
@@ -417,7 +530,7 @@ class ApplicationTests(unittest.TestCase):
         result=ground.submit_command({'id':'invalid id','op':'system.shutdown.prepare','base_rev':7})
         self.assertEqual(result['error'],'INVALID_COMMAND_ID')
     def test_idempotent_query_does_not_redo(self):
-        r=self.request();self.a.commands.submit(r,'local-admin');old=self.a.journal.lookup(r['id'])
+        r=self.request('operation.get',target_id='missing');self.a.commands.submit(r,'local-admin');old=self.a.journal.lookup(r['id'])
         self.a.commands.submit(r,'local-admin');self.assertEqual(old['updated_ms'],self.a.journal.lookup(r['id'])['updated_ms'])
     def test_public_operation_hides_challenge(self):
         r=self.request('system.reboot.prepare');self.a.journal.accept(r,'test');self.a.journal.update(r['id'],'APPLIED',{'challenge':'private-fixture'})
@@ -442,7 +555,7 @@ class ApplicationTests(unittest.TestCase):
         with mock.patch.object(c,'_run') as run:
             c.reconcile_intent();run.assert_called_once_with(['/usr/bin/systemctl','--no-block','stop','approved-test.service'])
 
-    def test_live_mqtt_reconfiguration_invalidates_old_ground_receipt(self):
+    def test_live_mqtt_reconfiguration_applies_new_transport(self):
         broker=Broker();self.addCleanup(broker.stop)
         credentials=self.path/'mqtt.json';credentials.write_bytes(compact({'username':'test','password':'test-password'}))
         self.a.journal.close();cfg=self.a.cfg
@@ -450,16 +563,12 @@ class ApplicationTests(unittest.TestCase):
                            control_credentials_file=str(credentials),bulk_credentials_file=str(credentials))
         agent=Agent(cfg);agent.monitor=FakeMonitor(cfg);self.addCleanup(agent.stop);agent.start()
         self.assertTrue(wait(lambda:len(broker.clients)==2,8),broker.errors)
-        with agent.lock: agent.sent_health.append(0xfffffffe)
-        agent.accept_receipt({'v':2,'sid':agent.sid,'hq':0xfffffffe})
-        self.assertEqual(agent.receipt_view()['state'],'RECEIVING')
         agent.configure_mqtt({'enabled':False,'host':'ground.example','port':8883,'client_id':'new-node',
                               'transport':'tcp','tls':True,'websocket_path':'/mqtt',
                               'control':{'username':'','password':''},'bulk':{'username':'','password':''}})
         self.assertTrue(wait(lambda:not agent.clients and not broker.clients,8),[agent.clients,broker.clients])
         self.assertFalse(agent.cfg['mqtt']['enabled'])
         self.assertEqual(agent.cfg['mqtt']['host'],'ground.example')
-        self.assertEqual(agent.receipt_view()['state'],'UNCONFIRMED')
 
 
 class GroundCommandTests(unittest.TestCase):
@@ -469,10 +578,56 @@ class GroundCommandTests(unittest.TestCase):
         self.ground=Ground(cfg);self.addCleanup(self.ground.journal.close)
         self.sid='12ab34cd';self.boot='boot-current'
         self.ground.client=mock.Mock(ready=True);self.ground.client.offer.return_value=True
-        self.ground.node_state={'sid':self.sid,'boot':self.boot,'instance':'ground-fixture'}
+        self.ground.node_state={'sid':self.sid,'boot':self.boot,'instance':'ground-fixture','cfg':7}
         self.ground.node_config={'rev':7}
         self.ground.health={'v':2,'sid':self.sid,'q':1,'t':now_ms(),'daq':1,'run':1}
         self.ground.health_seen=time.monotonic()
+
+    def test_config_get_without_fresh_health_still_requests_settings(self):
+        self.ground.health={};self.ground.health_seen=0
+        result=self.ground.submit_command({'id':'ground-settings-request','op':'config.get'})
+        self.assertEqual(result['stage'],'REQUESTED')
+        request=self.ground.journal.lookup(result['id'])['request']
+        self.assertEqual(request['base_rev'],7)
+        self.assertEqual(self.ground.settings_request_id,result['id'])
+        self.assertEqual(self.ground.client.offer.call_args.args[1],
+                         self.ground.prefix+'/cmd/config/get')
+        duplicate=self.ground.submit_command({'id':'ground-settings-request-2','op':'config.get'})
+        self.assertEqual((duplicate['stage'],duplicate['error']),
+                         ('REJECTED','SETTINGS_REQUEST_PENDING'))
+        raw=compact(settings()).decode('utf-8')
+        report={'v':2,'sid':self.sid,'boot':self.boot,'id':result['id'],'rev':7,
+                't':now_ms(),'settings_json':raw}
+        self.ground.receive(self.ground.prefix+'/settings/reported',compact(report))
+        self.assertEqual(self.ground.config_view()['settings_json'],raw)
+        self.assertIsNone(self.ground.settings_request_id)
+        self.ground.client.offer.assert_called_once()
+
+    def test_caller_cannot_override_ground_base_revision(self):
+        result=self.ground.submit_command({
+            'id':'ground-base-revision','op':'config.patch','base_rev':99,
+            'changes':{'gain_db':20.7}})
+        self.assertEqual(result['stage'],'REQUESTED')
+        request=self.ground.journal.lookup(result['id'])['request']
+        self.assertEqual(request['base_rev'],7)
+    def test_rejected_settings_request_allows_manual_retry(self):
+        self.ground.health={};self.ground.health_seen=0
+        first=self.ground.submit_command({'id':'ground-settings-rejected','op':'config.get'})
+        ack={'v':2,'sid':self.sid,'id':first['id'],'status':'REJECTED',
+             'result':{'error':'SETTINGS_STALE'}}
+        self.ground.receive(self.ground.prefix+'/ack/config',compact(ack))
+        self.assertIsNone(self.ground.settings_request_id)
+        retry=self.ground.submit_command({'id':'ground-settings-retry','op':'config.get'})
+        self.assertEqual(retry['stage'],'REQUESTED')
+        self.assertEqual(self.ground.settings_request_id,retry['id'])
+        self.assertEqual(self.ground.client.offer.call_count,2)
+
+    def test_mutating_command_requires_fresh_health(self):
+        self.ground.health_seen=time.monotonic()-9
+        result=self.ground.submit_command(
+            {'id':'ground-stale-config-patch','op':'config.patch','changes':{'gain_db':20.7}})
+        self.assertEqual((result['stage'],result['error']),('REJECTED','NODE_NOT_FRESH'))
+        self.ground.client.offer.assert_not_called()
 
     def add_operation(self,op_id,stage,*,issued_ms=None,sid=None,result=None):
         request={'id':op_id,'op':'ppp.restart','sid':sid or self.sid,'boot':self.boot,
@@ -872,12 +1027,10 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(json.loads(response)['error'],'INVALID_MQTT_WEBSOCKET_PATH')
 
 class EndToEndTests(unittest.TestCase):
-    def test_telemetry_publishes_without_ground_consumer_and_legacy_gate(self):
+    def test_telemetry_publishes_without_ground_consumer(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp);initial=make_agent(path);initial.journal.close()
-            legacy=path/'legacy-config.yaml'
-            legacy.write_text('telemetry:\n  require_ground_receipt_for_bulk: true\n')
-            cfg=load_config(legacy)
+            cfg=load_config()
             cfg['state_dir']=str(path/'state')
             cfg['source']['share_dir']=str(path/'share')
             cfg['source'].update(authority_verified=True,angle_verified=True)
@@ -907,7 +1060,6 @@ class EndToEndTests(unittest.TestCase):
                                      len(received('telemetry/angular'))>=2,15),
                                 [agent.snapshot(),broker.errors])
                 self.assertEqual(broker.mqtt_connect_count,2)
-                self.assertEqual(agent.receipt_view()['state'],'UNCONFIRMED')
                 health=received('telemetry/health');doa=received('telemetry/doa')
                 angular=received('telemetry/angular')
                 for messages in (health,doa,angular):
@@ -917,8 +1069,60 @@ class EndToEndTests(unittest.TestCase):
                 self.assertFalse(broker.errors)
             finally:
                 stop.set();thread.join(2);agent.stop();broker.stop()
+    def test_ground_settings_request_roundtrip_without_receipt(self):
+        import shutil,ssl,subprocess
+        if not shutil.which('openssl'): self.skipTest('openssl unavailable')
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp);initial=make_agent(path);cfg=initial.cfg;initial.journal.close()
+            cert=path/'cert.pem';key=path/'key.pem'
+            subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),
+                            '-out',str(cert),'-days','1','-subj','/CN=localhost',
+                            '-addext','subjectAltName=IP:127.0.0.1'],
+                           check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            tls_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);tls_context.load_cert_chain(cert,key)
+            broker=Broker(tls_context=tls_context);credentials=path/'mqtt.json'
+            credentials.write_bytes(compact({'username':'test','password':'test-password'}))
+            cfg['mqtt'].update(enabled=True,host='127.0.0.1',port=broker.port,tls=True,ca_file=str(cert),
+                               control_credentials_file=str(credentials),bulk_credentials_file=str(credentials))
+            raw=bytes((32,10))+compact(settings())+bytes((10,))
+            atomic_write(path/'share'/'settings.json',raw)
+            agent=Agent(cfg);agent.monitor=FakeMonitor(cfg);agent.source.poll(force=True)
+            ground_cfg=copy.deepcopy(cfg);ground_cfg['state_dir']=str(path/'ground')
+            ground=Ground(ground_cfg)
+            agent_started=False;ground_started=False
+            try:
+                agent.start();agent_started=True
+                ground.start();ground_started=True
+                self.assertTrue(wait(lambda:ground.client.ready and
+                                     all(client.ready for client in agent.clients.values()) and
+                                     ground.node_state.get('sid')==agent.sid and
+                                     ground.node_state.get('boot')==agent.boot,15),
+                                [agent.snapshot(),ground.snapshot(),broker.errors])
+                request=ground.submit_command({'id':'ground-settings-e2e','op':'config.get'})
+                self.assertEqual(request['stage'],'REQUESTED')
+                self.assertTrue(wait(lambda:ground.settings_json==raw.decode('utf-8'),10),
+                                [agent.snapshot(),ground.snapshot(),broker.errors])
+                report=ground.config_view()['reported']
+                self.assertEqual((report['id'],report['sid'],report['boot']),
+                                 ('ground-settings-e2e',agent.sid,agent.boot))
+                with broker.lock:
+                    messages=list(broker.messages)
+                    subscriptions=[topic for client in broker.clients for topic in client['subs']]
+                response=next(message for message in messages
+                              if message['topic']=='sdr/v2/uav-01/settings/reported')
+                self.assertEqual(json.loads(response['payload'])['settings_json'],raw.decode('utf-8'))
+                self.assertEqual((response['qos'],response['retain']),(1,False))
+                self.assertFalse(any(message['topic'].endswith('/ground/receipt') for message in messages))
+                self.assertFalse(any(topic.endswith('/ground/receipt') for topic in subscriptions))
+                self.assertFalse(any(message['topic'].endswith('/config/reported') for message in messages))
+                self.assertFalse(broker.errors)
+            finally:
+                if ground_started: ground.stop()
+                if agent_started: agent.stop()
+                broker.stop()
 
-    def test_unverified_regular_telemetry_never_advances_detection_or_receipt(self):
+
+    def test_unverified_regular_telemetry_never_advances_detection(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp);initial=make_agent(path);cfg=initial.cfg;initial.journal.close()
             cfg['source'].update(authority_verified=False,angle_verified=False)
@@ -963,10 +1167,6 @@ class EndToEndTests(unittest.TestCase):
                 self.assertEqual(ground.doa,{})
                 self.assertFalse(ground.snapshot()['detection']['valid'])
                 self.assertFalse(agent.snapshot()['detection']['valid'])
-                self.assertTrue(wait(lambda:agent.receipt_view()['state']=='RECEIVING',12),
-                                [agent.receipt_view(),ground.snapshot()])
-                self.assertEqual(agent.receipt_view()['last'].get('dq'),0)
-                self.assertEqual(agent.receipt_view()['last'].get('aq'),0)
                 for suffix in ('telemetry/doa','telemetry/angular'):
                     self.assertTrue(received(suffix))
                     self.assertTrue(all(message['qos']==0 and not message['retain']
@@ -975,7 +1175,7 @@ class EndToEndTests(unittest.TestCase):
             finally:
                 stop.set();thread.join(2);agent.stop();ground.stop();broker.stop()
 
-    def test_agent_graph_receipt_query_and_stopped_health(self):
+    def test_agent_graph_query_and_stopped_health(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp);a=make_agent(path)
             xml_timestamp=now_ms()
@@ -1013,10 +1213,10 @@ class EndToEndTests(unittest.TestCase):
                 state_delivery=a.snapshot()['link']['mqtt_topic_delivery']['state']
                 self.assertEqual((state_delivery['qos'],state_delivery['confirmation']),(1,'PUBACK'))
                 self.assertIsNone(state_delivery['error'])
-                self.assertTrue(wait(lambda:a.receipt_view()['state']=='RECEIVING',12),[a.receipt_view(),g.snapshot()])
                 self.assertTrue(wait(lambda:g.angular_view() is not None,20),[a.snapshot(),g.snapshot(),b.errors])
                 self.assertEqual(len(g.angular_view()['values']),360)
-                self.assertTrue(g.snapshot()['detection']['valid'])
+                self.assertTrue(wait(lambda:g.snapshot()['detection']['valid'],5),
+                                [a.snapshot(),g.snapshot(),b.errors])
                 self.assertTrue(wait(lambda:g.snapshot().get('diagnostic_doa') is not None,5),
                                 [a.snapshot(),g.snapshot(),b.errors])
                 first_diagnostic=g.snapshot()['diagnostic_doa']
@@ -1030,8 +1230,6 @@ class EndToEndTests(unittest.TestCase):
                 self.assertEqual(repeated_diagnostic['raw_doa_deg'],200)
                 self.assertEqual(repeated_diagnostic['source_timestamp_ms'],xml_timestamp)
                 self.assertTrue(g.snapshot()['detection']['valid'])
-                op=g.submit_command({'op':'config.get'})
-                self.assertTrue(wait(lambda:g.journal.lookup(op['id'])['stage']=='APPLIED',10),g.journal.lookup(op['id']))
                 oldq=g.health['q'];stop.set();thread.join(2);a.monitor.data.update(service_state='INACTIVE',cgroup_empty=True)
                 # Local status file ceases too; bridge still generates fresh health.
                 self.assertTrue(wait(lambda:g.health.get('run')==0 and g.health.get('q',0)>oldq,8))
@@ -1076,15 +1274,13 @@ class EndToEndTests(unittest.TestCase):
                 self.assertEqual(repeated['source_timestamp_ms'],diagnostic['source_timestamp_ms'])
                 self.assertEqual(repeated['raw_doa_deg'],diagnostic['raw_doa_deg'])
                 self.assertFalse(ground.snapshot()['detection']['valid']);self.assertEqual(ground.doa,{})
-                self.assertTrue(wait(lambda:agent.receipt_view()['state']=='RECEIVING',12),agent.receipt_view())
-                self.assertEqual(agent.receipt_view()['last'].get('dq'),0)
                 self.assertNotEqual(agent.snapshot()['link']['mqtt_topic_delivery'].get(
                     'telemetry/doa',{}).get('state'),'SENT')
                 self.assertFalse(broker.errors)
             finally:
                 stop.set();thread.join(2);agent.stop();ground.stop();broker.stop()
 
-    def test_stopped_angles_flow_as_diagnostic_without_ground_receipt(self):
+    def test_stopped_angles_flow_as_diagnostic(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp);initial=make_agent(path);cfg=initial.cfg;initial.journal.close()
             timestamp=now_ms();bad_status=status(timestamp,idx=4);bad_status['daq_ok']=False
@@ -1099,11 +1295,7 @@ class EndToEndTests(unittest.TestCase):
             agent.monitor.data.update(service_state='INACTIVE',cgroup_empty=True)
             agent.source.poll(force=True);agent._snapshot()
             ground_cfg=copy.deepcopy(cfg);ground_cfg['state_dir']=str(path/'ground-stopped')
-            ground=Ground(ground_cfg);offer=ground.client.offer
-            def without_receipt(key,topic,payload,**kwargs):
-                if key=='receipt': return False
-                return offer(key,topic,payload,**kwargs)
-            ground.client.offer=without_receipt
+            ground=Ground(ground_cfg)
             agent.start();ground.start()
             try:
                 self.assertTrue(wait(lambda:getattr(ground,'diagnostic_angular',None) is not None,10),
@@ -1116,7 +1308,6 @@ class EndToEndTests(unittest.TestCase):
                 self.assertAlmostEqual(diagnostic['values'][-1],50000.0,places=2)
                 self.assertEqual(diagnostic['trust'],'UNVERIFIED')
                 self.assertIn('DAQ_NOT_HEALTHY_AT_EDGE',diagnostic['validation_reasons'])
-                self.assertEqual(agent.receipt_view()['state'],'UNCONFIRMED')
                 self.assertFalse(ground.snapshot()['detection']['valid'])
                 self.assertIsNone(ground.angular_view())
                 self.assertFalse(broker.errors)

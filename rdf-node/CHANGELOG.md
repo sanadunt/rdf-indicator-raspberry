@@ -2,18 +2,32 @@
 
 ## Unreleased
 
+- Replace Ground receipt/config sync with an explicit `config.get` settings export. Edge sends
+  exact native UTF-8 settings text on `settings/reported` only after a request, with verified
+  TLS, QoS 1, no retention, 30 s expiry, and an 8 KiB compact-envelope limit. Ground does not
+  require fresh health for this read-only request; unavailable, stale, TLS-off, and oversized
+  reports fail. LIVE DoA/Angular no longer require revision equality; other evidence gates remain.
+
+- Accept settings exports only from Ground's MQTT command path; remove the Edge-local Refresh config action, which had no response consumer.
+
 - Add root-approved Ground controls, the five-field safe-settings form, and fixed
   `t900-ppp.service` restart. Ground separates persistence from runtime proof and systemd
   acceptance from later fresh health. Edge does not authenticate publisher identity; anonymous
   topic access depends on broker ACL/network isolation, and plaintext exposes credentials/payloads.
 
-- Publish Bulk angular on the existing schedule without waiting for a Ground application receipt. Existing config files are preserved; the retired `telemetry.require_ground_receipt_for_bulk` field is ignored when loaded.
+- Publish Bulk Angular without a Ground application confirmation. The retired
+  `telemetry.require_ground_receipt_for_bulk` key is no longer accepted; remove it from existing
+  config because strict validation rejects unknown fields.
 
 - Default setup to `rdfsdr.service` for SDR lifecycle controls when the unit is registered; Raspberry reboot and shutdown remain separately approved host actions.
 
-- Publish diagnostic `doa.xml` every 3 s when available, independent of normal DoA validity. Ground keeps it `UNVERIFIED`, separate from live DoA, receipts, and commands.
+- Publish diagnostic `doa.xml` every 3 s when available, independent of normal DoA validity.
+  Ground keeps it `UNVERIFIED`, separate from live DoA and commands.
 
-- Replace RDF2/Q16/U8 Angular chunk transport with one JSON PUBLISH containing all 360 source values on normal and diagnostic topics. Ground validates metadata and flags before keeping LIVE, UNVERIFIED, and receipt paths separate. Edge and Ground must be upgraded together; byte-budget pacing can extend the minimum profile and diagnostic intervals.
+- Replace RDF2/Q16/U8 Angular chunk transport with one JSON PUBLISH containing all 360 source
+  values on normal and diagnostic topics. Ground validates session, freshness, health, and flags
+  before marking LIVE; the reported revision is metadata, not a LIVE equality gate. Edge and
+  Ground must be upgraded together; byte-budget pacing can extend profile and diagnostic intervals.
 
 - Distinguish local API outage from stale cached data in both panels; add immediate manual retry while regular polling continues, without automatic service or SDR recovery.
 - Prevent duplicate shutdown scheduling per boot, retain unresolved outcomes across all journal pages/sessions, and add root-only systemd-evidence-checked local reconciliation.
@@ -27,7 +41,9 @@
 - Allow the RDF edge systemd sandbox to use AF_NETLINK for PPP interface discovery.
 - Probe the configured PPP peer with one interface-bound ICMP echo about every five seconds; a missing reply does not mark PPP down.
 - Add a bottom Data page with MQTT broker settings and a read-only topic/payload inventory.
-- Show each outbound MQTT topic's latest publish result in the Data table. QoS 0 socket writes and QoS 1 broker PUBACK remain distinct from Ground receipt.
+- Show each outbound MQTT topic's latest publish result in the Data table. QoS 0 socket writes
+  and QoS 1 broker PUBACK describe Edge-to-broker delivery only; Ground processing is not reported
+  back to Edge.
 - Add a touch keyboard for MQTT host, port, client ID, WebSocket path, and CTRL/BULK credentials.
 - Support plaintext MQTT/TCP and `ws://` with either anonymous broker access or per-channel credentials; TLS remains enabled by default.
 - Keep CTRL/BULK credentials separate and reconfigure clients live after admin save. Plaintext exposes credentials and payloads; use only on a trusted link.

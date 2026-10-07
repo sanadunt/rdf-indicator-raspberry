@@ -1,4 +1,4 @@
-"""Optional Ubuntu companion: MQTT v2 decoder, receipt and local integration API.
+"""Optional Ubuntu companion: MQTT v2 decoder, requested settings and local integration API.
 Does not replace an existing Ground dashboard. The radio subscriptions stay active
 when its preview browser is closed.
 """
@@ -15,6 +15,7 @@ from .mqtt import Client
 from .codec import decode, FLAG_PARSED, FLAG_FRESH, FLAG_DAQ, FLAG_CONVENTION, FLAG_CONFIG, FLAG_AUTHORITY, ALL_FLAGS
 from .journal import Journal, TERMINAL
 from .control import OPS, CommandManager
+from .source import safe_settings
 
 class Ground:
     def __init__(self,cfg,demo=False):
@@ -22,18 +23,19 @@ class Ground:
         self.lock=threading.RLock(); self.stop_event=threading.Event(); self.events=queue.Queue(64)
         self.journal=Journal(Path(cfg['state_dir'])/'ground.sqlite3')
         self.node_state={}; self.node_config={}; self.caps={}; self.health={}; self.doa={}; self.diagnostic_doa=None
+        self.settings_json=None; self.settings_report={}; self.settings_request_id=None
         self.regular_unverified_doa=None; self.regular_unverified_doa_seen=None
         self.diagnostic_doa_q=0; self.regular_unverified_doa_q=0; self.diagnostic_doa_source_time=0
         self.diagnostic_angular=None; self.angular=None; self.detail={}
         self.diagnostic_angular_q=0; self.regular_unverified_angular_q=0
         self.health_seen=0; self.doa_seen=0; self.diagnostic_seen=None; self.diagnostic_angular_seen=None
         self.angular_seen=0; self.state_seen=0; self.sid_map={}
-        self.rejected=0; self.receipt_count=0; self.snapshot_seq=0; self.current_gen=-1
+        self.rejected=0; self.snapshot_seq=0; self.current_gen=-1
         self.client=Client(cfg=cfg['mqtt'],client_id=cfg['node_id']+'-ground'+('-demo' if demo else ''),
             credentials_file=cfg['mqtt']['control_credentials_file'],rate=1000,
             subscriptions=[(self.prefix+'/telemetry/'+s,0,True) for s in
                 ('doa','health','health/detail','angular','diagnostic/doa','diagnostic/angular')]+
-                          [(self.prefix+'/'+s,1,False) for s in ('state','capabilities','config/reported','availability','ack/config','ack/operation')],
+                          [(self.prefix+'/'+s,1,False) for s in ('state','capabilities','settings/reported','availability','ack/config','ack/operation')],
             on_message=self._incoming)
         self.thread=threading.Thread(target=self._loop,name='ground-consumer',daemon=True)
     def start(self): self.client.start(); self.thread.start()
@@ -43,7 +45,6 @@ class Ground:
         try: self.events.put_nowait((topic,payload,retained))
         except queue.Full: self.rejected+=1
     def _loop(self):
-        next_receipt=0
         while not self.stop_event.is_set():
             try:
                 topic,data,retained=self.events.get(timeout=.1)
@@ -54,14 +55,6 @@ class Ground:
             now=time.monotonic()
             if self.client.generation!=self.current_gen:
                 self.current_gen=self.client.generation
-            if now>=next_receipt and self.client.ready:
-                next_receipt=now+5
-                with self.lock:
-                    if self.health and now-self.health_seen<8:
-                        r={'v':2,'sid':self.node_state.get('sid'),'dq':self.doa.get('q',0),
-                           'hq':self.health.get('q',0),'aq':self.angular['q'] if self.angular else 0,
-                           'rev':self.node_config.get('rev')}
-                        if self.client.offer('receipt',self.prefix+'/ground/receipt',r,expiry=5,priority=1): self.receipt_count+=1
             with self.lock: self.snapshot_seq+=1
     def _fresh(self,t,limit=10000):
         n=integer(t,1000000000000,9999999999999)
@@ -97,8 +90,8 @@ class Ground:
             if suffix=='telemetry/angular':
                 if retained or not self.node_state: return
                 a=decode(data)
-                if a['sid']!=self.node_state.get('sid') or a['revision']!=self.node_config.get('rev'):
-                    raise ValueError('ANGULAR_AUTHORITY_MISMATCH')
+                if a['sid']!=self.node_state.get('sid'):
+                    raise ValueError('ANGULAR_SESSION_MISMATCH')
                 self._fresh(a['timestamp_ms'],10000)
                 required=FLAG_PARSED|FLAG_FRESH|FLAG_DAQ|FLAG_CONFIG
                 if a['flags']&required!=required: raise ValueError('ANGULAR_EVIDENCE_INCOMPLETE')
@@ -113,6 +106,8 @@ class Ground:
                     self.regular_unverified_angular_q=a['q']
                     self.diagnostic_angular=a; self.diagnostic_angular_seen=time.monotonic()
                 return
+            if suffix=='settings/reported' and len(data)>8192:
+                raise ValueError('SETTINGS_REPORT_TOO_LARGE')
             j=strict_json(data)
             if not isinstance(j,dict) or j.get('v')!=2 or not isinstance(j.get('sid'),str): raise ValueError('BAD_JSON_PROTOCOL')
             sid=j['sid']
@@ -134,16 +129,29 @@ class Ground:
                     self.diagnostic_doa_q=0; self.regular_unverified_doa_q=0; self.diagnostic_doa_source_time=0
                     self.diagnostic_angular=None; self.diagnostic_angular_seen=None; self.angular=None
                     self.diagnostic_angular_q=0; self.regular_unverified_angular_q=0
-                    self.node_config={}
+                    self.node_config={}; self.settings_json=None; self.settings_report={}; self.settings_request_id=None
                 self.node_state=j; self.state_seen=time.monotonic(); return
             if suffix=='capabilities': self.caps=j; return
+            if suffix=='settings/reported':
+                expected={'v','sid','boot','id','rev','t','settings_json'}
+                if retained: raise ValueError('RETAINED_SETTINGS_REPORT')
+                if set(j)!=expected: raise ValueError('BAD_SETTINGS_REPORT')
+                if sid!=self.node_state.get('sid'): raise ValueError('SETTINGS_REPORT_SESSION_MISMATCH')
+                if j['boot']!=self.node_state.get('boot'): raise ValueError('SETTINGS_REPORT_BOOT_MISMATCH')
+                if not isinstance(j['id'],str) or j['id']!=self.settings_request_id:
+                    raise ValueError('UNREQUESTED_SETTINGS_REPORT')
+                if type(j['rev']) is not int or j['rev']<0: raise ValueError('BAD_SETTINGS_REVISION')
+                self._fresh(j['t'],30000)
+                raw=j['settings_json']
+                if not isinstance(raw,str): raise ValueError('BAD_SETTINGS_REPORT')
+                parsed=strict_json(raw)
+                effective=safe_settings(parsed)
+                self.node_config={'rev':j['rev'],'proof':'REQUESTED_NATIVE_FILE','effective':effective}
+                self.settings_json=raw
+                self.settings_report={key:value for key,value in j.items() if key!='settings_json'}
+                self.settings_request_id=None
+                return
             if sid!=self.node_state.get('sid'): return
-            if suffix=='config/reported':
-                if not isinstance(j.get('effective'),dict): raise ValueError('BAD_CONFIG_REPORT')
-                if j.get('rev')!=self.node_config.get('rev'):
-                    self.angular=None; self.doa={}; self.regular_unverified_doa=None
-                    self.regular_unverified_doa_seen=None
-                self.node_config=j; return
             if suffix.startswith('telemetry/') and retained: raise ValueError('RETAINED_TELEMETRY')
             if suffix=='telemetry/health':
                 self._fresh(j.get('t'),8000); q=integer(j.get('q'),1,0xffffffff)
@@ -159,7 +167,6 @@ class Ground:
                 ok=j.get('ok')
                 if ok==1:
                     if q<=self.doa.get('q',0): return
-                    if j.get('rev')!=self.node_config.get('rev'): raise ValueError('DOA_NOT_VERIFIED')
                     finite(j['a'],0,360); finite(j['c'],-327.67,327.67); finite(j['p'],-1e6,1e6); integer(j['f'],1,0xffffffff)
                     if not self.health or self.health.get('daq')!=1 or time.monotonic()-self.health_seen>8: raise ValueError('DOA_WITHOUT_HEALTH')
                     self.doa=j; self.doa_seen=time.monotonic()
@@ -168,7 +175,7 @@ class Ground:
                     reasons=j.get('validation_reasons')
                     allowed={'SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'}
                     if (j.get('trust')!='UNVERIFIED' or j.get('angle_reference')!='RAW' or
-                            j.get('rev')!=self.node_config.get('rev') or
+                            (self.node_state.get('cfg') is not None and j.get('rev')!=self.node_state.get('cfg')) or
                             not isinstance(reasons,list) or not 1<=len(reasons)<=2 or
                             any(not isinstance(r,str) or r not in allowed for r in reasons) or
                             len(set(reasons))!=len(reasons)):
@@ -231,6 +238,9 @@ class Ground:
                     result=j.get('result',{})
                     if not isinstance(result,dict): return
                     self.journal.update(old['id'],stage,result)
+                    if (suffix=='ack/config' and old['request'].get('op')=='config.get' and
+                            stage in TERMINAL and stage!='APPLIED' and self.settings_request_id==old['id']):
+                        self.settings_request_id=None
                     if old['request'].get('op')=='ppp.restart' and stage=='PPP_RESTART_REQUESTED':
                         self._reconcile_ppp_restart_health()
     def snapshot(self):
@@ -258,9 +268,9 @@ class Ground:
                     'node_state':copy.deepcopy(self.node_state),'health':dict(self.health),'health_age_ms':ha,'health_fresh':fresh,
                     'detection':{'valid':doa_valid,'relative_doa_deg':self.doa.get('a') if doa_valid else None,
                                  'frequency_hz':self.doa.get('f'),'source_timestamp_ms':self.doa.get('t'),'confidence_native_db':self.doa.get('c'),
-                                 'power_native_db':self.doa.get('p'),'receipt_age_ms':da},
+                                 'power_native_db':self.doa.get('p'),'received_age_ms':da},
                     'diagnostic_doa':diagnostic,
-                    'config':self.config_view(),'link':{'mqtt_control':self.client.status(),'receipt_sent':self.receipt_count,'rejected':self.rejected},
+                    'config':self.config_view(),'link':{'mqtt_control':self.client.status(),'rejected':self.rejected},
                     'capabilities':self.capabilities(),'last_operation':CommandManager.public(latest[0]) if latest else None}
     def angular_view(self):
         with self.lock:
@@ -270,7 +280,6 @@ class Ground:
             if a['source_age_ms']>10000: reasons.append('SOURCE_STALE')
             if not self.health or time.monotonic()-self.health_seen>8: reasons.append('HEALTH_STALE')
             elif self.health.get('daq')!=1 or self.health.get('run')!=1: reasons.append('DAQ_OR_PROCESSING_NOT_HEALTHY')
-            if a['revision']!=self.node_config.get('rev'): reasons.append('PREVIOUS_CONFIG')
             a['stale']=bool(reasons); a['reasons']=reasons
             return a
     def diagnostic_angular_view(self):
@@ -292,8 +301,8 @@ class Ground:
             else:
                 if self.health.get('daq')!=1: reasons.append('DAQ_NOT_HEALTHY')
                 if self.health.get('run')!=1: reasons.append('PROCESSING_NOT_RUNNING')
-            if (a['revision'] is not None and self.node_config.get('rev') is not None and
-                    a['revision']!=self.node_config.get('rev')):
+            if (a['revision'] is not None and self.node_state.get('cfg') is not None and
+                    a['revision']!=self.node_state.get('cfg')):
                 reasons.append('PREVIOUS_CONFIG')
             a.update(available=True,source_timestamp_ms=a['timestamp_ms'],source_age_ms=source_age,
                      received_age_ms=round((now-self.diagnostic_angular_seen)*1000),
@@ -302,15 +311,22 @@ class Ground:
 
     def config_view(self):
         with self.lock:
-            return {'sdr_revision':self.node_config.get('rev'),'proof':self.node_config.get('proof','UNVERIFIED'),
-                    'safe_settings':self.node_config.get('effective',{}),'reported':copy.deepcopy(self.node_config)}
+            current_revision=self.node_state.get('cfg')
+            safe=self.node_config.get('effective',{}) if self.node_config.get('rev')==current_revision else {}
+            return {'sdr_revision':current_revision,'settings_revision':self.node_config.get('rev'),
+                    'proof':self.node_config.get('proof','UNVERIFIED'),'safe_settings':copy.deepcopy(safe),
+                    'settings_json':self.settings_json,'reported':copy.deepcopy(self.settings_report)}
     def capabilities(self): return copy.deepcopy(self.caps)
     def operations_view(self): return [CommandManager.public(r) for r in self.journal.latest()]
     def submit_command(self,obj):
         if not isinstance(obj,dict) or obj.get('op') not in OPS: return {'stage':'REJECTED','error':'UNSUPPORTED_OPERATION'}
-        if not self.client.ready or not self.health or time.monotonic()-self.health_seen>8:
+        op=obj['op']
+        if not self.client.ready: return {'stage':'REJECTED','error':'NODE_NOT_FRESH'}
+        if op!='config.get' and (not self.health or time.monotonic()-self.health_seen>8):
             return {'stage':'REJECTED','error':'NODE_NOT_FRESH'}
-        op=obj['op']; confirm_present='confirm_previous_unknown' in obj
+        if not isinstance(self.node_state.get('sid'),str) or not isinstance(self.node_state.get('boot'),str):
+            return {'stage':'REJECTED','error':'NODE_SESSION_UNAVAILABLE'}
+        confirm_present='confirm_previous_unknown' in obj
         if confirm_present and op!='ppp.restart':
             return {'stage':'REJECTED','error':'UNKNOWN_INTENT_FIELD'}
         confirm=obj.get('confirm_previous_unknown',False)
@@ -323,6 +339,8 @@ class Ground:
             return {'stage':'REJECTED','error':'INVALID_COMMAND_ID'}
         with self.lock:
             pending=self.journal.pending_ppp_restarts() if op=='ppp.restart' else []
+            if op=='config.get' and self.settings_request_id is not None:
+                return {'stage':'REJECTED','error':'SETTINGS_REQUEST_PENDING'}
             if confirm and not pending:
                 return {'stage':'REJECTED','error':'PPP_RESTART_CONFIRMATION_NOT_REQUIRED'}
             if pending and not confirm:
@@ -347,12 +365,13 @@ class Ground:
             request={key:value for key,value in obj.items() if key!='confirm_previous_unknown'}
             request.update(v=2,id=command_id,sid=self.node_state['sid'],boot=self.node_state['boot'],
                            issued_ms=now_ms(),expires_ms=now_ms()+15000)
-            request.setdefault('base_rev',self.node_config.get('rev'))
+            request['base_rev']=self.node_state.get('cfg')
             self.journal.accept(request,'ground-local-admin'); self.journal.update(request['id'],'REQUESTED',{})
             if not self.client.offer('cmd:'+request['id'],self.prefix+'/'+OPS[request['op']],request,
                                      qos=1,expiry=15,priority=0):
                 self.journal.update(request['id'],'REJECTED',{'error':'LOCAL_QUEUE_REJECTED'})
                 return {'stage':'REJECTED','error':'LOCAL_QUEUE_REJECTED'}
+            if op=='config.get': self.settings_request_id=request['id']
             for old in pending:
                 result=dict(old['result'])
                 result.setdefault('reason','OPERATOR_CONFIRMED_NEW_REQUEST')

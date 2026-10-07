@@ -24,9 +24,14 @@ Menu Data memerlukan PIN admin dan CSRF. Pengaturan MQTT tersimpan di
 `/var/lib/rdf-node/mqtt-ui-settings.json`; akun control/bulk tersimpan terpisah dengan mode 0600.
 API hanya melaporkan apakah credential tersedia, tidak mengembalikan username/password. TLS/CA
 tetap mengikuti provisioning bundle; halaman lokal tidak menyediakan bypass verifikasi sertifikat.
-Perubahan broker/credential mengganti kedua client dan menghapus receipt lama. Bulk lanjut setelah
-kedua koneksi MQTT siap dan masa `resume_stable_seconds` berlalu; receipt Ground bukan gate.
+Perubahan broker/credential mengganti kedua client dan menghapus cache session lama. Bulk lanjut
+setelah kedua koneksi MQTT siap dan masa `resume_stable_seconds` berlalu. Telemetry tidak
+bergantung pada konfirmasi Ground.
 Source permission memakai ACL terbatas pada _share; tidak chmod777 atau recursive home read.
+Untuk menampilkan file settings native dari Ground, operator harus memakai `Refresh config`.
+Export memerlukan MQTT TLS aktif, source settings tersedia dan fresh, serta compact MQTT
+envelope utuh tidak lebih dari 8.192 byte. Edge tidak mengirim settings otomatis saat startup,
+reconnect, atau config change.
 
 ACL perlu diperiksa kembali jika deployment engine membuat file dengan mode yang menolak
 akses user service. Gunakan `sudo -u rdf-edge rdf-node doctor` setelah engine update.
@@ -53,14 +58,13 @@ history besar yang dibangun aplikasi.
 
 Ekstrak ZIP release baru ke folder terpisah, jalankan installer yang sama.
 Installer mempertahankan config, hash PIN, journal serta menyimpan symlink previous.
-Konfigurasi lama tidak ditimpa oleh default release. Field lama
-`telemetry.require_ground_receipt_for_bulk` diterima untuk migrasi tetapi diabaikan saat
-config dibaca. Tidak perlu mengedit config lama untuk membuka gate receipt Bulk yang dihapus.
-Sesudah upgrade dari versi password, jalankan `sudo rdf-node set-pin` lalu restart service
-yang sesuai untuk mengganti credential lama dan mencabut sesi admin aktif.
-Checksum diverifikasi sebelum copy. Script tidak mengganti path source otomatis.
-Sesudah upgrade: doctor, health/receipt/curve, command read-only, lalu test subset controlled.
-Schema config unknown key ditolak; periksa release notes saat berpindah versi.
+Konfigurasi lama tidak ditimpa oleh default release. Field legacy
+`telemetry.require_ground_receipt_for_bulk` tidak lagi dikenal; hapus field itu sebelum upgrade
+karena schema strict menolak key yang tidak dikenali. Sesudah upgrade dari versi password,
+jalankan `sudo rdf-node set-pin` lalu restart service yang sesuai untuk mengganti credential lama
+dan mencabut sesi admin aktif. Checksum diverifikasi sebelum copy. Script tidak mengganti path
+source otomatis. Sesudah upgrade: doctor, health/curve, command read-only, lalu test subset
+controlled. Schema config unknown key ditolak; periksa release notes saat berpindah versi.
 
 ## Rollback code
 

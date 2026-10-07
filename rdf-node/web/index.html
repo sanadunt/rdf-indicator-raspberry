@@ -3,9 +3,9 @@
 <body><main class="shell">
 <header><span class="brand"><b class="brand-dot"></b>RDF NODE <small id="mode"></small></span><span id="run" class="badge neutral">MENUNGGU</span></header>
 <section id="home" class="page active">
-<div class="linkstrip"><div><small>PPP LINK</small><b id="ppp">--</b></div><div><small>MQTT</small><b id="mqtt">--</b></div><div><small>GROUND RX</small><b id="ground">--</b></div></div>
+<div class="linkstrip"><div><small>PPP LINK</small><b id="ppp">--</b></div><div><small>MQTT</small><b id="mqtt">--</b></div></div>
 <div class="primary"><div><small id="angle-label">ARAH RELATIF</small><strong id="angle">--<span>&deg;</span></strong><label id="age">Belum ada pengukuran</label></div><div><small id="frequency-label">FREKUENSI VFO</small><strong id="freq" class="frequency">-- <span>MHz</span></strong><label id="quality">Data source belum tersedia</label></div></div>
-<div class="daqstrip"><div><small>DAQ</small><b id="daq">BELUM DIKETAHUI</b></div><div><small>CONFIG SYNC</small><b id="sync">UNVERIFIED</b></div></div>
+<div class="daqstrip"><div><small>DAQ</small><b id="daq">BELUM DIKETAHUI</b></div><div><small>CONFIG REV</small><b id="sync">--</b></div></div>
 <div class="commandline"><span class="dim">CMD</span><span id="command">Belum ada operasi</span></div>
 <div id="alertbox" class="alert"><b id="alerticon">i</b><span id="alert">Memuat status lokal...</span><span id="temp">--</span></div>
 </section>
@@ -25,8 +25,8 @@
 </section>
 <section id="data" class="page data-page">
 <div class="pagetitle"><b>DATA / MQTT</b><button id="mqttsettings" class="smallbtn">Login</button></div>
-<div class="data-summary"><div><small>CTRL / BULK</small><b id="mqttclients">DISABLED / DISABLED</b></div><div><small>GROUND RECEIPT</small><b id="mqttreceipt">UNCONFIRMED</b></div></div>
-<div class="topic-heading"><span id="topicprefix"></span><span id="deliverylegend" aria-label="QoS 0 sukses berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker, bukan receipt Ground." title="QoS 0 sukses berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker, bukan receipt Ground.">QoS 0 lokal · QoS 1 PUBACK</span></div>
+<div class="data-summary"><div><small>CTRL / BULK</small><b id="mqttclients">DISABLED / DISABLED</b></div></div>
+<div class="topic-heading"><span id="topicprefix"></span><span id="deliverylegend" aria-label="QoS 0 sukses berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker." title="QoS 0 sukses berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker.">QoS 0 lokal · QoS 1 PUBACK</span></div>
 <div id="topiclist" class="topic-list" tabindex="0" aria-label="Topik MQTT keluar Raspberry ke Ground dan topik masuk"></div>
 </section>
 <nav><button data-tab="home" class="selected" aria-current="page" aria-label="Utama"><span>&#9673;</span>Utama</button><button data-tab="link" aria-label="Link"><span>&#8644;</span>Link</button><button data-tab="system" aria-label="Sistem"><span>&#9638;</span>Sistem</button><button data-tab="config" aria-label="Config"><span>&#9881;</span>Config</button><button data-tab="data" aria-label="Data"><span>&#9634;</span>Data</button></nav>

@@ -100,6 +100,12 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)/'c.yaml';p.write_text('dangerous_new_key: true\n')
             with self.assertRaises(ValueError):load_config(p)
+    def test_legacy_ground_receipt_setting_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'c.yaml'
+            p.write_text('telemetry:\n  require_ground_receipt_for_bulk: true\n')
+            with self.assertRaisesRegex(ValueError,'telemetry.require_ground_receipt_for_bulk: UNKNOWN_CONFIG_KEY'):
+                load_config(p)
     def test_boolean_string_rejected(self):
         with tempfile.TemporaryDirectory() as d:
             p=Path(d)/'c.yaml';p.write_text('mqtt:\n  enabled: "false"\n')
@@ -167,6 +173,17 @@ class SourceTests(unittest.TestCase):
         self.src=Source(self.cfg,self.j)
     def write(self,idx):
         t=now_ms();(self.path/'status.json').write_bytes(compact(status(t,idx)));(self.path/'DOA_value.html').write_bytes(csv_bytes(record(t)))
+    def test_raw_settings_preserve_exact_successful_file_bytes(self):
+        raw=b' \n'+compact(settings())+b'\n'
+        (self.path/'settings.json').write_bytes(raw)
+        self.src.poll(force=True)
+        self.assertEqual(self.src.raw_settings,raw)
+        self.assertGreater(self.src.settings_seen,0)
+        (self.path/'settings.json').unlink()
+        self.src.poll(force=True)
+        self.assertEqual(self.src.raw_settings,raw)
+        self.assertIsNotNone(self.src.config_error)
+
     def test_same_timestamp_does_not_increment_q(self):
         self.src.poll(force=True);q=self.src.seq;self.src.poll(force=True);self.assertEqual(self.src.seq,q)
     def test_clock_untrusted_blocks_live(self):

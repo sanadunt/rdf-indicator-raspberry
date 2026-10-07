@@ -3,7 +3,7 @@ import queue
 import re
 import threading
 import time
-from .util import digest, now_ms, finite, integer
+from .util import digest, now_ms, finite, integer, compact
 from .journal import TERMINAL
 from .helper import call_helper
 from .config import PROFILES
@@ -41,6 +41,8 @@ class CommandManager:
             id=request.get('id'); op=request.get('op')
             if not isinstance(id,str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,80}',id): raise ValueError('INVALID_COMMAND_ID')
             if op not in OPS or request.get('v')!=2: raise ValueError('UNSUPPORTED_OPERATION_OR_VERSION')
+            if op=='config.get' and actor!='ground-controller':
+                raise ValueError('SETTINGS_REQUEST_GROUND_ONLY')
             if topic and topic!=a.prefix+'/'+OPS[op]: raise ValueError('COMMAND_TOPIC_MISMATCH')
             old=self.journal.lookup(id)
             if old:
@@ -56,12 +58,25 @@ class CommandManager:
                 if time.monotonic()-self.last_rate.get(actor,0)<1: raise ValueError('REQUEST_RATE_LIMIT')
                 self.last_rate[actor]=time.monotonic()
                 if op=='config.get':
-                    a.request_config_report=True
-                    result={'revision':a.source.revision,'proof':a.config_proof}
+                    source=a.source
+                    if not a.cfg['mqtt']['tls']: raise ValueError('TLS_REQUIRED_FOR_SETTINGS_REPORT')
+                    if source.config_error or source.raw_settings is None or source.settings_seen is None:
+                        raise ValueError('SETTINGS_UNAVAILABLE')
+                    if time.monotonic()-source.settings_seen>self.cfg['freshness']['source_status_ms']/1000:
+                        raise ValueError('SETTINGS_STALE')
+                    payload={'v':2,'sid':a.sid,'boot':a.boot,'id':id,'rev':source.revision,
+                             't':now_ms(),'settings_json':source.raw_settings.decode('utf-8')}
+                    settings_payload=compact(payload)
+                    if len(settings_payload)>8192: raise ValueError('SETTINGS_REPORT_TOO_LARGE')
+                    result={'revision':source.revision,'proof':a.config_proof}
+                    with a.settings_request_lock:
+                        if a.settings_request_id is not None: raise ValueError('SETTINGS_REQUEST_PENDING')
+                        self.journal.accept(request,actor); self.journal.update(id,'APPLIED',result)
+                        a.settings_request_id=id; a.settings_request_payload=settings_payload
                 else:
                     target=self.journal.lookup(str(request.get('target_id','')))
                     result={'operation':self.public(target) if target else None}
-                self.journal.accept(request,actor); self.journal.update(id,'APPLIED',result)
+                    self.journal.accept(request,actor); self.journal.update(id,'APPLIED',result)
                 self._send(id,op,'APPLIED',result)
                 return {'id':id,'stage':'APPLIED','result':result}
             if a.demo: raise ValueError('DEMO_NO_HARDWARE_CONTROL')
@@ -137,7 +152,6 @@ class CommandManager:
 
         if op=='stream.set':
             a.profile=r['profile']; a.journal.set('profile',a.profile)
-            a.request_config_report=True
             return 'APPLIED',{'profile':a.profile,'proof':'SCHEDULER_PROFILE_ACTIVE'}
         if op=='config.patch':
             expected=a.source.raw_digest
@@ -159,10 +173,10 @@ class CommandManager:
                         if key=='gain_db' and st and st['timestamp_ms']>before and st.get('gain_db')==value:
                             proof[key]='FRESH_DAQ_GAIN'
                     if len(proof)==len(r['changes']):
-                        a.config_proof='runtime'; a.request_config_report=True
+                        a.config_proof='runtime'
                         return 'APPLIED',{'revision':a.source.revision,'proof':proof,'persisted':True}
                 self.stop_event.wait(0.2)
-            a.config_proof='persisted_unverified'; a.request_config_report=True
+            a.config_proof='persisted_unverified'
             return 'PERSISTED_UNVERIFIED',{'revision':a.source.revision,'persisted':True,'proof':proof,
                                           'reason':'NATIVE_RUNTIME_EVIDENCE_INCOMPLETE'}
         if op in ('processing.set','service.restart'):

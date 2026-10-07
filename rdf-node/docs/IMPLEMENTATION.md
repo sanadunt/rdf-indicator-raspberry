@@ -10,9 +10,9 @@ Native SDR _share
        -> Scheduler -> MQTT control / MQTT bulk -> T900 PPP
 
 Ground MQTT consumer
-   -> validate normal telemetry session/config/health
-   -> keep verified data authoritative; route UNVERIFIED variants to diagnostic views
-   -> receipt only for accepted health/DoA/angular sequences
+   -> validate session, freshness, health and source/angle evidence
+   -> keep verified telemetry authoritative; route UNVERIFIED variants to diagnostic views
+   -> serve raw settings only after an explicit config.get request
 
 Ground command received through the configured broker/link
    -> CommandManager -> SQLite journal -> single worker
@@ -36,9 +36,9 @@ Transport tanpa TLS mengirim credential dan payload tanpa enkripsi; gunakan hany
 yang disetujui dan tepercaya.
 `Data > Atur` menyediakan pilihan transport/TLS, host, port, path WebSocket, serta username dan
 password CTRL/BULK terpisah. Keyboard sentuh melayani kolom teks; selector native tetap dapat
-dioperasikan dengan keyboard. Save mengganti kedua client tanpa restart service dan menghapus bukti
-receipt/sequence lama; Bulk lanjut setelah kedua koneksi MQTT siap dan `resume_stable_seconds`
-berlalu. Receipt Ground tidak menjadi gate publikasi.
+dioperasikan dengan keyboard. Save mengganti kedua client tanpa restart service dan menghapus
+sequence/cache session lama; Bulk lanjut setelah kedua koneksi MQTT siap dan
+`resume_stable_seconds` berlalu. Telemetry tidak bergantung pada konfirmasi Ground.
 
 ### Kontrol Ground dengan approval root
 
@@ -135,8 +135,8 @@ Perubahan berikut eksplisit, bukan klaim bahwa semuanya identik dengan contoh pl
    rotasi driver, touch calibration, compositor installation dan autologin OS tidak
    diimplementasikan karena hardware belum diketahui. Panel tetap dapat dioperasikan dengan
    mouse.
-10. **Ground preview:** ditambahkan agar codec/receipt dapat segera diuji. Integrasi ke
-    aplikasi Ground lama tetap memakai API/decoder; source lama tidak tersedia di ZIP.
+10. **Ground preview:** ditambahkan agar codec Angular JSON dan request settings dapat diuji.
+    Integrasi ke aplikasi Ground lama tetap memakai API/decoder; source lama tidak tersedia di ZIP.
 
 ## Source validity
 
@@ -144,10 +144,9 @@ CSV: 377 field, opsional trailing delimiter kosong. Exact 360 nilai finite; satu
 harus tidak ambigu. Source timestamp, frequency dan revision-at-read dilacak. Re-reading
 file tidak membuat q baru. Timestamp regresi ditolak sampai sumber/agent direkonsiliasi.
 
-`doa.xml` diparse terpisah hanya untuk tampilan/relay diagnostik. `TIME` adalah Unix
-milliseconds, `FREQUENCY` dalam MHz, dan `DOA` dipertahankan sebagai nilai raw. Diagnostik
-tidak mengisi `detection` atau memenuhi receipt/control normal. XML hilang/rusak tidak dapat
-membuat source valid.
+`doa.xml` diparse terpisah hanya untuk tampilan/relay diagnostik. `TIME` adalah Unix milliseconds,
+`FREQUENCY` dalam MHz, dan `DOA` dipertahankan sebagai nilai raw. Diagnostik tidak mengisi
+`detection` atau mengubah gate control normal. XML hilang/rusak tidak dapat membuat source valid.
 
 DAQ sehat memerlukan status fresh, daq_ok boolean, frame/sample-delay/IQ sync true, dan
 kemajuan frame. Observasi frame pertama belum membuktikan progress. Counter turun/reset
@@ -156,8 +155,8 @@ memerlukan progress berikutnya. Missing field dianggap unknown, tidak dibuat hij
 LIVE detection tetap memerlukan authority dan angle approval, clock, config attribution, DAQ
 dan freshness. Jika hanya approval authority/angle yang belum terverifikasi, Edge boleh
 mengirim DoA/angular pada topic normal dengan metadata/flags UNVERIFIED; ini tidak mengubah
-`detection.valid`, tidak memajukan receipt DoA/angular, dan tidak menjadi dasar command.
-Gate freshness, parse, DAQ, clock, config, dan control tetap wajib.
+`detection.valid` atau menjadi dasar command. Gate freshness, parse, DAQ, clock, config, dan
+control tetap wajib.
 Tidak ada cara membuktikan NO_DETECTION dari file stale saja; panel menyebut NO_FRESH_DOA.
 Array tetap native; PAPR tetap dB native; power bukan link RSSI dan bukan calibrated dBm.
 GPS/altitude/SNR tidak diisi dengan angka dummy. Mode nav OFF.
@@ -173,9 +172,14 @@ pada saat dibaca dan timestamp setelah config berubah. UI membedakan:
 - persisted_unverified: write sudah tersimpan, evidence belum cukup;
 - runtime: field perubahan telah diverifikasi dari evidence yang diperlukan.
 
-`CFG SYNCED` memerlukan runtime proof dan receipt fresh yang revision-nya cocok.
-`REPORTED_SAME` bukan sinonim runtime applied. Single-writer approval tetap diperlukan;
-atomic rename tidak menyelesaikan konflik semua writer otomatis.
+Ground menampilkan revision `state.cfg`. Tombol `Refresh config` meminta settings native melalui
+`config.get`; Edge mengirim teks file pada `settings/reported` hanya saat TLS aktif, source fresh,
+dan compact envelope berukuran paling banyak 8 KiB. Respons non-retained QoS 1 ber-expiry 30 s.
+Tidak ada report otomatis saat startup, reconnect, atau perubahan revision. Edge membersihkan
+request ID satu kali hanya setelah outbox lokal menerima response. Settings request menunjukkan
+isi file saat diminta, bukan bukti semua parameter sudah diterapkan runtime. `REPORTED_SAME` bukan
+sinonim runtime applied. Single-writer approval tetap diperlukan; atomic rename tidak
+menyelesaikan konflik semua writer otomatis.
 
 ## Indikator dan cadangan kapasitas
 
@@ -189,32 +193,30 @@ peer terjangkau; tanpa balasan ICMP bukan bukti PPP mati.
 Sandbox systemd RDF edge mengizinkan `AF_NETLINK` agar `ip -j addr` dapat membaca interface.
 
 
-MQTT CONNECTED/READY dibedakan dari Ground receipt. Receipt hq harus pernah terkirim dan
-bertambah; receipt berulang tidak menyegarkan progress. Setelah 10 detik terlambat,
-setelah 15 detik lost, belum pernah receipt berarti unconfirmed.
+MQTT CONNECTED/READY menunjukkan status broker client dan subscription, bukan pemrosesan payload
+oleh aplikasi Ground. PUBACK QoS 1 mengonfirmasi penerimaan broker, bukan Ground.
 
 Panel `DATA / MQTT` menampilkan `link.mqtt_topic_delivery`, keyed by suffix topic keluar.
 Entry menyimpan `state` (`PENDING`, `SENT`, `ERROR`), QoS, `confirmation`, `updated_ms`,
-`sent_ms` terakhir berhasil, dan kode `error` yang aman. Entry yang belum ada berarti
-belum ada percobaan publish sejak start atau reconfigure MQTT. Untuk QoS 0, `SENT` berarti
-frame PUBLISH selesai ditulis ke socket lokal (`SOCKET_WRITE`); QoS 1 berarti broker
-mengembalikan PUBACK. Keduanya bukan bukti Ground memproses data; receipt aplikasi tetap
-terpisah di `link.ground`. Error seperti `MQTT_DISCONNECTED`, `OUTBOX_FULL`, dan
-`PUBLISH_REJECTED_0X87` ditampilkan per topic; `sent_ms` tetap menunjuk sukses terakhir
-jika percobaan terbaru gagal.
+`sent_ms` terakhir berhasil, dan kode `error` yang aman. Entry yang belum ada berarti belum ada
+percobaan publish sejak start atau reconfigure MQTT. Untuk QoS 0, `SENT` berarti frame PUBLISH
+selesai ditulis ke socket lokal (`SOCKET_WRITE`); untuk QoS 1, `PUBACK` berarti broker menerima
+PUBLISH. Keduanya bukan bukti aplikasi Ground memproses data; Edge tidak menampilkan konfirmasi
+delivery aplikasi. Error seperti `MQTT_DISCONNECTED`, `OUTBOX_FULL`, dan `PUBLISH_REJECTED_0X87`
+ditampilkan per topic; `sent_ms` tetap menunjuk sukses terakhir jika percobaan terbaru gagal.
 
 `telemetry/diagnostic/doa` memakai client Control, QoS 0, expiry 3 s, tanpa retention.
 Saat `doa.xml` tersedia, Edge mengirim sampel tiap 3 s termasuk jika isinya tidak berubah
 atau DoA normal terblokir. Sequence `q` bertambah tiap publish; timestamp sumber/observasi
 tetap menunjuk pembacaan file yang sama. Ground menyimpan hasil terpisah sebagai `UNVERIFIED`;
-ini tidak menambah `dq` atau menjadi detection normal.
+diagnostic tidak menjadi detection normal.
 
 Ketika hanya approval source/angle yang tidak ada dan gate integritas data lainnya lulus,
 `telemetry/doa` membawa `ok=0`, `trust=UNVERIFIED`, `angle_reference=RAW`, serta alasan
 validasi; `a` berisi nilai raw. `telemetry/angular` tetap memakai Bulk, tetapi flags menunjukkan
-approval yang hilang. Ground merutekan record ke diagnostic view yang sudah ada, bukan
-`detection`, `dq`, `aq`, atau otorisasi command. Kegagalan freshness, DAQ, clock, config,
-parse, atau control tidak memakai fallback normal-topic ini.
+approval yang hilang. Ground merutekan record ke diagnostic view, bukan `detection` atau
+otorisasi command. Kegagalan freshness, DAQ, clock, config, parse, atau control tidak memakai
+fallback normal-topic ini.
 
 Edge dan Ground harus diperbarui bersama untuk Angular. Publisher kini mengirim satu JSON object
 per PUBLISH dengan metadata dan seluruh 360 angka `values`; consumer RDF2 yang menunggu binary
@@ -230,13 +232,14 @@ Angular normal memakai interval minimum profile (`balanced` 4 s, `graph_u8` 2 s)
 memperpanjangnya sesuai ukuran JSON dan `bulk_budget_bytes_s`. Nama `graph_u8` dipertahankan
 untuk kompatibilitas konfigurasi; semua profile memakai JSON dan tidak mengkuantisasi sampel.
 
-Kedua jalur memakai QoS 0, expiry 3 s, tanpa retention dan tanpa menunggu receipt Ground.
-Timestamp source dipertahankan; publish ulang tidak menyegarkan umur sampel. JSON membawa flags
-parsed, clock/freshness, DAQ, konvensi, atribusi konfigurasi, dan authority source.
+Kedua jalur memakai QoS 0, expiry 3 s, tanpa retention. Timestamp source dipertahankan; publish
+ulang tidak menyegarkan umur sampel. JSON membawa flags parsed, clock/freshness, DAQ, konvensi,
+atribusi konfigurasi, dan authority source.
 
-Ground memvalidasi JSON serta `sid`, revision, freshness, health, flags dan sequence. Ground
-menyimpan diagnostic serta Angular normal UNVERIFIED terpisah dari Angular LIVE, tersedia lewat
-`GET /api/v2/angular/diagnostic/latest`; kandidat tidak memajukan receipt `aq` atau detection.
+Ground memvalidasi session, freshness, health, flags, dan sequence. `revision` tetap metadata;
+Ground tidak membandingkannya dengan `state.cfg` untuk LIVE, tetapi bit config attribution tetap
+wajib. Ground menyimpan diagnostic dan Angular normal UNVERIFIED terpisah dari Angular LIVE,
+tersedia lewat `GET /api/v2/angular/diagnostic/latest`.
 
 
 Kedua topic diagnostic berbagi Control token bucket dengan health/DoA (default 850 B/s).
@@ -250,7 +253,7 @@ panel menampilkan sudut raw dan frekuensi XML dengan label `UNVERIFIED`, umur su
 validation reasons. Detection valid tetap memakai sudut relatif normal.
 
 
-Grafik dipause karena source invalid, command, receipt, token/backlog, atau profile CONTROL.
+Grafik dipause karena source invalid, command, token/backlog, atau profile CONTROL.
 Token bucket adalah estimasi biaya aplikasi+allowance transport, bukan shaping seluruh
 socket/kernel/radio. Shell SSH, download log, ping terus-menerus juga berbagi link.
 QoS 0 tetap berjalan di TCP; data yang sudah masuk TCP tidak bisa ditarik kembali.

@@ -13,8 +13,8 @@ Demo CLI tidak membuka koneksi MQTT. Prefix demo tersedia hanya bagi integration
 | telemetry/health/detail | UAV -> Ground | 0 | tidak |
 | telemetry/angular | UAV -> Ground | 0 | tidak |
 | telemetry/diagnostic/angular | UAV -> Ground | 0 | tidak |
-| state, capabilities, config/reported, availability | UAV -> Ground | 1 | ya, last-known |
-| ground/receipt | Ground -> UAV | 0 | tidak |
+| state, capabilities, availability | UAV -> Ground | 1 | ya, last-known |
+| settings/reported | UAV -> Ground | 1 | tidak, expiry 30 s |
 | cmd/config/get, cmd/config/patch | Ground -> UAV | 1 | tidak |
 | cmd/processing/set, cmd/service/restart, cmd/service/ppp/restart | Ground -> UAV | 1 | tidak |
 | cmd/system/reboot/prepare, cmd/system/reboot/execute | Ground -> UAV | 1 | tidak |
@@ -63,7 +63,7 @@ berarti RAW dengan `angle_reference="RAW"`. `c`: PAPR/native dB, bukan probabili
 
 Edge hanya mengirim varian ini bila parsing, freshness/clock, DAQ, dan atribusi config lulus
 serta satu-satunya gate yang gagal adalah authority dan/atau verifikasi konvensi sudut.
-Ground menampilkannya di jalur diagnostic; tidak mengisi detection atau receipt `dq`.
+Ground menampilkannya di jalur diagnostic; tidak mengisi detection atau menjadi dasar kontrol.
 Nilai contoh sintetis. Radio tidak menambahkan SNR yang belum terbukti sumbernya.
 
 ## Health
@@ -104,11 +104,11 @@ samples = frame['values']
 assert len(samples) == 360
 ```
 
-Ground memeriksa session, revision, source age, health fresh dengan `daq=1`, dan bukti flags.
-Frame LIVE memerlukan `flags=63`, timestamp paling lama 10 s, dan sequence yang maju. Pesan
-`telemetry/angular` yang memiliki bit parsed/fresh/DAQ/config tetapi kehilangan convention
-dan/atau authority masuk ke diagnostic sebagai `UNVERIFIED`; pesan yang juga kehilangan salah
-satu bit integritas ditolak. Pesan diagnostic tetap terpisah dari LIVE dan tidak memenuhi receipt.
+Ground memeriksa session, source age, health fresh dengan `daq=1`, sequence, dan bukti flags.
+Frame LIVE memerlukan `flags=63`, timestamp paling lama 10 s, dan sequence yang maju. `revision`
+tetap metadata; Ground tidak membandingkannya dengan `state.cfg`. Bit config attribution tetap
+wajib. Pesan yang kehilangan convention dan/atau authority masuk ke diagnostic `UNVERIFIED`;
+pesan yang kehilangan salah satu bit integritas ditolak.
 
 Flags: bit 0 parsed, bit 1 clock/fresh, bit 2 DAQ sehat, bit 3 convention verified, bit 4
 config attribution, bit 5 source authority verified.
@@ -119,28 +119,42 @@ array; consumer dapat langsung menjalankan `json.loads` dan memeriksa panjang `v
 Timestamp convention 1 mempertahankan index native; Ground tidak mengonversi sudut ke true north.
 Kurva hanya dinyatakan LIVE sesudah seluruh gate di atas lolos.
 
-## Receipt
+## Requested native settings
+
+Ground mengirim `cmd/config/get` hanya melalui aksi eksplisit `Refresh config`. Edge tidak meminta
+atau mengirim settings saat startup, reconnect, atau perubahan revision. Request memerlukan MQTT
+Ground READY dan session `sid`/`boot` terkini, tetapi tidak memerlukan health fresh. Semua operasi
+lain tetap mengikuti health, identity, clock, revision, capability, dan approval gates.
+
+Edge merespons lewat `settings/reported` dengan QoS 1, non-retained, expiry 30 s:
 
 ```json
-{"v":2,"sid":"7a8b9c0d","dq":1245,"hq":86,"aq":1238,"rev":7}
+{"v":2,"sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","id":"g01-00001234","rev":7,"t":1790668800123,"settings_json":"{\"center_freq\":433.92,\"uniform_gain\":20.7}"}
 ```
 
-Dikirim setiap5s oleh satu receiver yang berhasil memvalidasi satu object Angular JSON. `aq`
-baru maju setelah message lolos semua gate LIVE. Bukan PUBACK MQTT atau bukti operator melihat browser.
-Unknown sid, q yang tidak pernah terkirim, regressi, dan retained receipt ditolak.
-`telemetry/doa` dan `telemetry/angular` tidak dibatasi receipt atau keberadaan subscriber
-Ground. Edge publish saat source/profile dan koneksi MQTT ke broker memenuhi syarat; receipt
-adalah observasi aplikasi, bukan PUBACK. Koneksi Edge ke broker hanya membuktikan koneksi
-Edge ke broker, bukan Ground terhubung atau menerima pesan QoS 0 non-retained. Clean Start
-dan tidak adanya offline replay berarti telemetry dapat terlewat saat Ground offline; MQTT
-Message Expiry yang dikonfigurasi tetap berlaku.
-Validitas/freshness source, profile, backlog, budget, dan stabilisasi resume tetap menjadi gate lokal.
-Jika hanya `SOURCE_UNVERIFIED` dan/atau `ANGLE_UNVERIFIED` yang gagal, Edge tetap memakai
-`telemetry/doa` dan `telemetry/angular`, tetapi menandai DoA `ok=0` dan Angular dengan flags
-parsial. Semua gate parse, freshness/clock, DAQ, dan config tetap wajib; source stale, DAQ
-buruk, clock/config tidak terbukti, atau error lain tetap memblokir topic normal. Ground
-memetakan kedua varian ke tampilan diagnostic; receipt `dq`/`aq` tetap 0 untuk record itu,
-dan nilainya tidak menjadi detection LIVE atau dasar command.
+Field wajib tepat `v,sid,boot,id,rev,t,settings_json`. `settings_json` menyimpan teks UTF-8
+persis dari file native yang berhasil dibaca, bukan normalisasi atau safe-field serialization.
+TLS wajib; Edge menolak TLS-off, source settings unavailable/stale, atau compact envelope di atas
+8.192 byte dengan error spesifik. Edge tidak memotong atau memecah report. `ack/config` memuat
+status/error command; settings datang pada PUBLISH terpisah.
+
+Ground menerima hanya PUBLISH non-retained yang cocok dengan pending `id`, session `sid`, `boot`,
+dan timestamp fresh. Ground mem-parse teks sebagai JSON object, menyimpan teks mentah, lalu
+menurunkan subset safe untuk form mutation. Safe settings hanya diberikan bila report `rev`
+cocok dengan `state.cfg`; teks mentah tetap dapat ditampilkan.
+
+## Telemetry delivery and evidence
+
+Ground tidak mengirim konfirmasi aplikasi untuk telemetry. QoS 1 PUBACK hanya berarti broker
+mengakui PUBLISH; QoS 0 `SOCKET_WRITE` hanya berarti Edge menulis frame ke socket lokal.
+Telemetry dikirim berdasar source/profile, queue, budget, dan stabilisasi lokal, bukan keberadaan
+Ground. Clean Start tanpa offline replay berarti telemetry dapat terlewat saat Ground offline.
+
+LIVE DoA/Angular tetap memerlukan session, freshness, sequence, health/DAQ, parse, clock, source,
+dan angle evidence yang berlaku. Ground tidak mengharuskan `rev` telemetry sama dengan `state.cfg`;
+revision tetap metadata dan bit config attribution Angular tetap wajib. Jika hanya authority
+atau angle approval yang hilang, Edge menandai frame `UNVERIFIED`; kegagalan integritas lain
+tetap memblokir jalur normal.
 
 Perubahan Angular wire format memerlukan Edge dan Ground package yang diperbarui bersama. Consumer
 RDF2 lama yang mengharapkan binary chunk tidak dapat membaca JSON baru. Consumer DoA lama juga
@@ -148,22 +162,22 @@ dapat menolak `ok=0` atau salah menafsirkan `a` sebagai sudut relatif.
 
 `telemetry/diagnostic/doa` dikirim tiap 3 s selama XML tersedia, terlepas dari validitas DoA
 normal. `q` bertambah tiap publish; timestamp sumber/observasi tetap menunjuk pembacaan file
-yang sama. Ground menyimpan sampel sebagai `UNVERIFIED`, tidak masuk ke `dq`, DoA valid,
-angular, atau otorisasi command.
+yang sama. Ground menyimpan sampel sebagai `UNVERIFIED`, terpisah dari DoA/Angular LIVE dan
+otorisasi command.
 
-Kedua topic diagnostic memakai Control token bucket bersama health/DoA normal (default
-850 B/s). Frame JSON multi-kilobyte dijadwalkan dengan headroom Control yang tersisa; QoS 0
-tetap dapat expired jika backlog atau trafik lain memakai budget. Broker ACL harus mengizinkan
-Control Edge publish dan Control Ground subscribe. Diagnostic angular tidak memenuhi `aq`.
+Kedua topic diagnostic memakai Control token bucket bersama health/DoA normal (default 850 B/s).
+Frame JSON multi-kilobyte dijadwalkan dengan headroom Control yang tersisa; QoS 0 tetap dapat
+expired jika backlog atau trafik lain memakai budget. Broker ACL harus mengizinkan Control Edge
+publish dan Control Ground subscribe.
 
 ## Diagnostic angular candidate
 
 Topic `telemetry/diagnostic/angular` membawa satu object JSON berisi 360 sampel terakhir dari
-`DOA_value.html`, hanya saat jalur angular Bulk normal tidak dapat mengirimnya. Interval 6 s
-saat gate integritas source gagal dan 30 s saat source valid tetapi Bulk terblokir adalah
-minimum; ukuran payload dan headroom Control dapat memperpanjangnya. Tidak ada duplikasi saat
-Bulk normal tersedia; profile `control` menahan array. Topic memakai Control QoS 0,
-non-retained, expiry 3 s, dan tidak menunggu receipt Ground. Timestamp sumber dipertahankan;
+`DOA_value.html`, hanya saat jalur angular Bulk normal tidak dapat mengirimnya. Interval 6 s saat
+gate integritas source gagal dan 30 s saat source valid tetapi Bulk terblokir adalah minimum;
+ukuran payload dan headroom Control dapat memperpanjangnya. Tidak ada duplikasi saat Bulk normal.
+Profile `control` menahan array. Topic memakai Control QoS 0, non-retained, expiry 3 s.
+Ground menyimpan candidate terpisah sebagai `UNVERIFIED`; ia tidak memenuhi detection LIVE.
 `q` adalah sequence publish diagnostic, bukan sequence file sumber.
 
 Bits `flags` menyatakan bukti yang tersedia saat Edge mengirim:
@@ -181,10 +195,10 @@ fresh, DAQ, dan config tetapi kehilangan bit convention dan/atau authority diter
 `trust=UNVERIFIED` di diagnostic; flags legacy `31` berarti authority tidak terbukti dan
 diturunkan ke jalur itu. Ground menolak frame normal-topic yang juga kehilangan bit parsed,
 fresh, DAQ, atau config.
-Frame diagnostic tetap terpisah dari `telemetry/angular`, `telemetry/doa`, dan receipt.
+Frame diagnostic tetap terpisah dari `telemetry/angular` dan `telemetry/doa`.
 Timestamp stale, health/processing, revision, dan flags menjadi `validation_reasons`/`stale`,
 bukan alasan membuang sampel. Baca melalui `GET /api/v2/angular/diagnostic/latest`
-(`null` sebelum pesan JSON diterima). Frame diagnostic tidak memenuhi receipt `aq` atau detection LIVE.
+(`null` sebelum pesan JSON diterima).
 
 Response memuat 360 `values`, `encoding`, `frequency_hz`, `raw_doa_deg`,
 `source_timestamp_ms`, `source_age_ms`, `received_age_ms`, `flags`,
@@ -206,8 +220,8 @@ PPP restart uses the ordinary v2 envelope on `cmd/service/ppp/restart`:
 {"v":2,"id":"g01-00001235","sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","issued_ms":1790668800123,"expires_ms":1790668815123,"base_rev":7,"op":"ppp.restart"}
 ```
 
-Semua nilai contoh adalah fixture, jangan dikirim mentah. Ground membuat envelope dari
-identity/revision terbaru. TTL default15s, maksimum30s. Unknown fields ditolak.
+Semua nilai contoh adalah fixture, jangan dikirim mentah. Ground membuat envelope dari identity
+terkini dan `state.cfg` untuk `base_rev`. TTL default 15 s, maksimum 30 s. Unknown fields ditolak.
 ID sama+payload sama mengembalikan hasil/progress tersimpan, bukan eksekusi ulang.
 ID sama+payload berbeda ditolak. Topic harus sesuai `op` dan command tidak retained.
 
@@ -229,14 +243,16 @@ Control putus.
 Receiver Ubuntu: `http://127.0.0.1:8791`.
 
 - `GET /api/v2/snapshot`: node/health/metadata yang telah digate.
-  `diagnostic_doa` berisi sampel XML terpisah dengan timestamp sumber/observasi, alasan validasi dan status stale; tidak dihitung sebagai receipt atau DoA valid.
-- `GET /api/v2/angular/latest`: array360, metadata dan `stale`.
-- `GET /api/v2/config`: safe report/proof.
+  `diagnostic_doa` berisi sampel XML terpisah dengan timestamp sumber/observasi, alasan validasi dan status stale; sampel ini bukan DoA valid.
+- `GET /api/v2/angular/latest`: array 360, metadata dan `stale`.
+- `GET /api/v2/config`: `sdr_revision`, `settings_revision`, `proof`, `safe_settings`,
+  `settings_json`, dan metadata `reported`. Teks mentah tersedia hanya setelah settings diminta;
+  safe fields hanya saat report revision cocok dengan `state.cfg`.
 - `GET /api/v2/operations/latest`: public results, challenge disensor.
 - `GET /api/v2/operations/pending-shutdowns`: ringkasan publik `{"pending":true|false}` dari seluruh jurnal operasi shutdown yang belum gagal pasti; tidak dibatasi 20 record terbaru dan tidak memuat ID.
 - `GET /api/v2/capabilities`: capability yang dilaporkan node.
 - `POST /api/v2/login`: PIN lokal enam digit, field JSON `pin`, HttpOnly cookie+CSRF.
-- `POST /api/v2/commands`: intent lokal terautentikasi; backend membuat envelope v2, frontend tidak. Klien boleh memberi `id` agar dapat query operasi setelah respons execute hilang. Untuk `ppp.restart`, `confirm_previous_unknown` adalah flag konfirmasi lokal yang dihapus sebelum journaling/publish; flag tidak melintasi MQTT. Tanpa `id`, server membuat ID.
+- `POST /api/v2/commands`: intent lokal terautentikasi; backend membuat envelope v2, frontend tidak. `config.get` memerlukan MQTT READY dan session terkini, tetapi bukan health fresh; semua operation lain tetap memerlukan health fresh. Klien boleh memberi `id` untuk query hasil setelah respons execute hilang. Untuk `ppp.restart`, `confirm_previous_unknown` adalah flag lokal yang tidak melintasi MQTT. Tanpa `id`, server membuat ID.
 - `POST /api/v2/operation/result`: private result, membutuhkan auth+CSRF.
 
 Saat Ground mengubah sesi node, ia merekonsiliasi seluruh shutdown pending dari jurnal, bukan hanya window latest. Backend Ground hanya menyimpan/mengirim command dengan ID klien yang sudah tervalidasi; browser tidak memilih hasil operasi lain untuk menggantikan ID tersebut.

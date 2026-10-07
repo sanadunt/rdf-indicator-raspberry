@@ -26,13 +26,13 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
 - Gate DAQ, kemajuan frame, freshness, konfigurasi, clock, dan verifikasi konvensi sudut.
 - Dua koneksi MQTT: control/health/DoA dan diagnostic angular; bulk membawa angular normal. Akun/ACL control dan bulk terpisah.
 - Angular dikirim sebagai satu JSON PUBLISH berisi metadata dan tepat 360 angka source, tanpa Q16/U8 quantization atau chunk.
-- Receipt dari backend Ground; MQTT CONNECTED tidak otomatis berarti Ground menerima data.
+- Edge tidak menerima konfirmasi aplikasi Ground atas telemetry; MQTT CONNECTED bukan bukti telemetry diproses Ground.
 - Panel **Utama | Link | Sistem | Config | Data**, logical viewport **480x320**, login PIN 6 digit dengan keypad layar sentuh.
 - API loopback; login PIN dibatasi percobaan, dengan session dan CSRF/Origin checks.
 - `Config > Tampilan` menyimpan mode gelap/terang, aksen warna, dan font lokal.
 - `Data > Atur` mengubah host/port, transport MQTT/TCP atau WebSocket, pilihan TLS, dua pasangan akun, dan Client ID dasar (akhiran `-control`/`-bulk`).
   TLS aktif memverifikasi sertifikat/nama host; TLS nonaktif mengirim kredensial dan payload tanpa enkripsi—gunakan hanya pada link tepercaya.
-  Pengaturan disimpan lokal, diterapkan tanpa restart layanan, dan perubahan koneksi menghapus bukti receipt lama.
+  Pengaturan disimpan lokal dan diterapkan tanpa restart layanan; perubahan koneksi memulai sesi transport baru.
 - Daftar Data memuat topic/payload keluar dan command dari Ground; angular terkompresi, raw IQ tidak dikirim.
 - Jurnal command SQLite, ID dedup, expiry/session/revision validation, satu mutasi aktif.
 - Safe settings patch untuk lima field helper dan Start/Stop/Restart stack SDR yang di-approve.
@@ -224,7 +224,7 @@ sudo cat /etc/rdf-ground/initial-admin-pin.txt
 Receiver berjalan walaupun browser Ground ditutup. Ini pendamping integrasi, bukan
 pengganti source aplikasi dashboard lama yang tidak disertakan pada project ini.
 Integrasi dashboard lama dapat membaca API receiver lokal atau memakai decoder yang disediakan.
-Jangan menjalankan dua publisher receipt dengan client ID Ground yang sama.
+Jangan menjalankan dua receiver Ground untuk node yang sama dengan MQTT client ID yang sama; broker akan mengganti koneksi.
 
 Menggunakan broker yang sudah ada juga didukung: atur host, port, transport, credential, dan CA
 (bila TLS aktif) pada `/etc/rdf-node/config.yaml` mengikuti [MQTT_GROUND.md](docs/MQTT_GROUND.md).
@@ -253,7 +253,8 @@ Clock menggunakan `timedatectl NTPSynchronized`; bila belum dipercaya, panel tet
 namun LIVE/command berdeadline ditahan. Perbaiki sinkronisasi waktu melalui management/NTP
 OS yang benar. Paket ini tidak diam-diam menyetel jam atau membuat NTP melalui T900.
 
-Grafik BALANCED mulai setelah receipt Ground valid dan kondisi stabil **20 detik**.
+Bulk Angular mulai setelah gate source, transport, backlog, dan stabilisasi Edge lulus; tidak
+menunggu konfirmasi aplikasi Ground.
 `GRAPH PAUSED` selama setup bukan data hilang tersembunyi; alasannya ada di tab Link.
 
 ## 6. Interval bawaan
@@ -268,7 +269,7 @@ Grafik BALANCED mulai setelah receipt Ground valid dan kondisi stabil **20 detik
 | Health radio | 1 detik; tetap berjalan saat RDF STOPPED |
 | Detail health | 10 detik |
 | Grafik Angular (`balanced`) | Minimum 4 detik; ukuran JSON dan budget Bulk dapat memperpanjang |
-| Receipt Ground | 5 detik |
+| Settings export | Hanya setelah `cmd/config/get`; tidak ada report otomatis |
 | State/config | event/reconnect/request; state refresh 60 detik |
 
 Profil CONTROL mematikan grafik. Profile `graph_u8` tetap tersedia untuk konfigurasi lama dan
@@ -386,9 +387,9 @@ Tidak ada perintah reboot atau shutdown nyata dari test suite. Jalankan tanpa su
 | CLOCK UNTRUSTED | Periksa time sync OS; jangan bypass freshness |
 | MQTT DISABLED | Provision/import bundle atau konfigurasi broker; plaintext hanya untuk link privat tepercaya |
 | TLS error | Periksa CA/SAN/clock broker; jangan matikan verifikasi |
-| Ground belum terbukti | Jalankan receiver, cek topic v2 dan receipt |
+| Ground tidak melihat telemetry | Periksa receiver, subscription ACL, session dan health; MQTT CONNECTED di Edge bukan bukti receiver memproses data |
 | Ping peer PPP | Tab Link: satu ping ICMP tiap sekitar 5 detik dipaksa melalui interface PPP; tanpa balasan bukan bukti link mati. |
-| Grafik tidak mulai | Tab Link: source gate, receipt, bootstrap 20 detik, CONTROL profile |
+| Grafik tidak mulai | Tab Link: gate source/angle, backlog/stabilisasi, CONTROL profile |
 | CAPABILITY DISABLED | Ground: periksa remote grant dan capability tindakan pada config/helper; lokal: approval belum diberikan |
 | MAINTENANCE REQUIRED | Untuk lifecycle/reboot/shutdown lokal dari Edge, buka lease terbatas waktu; Ground memakai grant root |
 | PPP restart tidak tersedia | Cek capability, health fresh, MQTT Control, dan status unit fixed pada Raspberry |

@@ -1,5 +1,4 @@
 from __future__ import annotations
-from collections import deque
 import copy
 import queue
 import re
@@ -8,7 +7,7 @@ import time
 import uuid
 from pathlib import Path
 from . import __version__
-from .util import now_ms, compact, strict_json, read_boot_id, integer, atomic_write, stable_read
+from .util import now_ms, compact, strict_json, read_boot_id, atomic_write, stable_read
 from .config import PROFILES
 from .journal import Journal
 from .source import Source
@@ -31,12 +30,12 @@ class Agent:
         self.source=Source(cfg,self.journal); self.monitor=Monitor(cfg); self.commands=CommandManager(self)
         self.profile=self.journal.get('profile',cfg['telemetry']['profile'])
         if self.profile not in PROFILES: self.profile=cfg['telemetry']['profile']
-        self.config_proof='unverified'; self.request_config_report=True; self.planned_reboot=False
+        self.config_proof='unverified'; self.planned_reboot=False
         self.lock=threading.RLock(); self.snapshot_data={}; self.snapshot_seq=0; self.mqtt_topic_delivery={}
+        self.settings_request_lock=threading.Lock()
+        self.settings_request_id=None; self.settings_request_payload=None
         self.stop_event=threading.Event(); self.events=queue.Queue(32)
         self.bulk_resume_after=time.monotonic()+cfg['telemetry']['resume_stable_seconds']
-        self.receipt=None; self.receipt_progress=None; self.receipt_last_seen=None; self.receipt_rejects=0
-        self.sent_health=deque(maxlen=120); self.sent_doa=deque(maxlen=120); self.sent_angular=deque(maxlen=30)
         self.hq=0; self.last_doa_q=0; self.last_angular_q=0
         self.diagnostic_q=0; self.diagnostic_angular_q=0
         self.angular_abort=0; self.bulk_reason='BOOTSTRAP'; self.helper_status={}
@@ -120,7 +119,7 @@ class Agent:
     def _new_mqtt_clients(self,settings):
         if not self.cfg['mqtt']['enabled']: return {}
         m=self.cfg['mqtt']; demo_suffix='-demo' if self.demo else ''
-        subs=[(self.prefix+'/'+suffix,1,True) for suffix in OPS.values()]+[(self.prefix+'/ground/receipt',0,True)]
+        subs=[(self.prefix+'/'+suffix,1,True) for suffix in OPS.values()]
         will=(self.prefix+'/availability',compact({'v':2,'sid':self.sid,'online':False,'reason':'CONNECTION_LOST'}))
         return {
             'control':Client(cfg=m,client_id=settings['client_id']+'-control'+demo_suffix,
@@ -189,9 +188,8 @@ class Agent:
                 try: self.events.get_nowait(); self.events.task_done()
                 except queue.Empty: break
             with self.lock:
-                self.receipt=None; self.receipt_progress=None; self.receipt_last_seen=None
-                self.sent_health.clear(); self.sent_doa.clear(); self.sent_angular.clear(); self.mqtt_topic_delivery.clear()
-            self._generation=-1; self.last_sent_state=None; self.request_config_report=True
+                self.mqtt_topic_delivery.clear()
+            self._generation=-1; self.last_sent_state=None
             self.bulk_resume_after=time.monotonic()+self.cfg['telemetry']['resume_stable_seconds']
             self.bulk_reason='MQTT_RECONFIGURED'
     def start(self):
@@ -222,33 +220,9 @@ class Agent:
             except queue.Empty: continue
             try:
                 j=strict_json(data)
-                if topic==self.prefix+'/ground/receipt': self.accept_receipt(j,retained)
-                else: self.commands.submit(j,'ground-controller',retained=retained,topic=topic)
+                self.commands.submit(j,'ground-controller',retained=retained,topic=topic)
             except (ValueError,TypeError,KeyError,RecursionError): pass
             finally: self.events.task_done()
-    def accept_receipt(self,r,retained=False):
-        try:
-            if retained or not isinstance(r,dict) or r.get('v')!=2 or r.get('sid')!=self.sid: raise ValueError('BAD_RECEIPT_SESSION')
-            hq=integer(r['hq'],0,0xffffffff); dq=integer(r.get('dq',0),0,0xffffffff); aq=integer(r.get('aq',0),0,0xffffffff)
-            with self.lock:
-                if hq not in self.sent_health: raise ValueError('RECEIPT_HEALTH_NOT_SENT')
-                if dq and dq not in self.sent_doa: raise ValueError('RECEIPT_DOA_NOT_SENT')
-                if aq and aq not in self.sent_angular: raise ValueError('RECEIPT_ANGULAR_NOT_SENT')
-                if self.receipt and hq<self.receipt['hq']: raise ValueError('RECEIPT_REGRESSED')
-                if not self.receipt or hq>self.receipt['hq']: self.receipt_progress=time.monotonic()
-                self.receipt_last_seen=time.monotonic(); self.receipt=dict(r)
-        except (ValueError,KeyError,TypeError): self.receipt_rejects+=1
-    def _remember(self,kind,q):
-        def sent():
-            with self.lock:
-                target={'health':self.sent_health,'doa':self.sent_doa,'angular':self.sent_angular}[kind]
-                if q not in target: target.append(q)
-        return sent
-    def receipt_view(self):
-        with self.lock:
-            age=int((time.monotonic()-self.receipt_progress)*1000) if self.receipt_progress is not None else None
-            state='UNCONFIRMED' if age is None else 'LOST' if age>self.cfg['freshness']['receipt_lost_ms'] else 'LATE' if age>self.cfg['freshness']['receipt_warn_ms'] else 'RECEIVING'
-            return {'state':state,'age_ms':age,'last':dict(self.receipt) if self.receipt else None,'rejected':self.receipt_rejects}
     def _collect(self):
         count=0
         while not self.stop_event.is_set():
@@ -278,7 +252,6 @@ class Agent:
             latest=self.journal.lookup(self.commands.active_id)
             if latest and latest['request']['op'] in ('processing.set','service.restart'):
                 processing='STOPPING' if latest['request'].get('desired')=='STOPPED' else 'STARTING'
-        receipt=self.receipt_view()
         ctrl=self.clients.get('control'); bulk=self.clients.get('bulk')
         cs=ctrl.status() if ctrl else {'state':'DISABLED','ready':False,'depth':0,'pending_age_ms':0}
         bs=bulk.status() if bulk else {'state':'DISABLED','ready':False,'depth':0,'pending_age_ms':0}
@@ -287,12 +260,7 @@ class Agent:
         if view['valid'] and self.config_proof=='unverified': self.config_proof='source_correlated'
         if self.source.revision!=self.last_config_rev:
             self.config_proof='source_correlated' if view['valid'] else 'unverified'
-            self.last_config_rev=self.source.revision; self.request_config_report=True
-        sync='UNVERIFIED'
-        if self.source.revision is not None and receipt['last']:
-            if receipt['last'].get('rev')!=self.source.revision: sync='PENDING'
-            elif receipt['state']=='RECEIVING' and self.config_proof=='runtime': sync='SYNCED'
-            else: sync='REPORTED_SAME' if receipt['state']=='RECEIVING' else 'LAST_KNOWN'
+            self.last_config_rev=self.source.revision
         latest=self.journal.latest(1)
         alerts=[]
         if self.demo: alerts.append({'severity':'warning','code':'DEMO','text':'DEMO - bukan data perangkat'})
@@ -303,7 +271,6 @@ class Agent:
         if processing=='RUNNING' and view['daq']['state']!='HEALTHY': alerts.append({'severity':'error','code':'DAQ_DEGRADED','text':'DAQ belum sehat / data tidak valid'})
         if not view['valid'] and view['reasons']: alerts.append({'severity':'warning','code':view['reasons'][0],'text':view['reasons'][0]})
         if self.source.error: alerts.append({'severity':'warning','code':'SOURCE_READ','text':self.source.error})
-        if receipt['state'] in ('LATE','LOST'): alerts.append({'severity':'warning','code':'GROUND_LOST','text':'Ground belum menerima data terbaru'})
         self.snapshot_seq+=1
         snap={'schema_version':2,'version':__version__,'mode':'DEMO' if self.demo else 'LIVE',
               'node_id':self.cfg['node_id'],'sid':self.sid,'boot_id':self.boot,'agent_instance_id':self.instance,
@@ -312,17 +279,17 @@ class Agent:
               'detection':view,'diagnostic_doa':diagnostic,'daq':view['daq'],'host':host,
               'link':{'usb':host['usb'],'ppp':host['ppp'],'interface':host['interface'],
                       'ppp_probe':host['ppp_probe'],'ppp_peer':self.cfg['link']['peer_ip'],
-                      'mqtt_control':cs,'mqtt_bulk':bs,'mqtt_topic_delivery':topic_delivery,'ground':receipt,
+                      'mqtt_control':cs,'mqtt_bulk':bs,'mqtt_topic_delivery':topic_delivery,
                       'tx_kbit_s':host['tx_kbit_s'],'rx_kbit_s':host['rx_kbit_s'],
                       'traffic_layer':'PPP_IP_COUNTERS','profile':self.profile,'bulk_pause':self.bulk_reason,'angular_aborted':self.angular_abort},
-              'config':self.config_view(sync),'capabilities':self.capabilities(),
+              'config':self.config_view(),'capabilities':self.capabilities(),
               'last_operation':self.commands.public(latest[0]) if latest else None,'active_alerts':alerts}
         with self.lock: self.snapshot_data=snap
     def snapshot(self):
         with self.lock: return copy.deepcopy(self.snapshot_data)
-    def config_view(self,sync=None):
+    def config_view(self):
         return {'sdr_revision':self.source.revision,'digest':self.source.safe_digest,'proof':self.config_proof,
-                'ground_sync':sync or 'UNVERIFIED','safe_settings':dict(self.source.safe),
+                'safe_settings':dict(self.source.safe),
                 'profile':self.profile,'source_configured':self.source.path is not None,
                 'authority_verified':self.cfg['source']['authority_verified'],'angle_verified':self.cfg['source']['angle_verified'],
                 'mqtt_configured':self.cfg['mqtt']['enabled'],'preferences':self.journal.get('display',self.cfg['display'])}
@@ -352,15 +319,11 @@ class Agent:
                 'state':state,'qos':qos,'confirmation':'PUBACK' if qos==1 else 'SOCKET_WRITE',
                 'updated_ms':timestamp,'sent_ms':timestamp if state=='SENT' else previous.get('sent_ms'),
                 'error':error}
-    def _offer(self,key,suffix,payload,qos=0,retain=False,expiry=None,priority=2,sent=None,bulk=False):
+    def _offer(self,key,suffix,payload,qos=0,retain=False,expiry=None,priority=2,bulk=False):
         client=self.clients.get('bulk' if bulk else 'control')
         if not client: return False
         self._topic_delivery_update(suffix,'PENDING',qos)
-        def delivered():
-            try:
-                if sent: sent()
-            finally:
-                self._topic_delivery_update(suffix,'SENT',qos)
+        def delivered(): self._topic_delivery_update(suffix,'SENT',qos)
         def failed(reason): self._topic_delivery_update(suffix,'ERROR',qos,error=reason)
         return client.offer(key,self.prefix+'/'+suffix,payload,qos=qos,retain=retain,expiry=expiry,
                             priority=priority,on_sent=delivered,on_error=failed)
@@ -384,7 +347,6 @@ class Agent:
                     self.stop_event.wait(.1); continue
                 if ctrl.generation!=self._generation:
                     self._generation=ctrl.generation
-                    self.request_config_report=True
                     self.bulk_resume_after=now+self.cfg['telemetry']['resume_stable_seconds']
                     self._offer('available','availability',{'v':2,'sid':self.sid,'online':True,'t':now_ms()},1,True,priority=0)
                     self._offer('caps','capabilities',self.capabilities(),1,True,priority=3)
@@ -402,7 +364,7 @@ class Agent:
                              'daq':1 if daq['healthy'] else 2 if daq['state']=='UNKNOWN' else 0,
                              'drop':daq['dropped_frames'],'age':d['source_age_ms'],'temp':h['temperature_c'],
                              'clk':1 if h['clock_trusted'] else 0,'rev':self.source.revision}
-                    self._offer('health','telemetry/health',payload,expiry=5,priority=1,sent=self._remember('health',self.hq))
+                    self._offer('health','telemetry/health',payload,expiry=5,priority=1)
                 if tick('detail',10):
                     self._offer('detail','telemetry/health/detail',{'v':2,'sid':self.sid,'t':now_ms(),
                         'usb':h['usb_count'],'sync':list(daq['sync'].values()),'cpu':h['cpu_percent'],'mem':h['memory_percent'],
@@ -412,28 +374,28 @@ class Agent:
                 if (state_changed!=self.last_sent_state and now-due.get('state_event_last',-10)>1) or now>=due.get('state',0):
                     if self._offer('state','state',state,1,True,priority=1):
                         due['state']=now+60; due['state_event_last']=now; self.last_sent_state=state_changed
-                if self.request_config_report and now>=due.get('config',0):
-                    reported={'v':2,'sid':self.sid,'rev':self.source.revision,'t':now_ms(),'proof':self.config_proof,
-                              'digest':self.source.safe_digest,'effective':self.source.safe}
-                    if self._offer('config','config/reported',reported,1,True,priority=3):
-                        self.request_config_report=False; due['config']=now+2
+                with self.settings_request_lock:
+                    settings_id=self.settings_request_id; settings_payload=self.settings_request_payload
+                if settings_id and settings_payload is not None and self.cfg['mqtt']['tls']:
+                    if self._offer('settings:'+settings_id,'settings/reported',settings_payload,
+                                   1,False,expiry=30,priority=3):
+                        with self.settings_request_lock:
+                            if self.settings_request_id==settings_id:
+                                self.settings_request_id=None; self.settings_request_payload=None
                 if tick('doa',PROFILES[self.profile]['doa_s']) and d['q']!=self.last_doa_q:
                     if d['valid']:
                         payload={'v':2,'sid':self.sid,'q':d['q'],'t':d['source_timestamp_ms'],'f':d['frequency_hz'],
                                  'a':round(d['relative_doa_deg'],2),'c':round(d['confidence_native_db'],2),
                                  'p':round(d['power_native_db'],2),'rev':d['revision'],'ok':1}
-                        sent=self._remember('doa',d['q'])
                     elif unverified_only:
                         payload={'v':2,'sid':self.sid,'q':d['q'],'t':d['source_timestamp_ms'],'f':d['frequency_hz'],
                                  'a':round(d['raw_doa_deg'],2),'c':round(d['confidence_native_db'],2),
                                  'p':round(d['power_native_db'],2),'rev':d['revision'],'ok':0,
                                  'trust':'UNVERIFIED','angle_reference':'RAW',
                                  'validation_reasons':list(d['reasons'])}
-                        sent=None
                     else:
-                        payload=None; sent=None
-                    if payload is not None and self._offer(
-                            'doa','telemetry/doa',payload,expiry=3,sent=sent):
+                        payload=None
+                    if payload is not None and self._offer('doa','telemetry/doa',payload,expiry=3):
                         self.last_doa_q=d['q']
                 diag=s['diagnostic_doa']
                 if diag['available'] and tick('diagnostic',3):
@@ -518,9 +480,8 @@ class Agent:
                             period=max(interval,
                                 (len(data)+len(self.prefix+'/telemetry/angular')+160)/
                                 self.cfg['telemetry']['bulk_budget_bytes_s'])
-                            sent=self._remember('angular',r['q']) if d['valid'] else None
                             if self._offer('angular','telemetry/angular',data,expiry=3,
-                                           priority=3,sent=sent,bulk=True):
+                                           priority=3,bulk=True):
                                 self.last_angular_q=r['q']
                             else:
                                 self.angular_abort+=1

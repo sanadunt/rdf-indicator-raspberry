@@ -43,11 +43,6 @@ def load_config(path: str | Path | None = None) -> dict:
         if len(text) > 65536:
             raise ValueError('CONFIG_TOO_LARGE')
         value = yaml.safe_load(text)
-        telemetry = value.get('telemetry') if isinstance(value, dict) else None
-        if isinstance(telemetry, dict) and 'require_ground_receipt_for_bulk' in telemetry:
-            legacy_gate = telemetry.pop('require_ground_receipt_for_bulk')
-            if type(legacy_gate) is not bool:
-                raise ValueError('telemetry.require_ground_receipt_for_bulk: BOOLEAN_REQUIRED')
         _merge(base, value)
     validate_config(base)
     return base
@@ -79,8 +74,6 @@ def validate_config(c: dict) -> None:
         raise ValueError('AGGREGATE_BUDGET_TOO_HIGH')
     for k,v in c['freshness'].items():
         finite(v,500,120000)
-    if c['freshness']['receipt_warn_ms'] >= c['freshness']['receipt_lost_ms']:
-        raise ValueError('RECEIPT_THRESHOLDS')
     if c['display']['theme'] not in ('dark','light'):
         raise ValueError('INVALID_THEME')
     if c['display']['accent'] not in ('teal','blue','amber'):

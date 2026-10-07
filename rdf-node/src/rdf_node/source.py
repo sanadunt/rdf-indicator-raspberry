@@ -117,6 +117,7 @@ class Source:
         self.cfg=cfg; self.journal=journal
         self.path=Path(cfg['source']['share_dir']) if cfg['source']['share_dir'] else None
         self.record=None; self.status=None; self.settings={}; self.safe={}
+        self.raw_settings=None; self.settings_seen=None
         self.raw_digest=None; self.safe_digest=None; self.config_mtime_ms=0
         self.seq=0; self.record_signature=None; self.status_signature=None
         self.record_seen=None; self.status_seen=None; self.frame_seen=None; self.last_frame=None
@@ -144,7 +145,8 @@ class Source:
                     self.config_changed_mono=time.monotonic()
                     self.config_mtime_ms=(self.path/'settings.json').stat().st_mtime_ns//1000000
                     self.safe_digest=h
-                self.raw_digest=hashlib.sha256(raw).hexdigest(); self.settings=j; self.safe=safe; self.config_error=None
+                self.raw_digest=hashlib.sha256(raw).hexdigest(); self.raw_settings=raw
+                self.settings_seen=time.monotonic(); self.settings=j; self.safe=safe; self.config_error=None
             except (OSError,ValueError,TypeError,KeyError,RecursionError) as e:
                 self.config_error=type(e).__name__+':SETTINGS_UNAVAILABLE'
         if force or now>=self.next_status:

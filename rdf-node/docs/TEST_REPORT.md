@@ -25,7 +25,7 @@ loopback network dan mock command systemd/reboot. Tidak menjalankan reboot/stop 
 | TLS network | local TLS server trust and unknown CA rejection |
 | App command | session/expiry/topic/revision/clock/remote defaults, idempotency, challenge redaction |
 | API | Host/Origin/auth/CSRF, incorrect passwords, JSON/size limits, preferences, logout, health semantics |
-| End-to-end | Agent -> broker fixture -> Ground decoder -> full360 -> receipt -> config query ACK |
+| End-to-end | Agent -> broker fixture -> Ground decoder -> full360 -> config query ACK |
 | Stop source | Fresh bridge health continues after fixture SDR source stops |
 
 End-to-end test memakai packet pacing default dan mengurangi hanya resume-stability wait
@@ -78,8 +78,25 @@ TLS tests memerlukan executable openssl; jika tidak tersedia, test tersebut dita
 bukan dianggap lulus TLS. Simpan hasil rerun pada perangkat sebagai bukti terpisah.
 Jangan menjalankan tester throughput bersamaan dengan operasi penting melalui radio.
 
-## Verifikasi setelah cutover Angular JSON
+## Verifikasi setelah Ground-requested settings cutover
 
-`bash scripts/check-package.sh` lulus pada checkout saat ini: 224 tests lulus, 2 dilewati karena
-memerlukan Linux `ping`. End-to-end memakai broker fixture loopback dan Ground decoder; tidak
-mencakup Mosquitto, Raspberry, display fisik, PPP, atau T900 nyata.
+`python3 run.py selftest`: 233 tests dijalankan, 0 gagal, 2 dilewati karena `Linux ping` tidak
+tersedia.
+
+Coverage baru mencakup retensi byte settings native yang persis, `config.get` satu kali tanpa
+report otomatis, penolakan TLS-off/source unavailable/stale/payload di atas 8 KiB, serta
+validasi Ground terhadap request ID, session, boot, freshness, dan JSON mentah. Edge menolak
+`config.get` lokal yang tidak punya consumer; Ground selalu memakai `state.cfg` sebagai
+`base_rev`, bukan nilai caller. Test command memastikan read-only `config.get` tidak butuh health
+fresh, sementara mutation tetap membutuhkannya. DoA/Angular menerima revision berbeda hanya bila
+session, freshness, health, dan evidence lain lolos.
+
+End-to-end memakai broker TLS fixture loopback untuk memeriksa request, response settings mentah,
+dan ketiadaan konfirmasi aplikasi Ground-ke-Edge. Ini bukan uji Mosquitto, Raspberry, PPP/T900,
+atau display fisik.
+
+Uji browser manual membuka demo Edge dan Ground companion melalui HTTP lokal. Edge menampilkan
+inventory `settings/reported` tanpa status sync lama. Ground renderer menampilkan raw JSON dan
+safe form values dari state browser yang disiapkan; `evidence/browser-qa.json` adalah artifact
+DOM-injection Edge terpisah, bukan capture halaman Ground atau respons MQTT live. Request/response
+nyata diuji terpisah dengan TLS broker fixture.

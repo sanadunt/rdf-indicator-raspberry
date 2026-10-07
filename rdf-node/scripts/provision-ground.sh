@@ -46,10 +46,10 @@ def section(user,pubs,subs):
  acl.extend('topic write '+prefix+'/'+x for x in pubs)
  acl.extend('topic read '+prefix+'/'+x for x in subs)
  acl.append('')
-section(node+'-control',['telemetry/doa','telemetry/diagnostic/doa','telemetry/diagnostic/angular','telemetry/health','telemetry/health/detail','state','availability','config/reported','capabilities','ack/config','ack/operation'],['cmd/#','ground/receipt'])
+section(node+'-control',['telemetry/doa','telemetry/diagnostic/doa','telemetry/diagnostic/angular','telemetry/health','telemetry/health/detail','state','availability','settings/reported','capabilities','ack/config','ack/operation'],['cmd/#'])
 section(node+'-bulk',['telemetry/angular'],[])
-section('rdf-ground-controller',['ground/receipt','cmd/#'],['telemetry/#','state','availability','config/reported','capabilities','ack/#'])
-section('rdf-ground-viewer',[],['telemetry/#','state','availability','config/reported','capabilities','ack/#'])
+section('rdf-ground-controller',['cmd/#'],['telemetry/#','state','availability','settings/reported','capabilities','ack/#'])
+section('rdf-ground-viewer',[],['telemetry/#','state','availability','settings/reported','capabilities','ack/#'])
 atomic_write(tmp/'acl',('\n'.join(acl)+'\n').encode())
 for name,user in [('uav-control.json',node+'-control'),('uav-bulk.json',node+'-bulk')]:
  atomic_write(out/name,json.dumps({'username':user,'password':users[user]}).encode())
