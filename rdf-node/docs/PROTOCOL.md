@@ -51,10 +51,20 @@ and fragmentation/control frames are handled.
 {"v":2,"sid":"7a8b9c0d","q":1245,"t":1790668800123,"f":433920000,"a":137.4,"c":8.27,"p":-54.2,"rev":7,"ok":1}
 ```
 
-`t`: timestamp native ms; `q`: urutan sampel adapter, bukan frame DAQ.
-`a`: konvensi angle config; `c`: PAPR/native dB, bukan probabilitas;
+`t`: timestamp native ms; `q`: sequence sampel adapter, bukan frame DAQ.
+`a`: bila `ok=1`, sudut menurut konvensi config; bila `ok=0`, nilai raw source dan hanya
+berarti RAW dengan `angle_reference="RAW"`. `c`: PAPR/native dB, bukan probabilitas;
 `p`: power native signed; `f`: VFO Hz; `rev`: safe config revision-at-sample.
-Nilai di atas sintetis. Radio tidak menambahkan SNR yang belum terbukti sumbernya.
+`ok=1` berarti kandidat LIVE terverifikasi. Varian unverified pada topic yang sama:
+
+```json
+{"v":2,"sid":"7a8b9c0d","q":1246,"t":1790668800123,"f":433920000,"a":10.0,"c":8.27,"p":-54.2,"rev":7,"ok":0,"trust":"UNVERIFIED","angle_reference":"RAW","validation_reasons":["SOURCE_UNVERIFIED","ANGLE_UNVERIFIED"]}
+```
+
+Edge hanya mengirim varian ini bila parsing, freshness/clock, DAQ, dan atribusi config lulus
+serta satu-satunya gate yang gagal adalah authority dan/atau verifikasi konvensi sudut.
+Ground menampilkannya di jalur diagnostic; tidak mengisi detection atau receipt `dq`.
+Nilai contoh sintetis. Radio tidak menambahkan SNR yang belum terbukti sumbernya.
 
 ## Health
 
@@ -79,9 +89,9 @@ if frame is not None:
     samples = frame['values']  # exact 360 reconstructed numeric values
 ```
 
-Sebelum diterima sebagai LIVE, Ground juga memeriksa sid/boot, revision, flags, source age,
-health fresh, dan monotonic q. Contoh kode assembler saja bukan semua gate; gunakan
-`Ground.receive` sebagai contoh integrasi lengkap.
+Sebelum diterima sebagai LIVE, Ground memeriksa sid/boot, revision, flags lengkap (`63`),
+source age, health fresh, dan monotonic q. Varian normal-topic UNVERIFIED dirutekan ke jalur
+diagnostic hanya bila bit parsed/fresh/DAQ/config ada; assembler saja bukan semua gate.
 
 Header little-endian `<4sBBHIIQIIBBHffHh`, 48 bytes:
 
@@ -89,7 +99,7 @@ Header little-endian `<4sBBHIIQIIBBHffHh`, 48 bytes:
 |---|---|
 | magic | 4 bytes RDF2 |
 | version, encoding | u8, u8 (1 Q16, 2 U8) |
-| flags | u16: parsed/fresh/DAQ/convention/config bits |
+| flags | u16: parsed/fresh/DAQ/convention/config/source-authority bits |
 | sid, q | u32, u32 |
 | timestamp | u64 ms |
 | frequency, revision | u32, u32; revision ffffffff berarti unknown |
@@ -124,6 +134,16 @@ Edge ke broker, bukan Ground terhubung atau menerima pesan QoS 0 non-retained. C
 dan tidak adanya offline replay berarti telemetry dapat terlewat saat Ground offline; MQTT
 Message Expiry yang dikonfigurasi tetap berlaku.
 Validitas/freshness source, profile, backlog, budget, dan stabilisasi resume tetap menjadi gate lokal.
+Jika hanya `SOURCE_UNVERIFIED` dan/atau `ANGLE_UNVERIFIED` yang gagal, Edge tetap memakai
+`telemetry/doa` dan `telemetry/angular`, tetapi menandai DoA `ok=0` dan Angular dengan flags
+parsial. Semua gate parse, freshness/clock, DAQ, dan config tetap wajib; source stale, DAQ
+buruk, clock/config tidak terbukti, atau error lain tetap memblokir topic normal. Ground
+memetakan kedua varian ke tampilan diagnostic; receipt `dq`/`aq` tetap 0 untuk record itu,
+dan nilainya tidak menjadi detection LIVE atau dasar command.
+
+Perubahan ini memerlukan Edge dan Ground package yang diperbarui bersama. Decoder lama menolak
+bit flags baru; consumer DoA lama juga dapat menolak `ok=0` atau salah menafsirkan `a` sebagai
+sudut relatif. Consumer MQTT lain harus mengerti metadata UNVERIFIED sebelum memakai topic ini.
 
 `telemetry/diagnostic/doa` dikirim tiap 3 s selama XML tersedia, terlepas dari validitas DoA
 normal. `q` bertambah tiap publish; timestamp sumber/observasi tetap menunjuk pembacaan file
@@ -154,12 +174,17 @@ Bits `flags` menyatakan bukti yang tersedia saat Edge mengirim:
 | 2 | DAQ sehat |
 | 3 | konvensi sudut diverifikasi lokal |
 | 4 | atribusi konfigurasi cocok |
-
-Ground menyimpan frame lengkap terpisah dari `telemetry/angular`, `telemetry/doa`, dan receipt.
-Nilainya selalu `trust=UNVERIFIED`; timestamp stale, health/processing, revision, dan flags
-menjadi `validation_reasons`/`stale`, bukan alasan membuang sampel. Baca melalui
-`GET /api/v2/angular/diagnostic/latest` (mengembalikan `null` sebelum frame lengkap diterima).
-Frame diagnostic tidak memenuhi receipt `aq` atau detection LIVE.
+| 5 | authority source diverifikasi lokal |
+Frame live memerlukan `flags=63`. Frame pada `telemetry/angular` yang memiliki bit parsed,
+fresh, DAQ, dan config tetapi kehilangan bit convention dan/atau authority diterima sebagai
+`trust=UNVERIFIED` di diagnostic; flags legacy `31` berarti authority tidak terbukti dan
+diturunkan ke jalur itu. Ground menolak frame normal-topic yang juga kehilangan bit parsed,
+fresh, DAQ, atau config.
+Frame diagnostic tetap terpisah dari `telemetry/angular`, `telemetry/doa`, dan receipt.
+Timestamp stale, health/processing, revision, dan flags menjadi `validation_reasons`/`stale`,
+bukan alasan membuang sampel. Baca melalui `GET /api/v2/angular/diagnostic/latest`
+(mengembalikan `null` sebelum frame lengkap diterima). Frame diagnostic tidak memenuhi
+receipt `aq` atau detection LIVE.
 
 Response memuat 360 `values`, `encoding`, `frequency_hz`, `raw_doa_deg`,
 `source_timestamp_ms`, `source_age_ms`, `received_age_ms`, `flags`,
@@ -167,7 +192,7 @@ Response memuat 360 `values`, `encoding`, `frequency_hz`, `raw_doa_deg`,
 
 Encoding mengikuti profile; bila Q16 tidak dapat merepresentasikan rentang tanpa clipping,
 Edge memakai U8. Keduanya terkuantisasi, bukan salinan lossless CSV. Gate LIVE pada
-`telemetry/angular` tetap mensyaratkan frame flags lengkap dan verifikasi Ground.
+`telemetry/angular` mensyaratkan seluruh flags `63` dan verifikasi Ground.
 
 ## Command envelope
 

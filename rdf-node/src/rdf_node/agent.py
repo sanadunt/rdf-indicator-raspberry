@@ -17,7 +17,8 @@ from .control import CommandManager, OPS
 from .helper import call_helper
 from .mqtt import Client
 from .mqtt_ws import validate_mqtt_host,validate_websocket_path
-from .codec import encode, split, FLAG_PARSED, FLAG_FRESH, FLAG_DAQ, FLAG_CONVENTION, FLAG_CONFIG
+from .codec import encode, split, FLAG_PARSED, FLAG_FRESH, FLAG_DAQ, FLAG_CONVENTION, FLAG_CONFIG, FLAG_AUTHORITY
+UNVERIFIED_REASONS=frozenset(('SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'))
 
 class Agent:
     def __init__(self,cfg,demo=False):
@@ -34,6 +35,7 @@ class Agent:
         self.receipt=None; self.receipt_progress=None; self.receipt_last_seen=None; self.receipt_rejects=0
         self.sent_health=deque(maxlen=120); self.sent_doa=deque(maxlen=120); self.sent_angular=deque(maxlen=30)
         self.hq=0; self.last_doa_q=0; self.last_angular_q=0; self.angular_parts=[]; self.angular_started=0
+        self.angular_verified=False
         self.diagnostic_q=0; self.diagnostic_angular_q=0; self.diagnostic_angular_parts=[]; self.diagnostic_angular_started=0
         self.angular_q=0; self.angular_abort=0; self.bulk_reason='BOOTSTRAP'; self.helper_status={}
         self.clients={}; self._generation=-1; self.last_config_rev=None; self.last_sent_state=None
@@ -392,6 +394,8 @@ class Agent:
                     if now>=due.get(key,0): due[key]=now+seconds; return True
                     return False
                 d=s['detection']; h=s['host']; daq=s['daq']; run=s['processing']['observed']
+                unverified_only=(not d['valid'] and bool(d['reasons']) and
+                                 all(reason in UNVERIFIED_REASONS for reason in d['reasons']))
                 if tick('health',1):
                     self.hq+=1
                     payload={'v':2,'sid':self.sid,'q':self.hq,'t':now_ms(),
@@ -414,11 +418,24 @@ class Agent:
                               'digest':self.source.safe_digest,'effective':self.source.safe}
                     if self._offer('config','config/reported',reported,1,True,priority=3):
                         self.request_config_report=False; due['config']=now+2
-                if tick('doa',PROFILES[self.profile]['doa_s']) and d['valid'] and d['q']!=self.last_doa_q:
-                    payload={'v':2,'sid':self.sid,'q':d['q'],'t':d['source_timestamp_ms'],'f':d['frequency_hz'],
-                             'a':round(d['relative_doa_deg'],2),'c':round(d['confidence_native_db'],2),
-                             'p':round(d['power_native_db'],2),'rev':d['revision'],'ok':1}
-                    if self._offer('doa','telemetry/doa',payload,expiry=3,sent=self._remember('doa',d['q'])): self.last_doa_q=d['q']
+                if tick('doa',PROFILES[self.profile]['doa_s']) and d['q']!=self.last_doa_q:
+                    if d['valid']:
+                        payload={'v':2,'sid':self.sid,'q':d['q'],'t':d['source_timestamp_ms'],'f':d['frequency_hz'],
+                                 'a':round(d['relative_doa_deg'],2),'c':round(d['confidence_native_db'],2),
+                                 'p':round(d['power_native_db'],2),'rev':d['revision'],'ok':1}
+                        sent=self._remember('doa',d['q'])
+                    elif unverified_only:
+                        payload={'v':2,'sid':self.sid,'q':d['q'],'t':d['source_timestamp_ms'],'f':d['frequency_hz'],
+                                 'a':round(d['raw_doa_deg'],2),'c':round(d['confidence_native_db'],2),
+                                 'p':round(d['power_native_db'],2),'rev':d['revision'],'ok':0,
+                                 'trust':'UNVERIFIED','angle_reference':'RAW',
+                                 'validation_reasons':list(d['reasons'])}
+                        sent=None
+                    else:
+                        payload=None; sent=None
+                    if payload is not None and self._offer(
+                            'doa','telemetry/doa',payload,expiry=3,sent=sent):
+                        self.last_doa_q=d['q']
                 diag=s['diagnostic_doa']
                 if diag['available'] and tick('diagnostic',3):
                     self.diagnostic_q+=1
@@ -432,7 +449,7 @@ class Agent:
                     self._offer('diagnostic-doa','telemetry/diagnostic/doa',payload,expiry=3,priority=3)
                 reason=None
                 if self.profile=='control': reason='PROFILE_CONTROL'
-                elif not d['valid']: reason='SOURCE_NOT_ELIGIBLE'
+                elif not d['valid'] and not unverified_only: reason='SOURCE_NOT_ELIGIBLE'
                 elif self.commands.busy: reason='CONTROL_IN_PROGRESS'
                 elif not bulk or not bulk.ready: reason='BULK_NOT_READY'
                 elif ctrl.pending_age_ms>500: reason='CONTROL_BACKLOG'
@@ -452,6 +469,7 @@ class Agent:
                         flags|=FLAG_FRESH
                     if daq['healthy']: flags|=FLAG_DAQ
                     if self.cfg['source']['angle_verified']: flags|=FLAG_CONVENTION
+                    if self.cfg['source']['authority_verified']: flags|=FLAG_AUTHORITY
                     if d['config_attributed']: flags|=FLAG_CONFIG
                     encoding=PROFILES[self.profile]['encoding']
                     encode_args=dict(sid=int(self.sid,16),seq=self.diagnostic_angular_q,
@@ -495,14 +513,25 @@ class Agent:
                     if not self.angular_parts and now>=due.get('angular',0) and d['q']!=self.last_angular_q:
                         r=self.source.record
                         if r and r['q']==d['q']:
+                            flags=FLAG_PARSED
+                            if (h['clock_trusted'] and d['source_age_ms'] is not None and
+                                    d['source_age_ms']<=self.cfg['freshness']['doa_ms'] and
+                                    r['timestamp_ms']<=now_ms()+1000):
+                                flags|=FLAG_FRESH
+                            if daq['healthy']: flags|=FLAG_DAQ
+                            if self.cfg['source']['angle_verified']: flags|=FLAG_CONVENTION
+                            if d['config_attributed']: flags|=FLAG_CONFIG
+                            if self.cfg['source']['authority_verified']: flags|=FLAG_AUTHORITY
                             frame=encode(r['values'],sid=int(self.sid,16),seq=r['q'],timestamp_ms=r['timestamp_ms'],
                                 frequency_hz=r['frequency_hz'],revision=d['revision'],vfo=self.cfg['source']['output_vfo'],
-                                raw_doa=r['raw_doa_deg'],confidence=r['confidence_native_db'],encoding=PROFILES[self.profile]['encoding'])
+                                flags=flags,raw_doa=r['raw_doa_deg'],confidence=r['confidence_native_db'],
+                                encoding=PROFILES[self.profile]['encoding'])
+                            self.angular_verified=d['valid']
                             self.angular_parts=split(frame); self.angular_q=r['q']; self.angular_started=now
                             due['angular']=now+interval; parts_next=now
                     if self.angular_parts and now>=parts_next and bulk.outbox.status()['depth']==0 and bulk.pending_age_ms==0:
                         chunk=self.angular_parts.pop(0); q=self.angular_q
-                        sent=self._remember('angular',q) if not self.angular_parts else None
+                        sent=self._remember('angular',q) if self.angular_verified and not self.angular_parts else None
                         if not self._offer('angular','telemetry/angular',chunk,expiry=3,priority=3,sent=sent,bulk=True):
                             self.angular_parts=[]; self.angular_abort+=1
                         else:

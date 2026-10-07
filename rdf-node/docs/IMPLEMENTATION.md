@@ -11,9 +11,7 @@ Native SDR _share
 
 Ground MQTT consumer
    -> validate normal telemetry session/config/health
-   -> decode authoritative DoA + assemble angular chunks
-   -> keep diagnostic DoA on a separate UNVERIFIED path
-   -> local API + preview graph + diagnostic display
+   -> keep verified data authoritative; route UNVERIFIED variants to diagnostic views
    -> receipt only for accepted health/DoA/angular sequences
 
 Ground command received through the configured broker/link
@@ -148,14 +146,18 @@ file tidak membuat q baru. Timestamp regresi ditolak sampai sumber/agent direkon
 
 `doa.xml` diparse terpisah hanya untuk tampilan/relay diagnostik. `TIME` adalah Unix
 milliseconds, `FREQUENCY` dalam MHz, dan `DOA` dipertahankan sebagai nilai raw. Diagnostik
-tidak mengisi `detection`, mengubah gate angle/provenance, atau memenuhi syarat telemetry,
-receipt, maupun control normal. XML hilang/rusak tidak dapat membuat source valid.
+tidak mengisi `detection` atau memenuhi receipt/control normal. XML hilang/rusak tidak dapat
+membuat source valid.
 
 DAQ sehat memerlukan status fresh, daq_ok boolean, frame/sample-delay/IQ sync true, dan
 kemajuan frame. Observasi frame pertama belum membuktikan progress. Counter turun/reset
 memerlukan progress berikutnya. Missing field dianggap unknown, tidak dibuat hijau.
 
-LIVE membutuhkan authority dan angle approval, clock, config attribution, DAQ dan freshness.
+LIVE detection tetap memerlukan authority dan angle approval, clock, config attribution, DAQ
+dan freshness. Jika hanya approval authority/angle yang belum terverifikasi, Edge boleh
+mengirim DoA/angular pada topic normal dengan metadata/flags UNVERIFIED; ini tidak mengubah
+`detection.valid`, tidak memajukan receipt DoA/angular, dan tidak menjadi dasar command.
+Gate freshness, parse, DAQ, clock, config, dan control tetap wajib.
 Tidak ada cara membuktikan NO_DETECTION dari file stale saja; panel menyebut NO_FRESH_DOA.
 Array tetap native; PAPR tetap dB native; power bukan link RSSI dan bukan calibrated dBm.
 GPS/altitude/SNR tidak diisi dengan angka dummy. Mode nav OFF.
@@ -207,21 +209,33 @@ atau DoA normal terblokir. Sequence `q` bertambah tiap publish; timestamp sumber
 tetap menunjuk pembacaan file yang sama. Ground menyimpan hasil terpisah sebagai `UNVERIFIED`;
 ini tidak menambah `dq` atau menjadi detection normal.
 
+Ketika hanya approval source/angle yang tidak ada dan gate integritas data lainnya lulus,
+`telemetry/doa` membawa `ok=0`, `trust=UNVERIFIED`, `angle_reference=RAW`, serta alasan
+validasi; `a` berisi nilai raw. `telemetry/angular` tetap memakai Bulk, tetapi flags menunjukkan
+approval yang hilang. Ground merutekan record ke diagnostic view yang sudah ada, bukan
+`detection`, `dq`, `aq`, atau otorisasi command. Kegagalan freshness, DAQ, clock, config,
+parse, atau control tidak memakai fallback normal-topic ini.
+
+Edge dan Ground harus diperbarui bersama. Decoder RDF2 lama menolak bit authority baru; JSON
+consumer lama mungkin menganggap `a` selalu relatif atau menolak `ok=0`. Perbarui consumer
+lain yang membaca topic normal sebelum mengaktifkan varian UNVERIFIED.
+
 `telemetry/diagnostic/angular` mengirim record 360 sampel terakhir dari `DOA_value.html`
-hanya saat jalur angular Bulk normal tidak dapat mengirimnya. Jika gate validitas source gagal
-(misalnya DAQ berhenti atau stale), Edge menjadwalkan kandidat tiap 6 s; jika source valid
-tetapi Bulk terblokir atau menunggu stabilisasi resume, tiap 30 s. Kandidat tidak diduplikasi
-saat jalur Bulk normal tersedia. Profile `control` tetap menahan array angular.
+hanya saat jalur angular Bulk normal tidak dapat mengirimnya. Jika gate integritas source
+strict gagal (misalnya DAQ berhenti atau stale), Edge menjadwalkan kandidat tiap 6 s; jika
+source valid tetapi Bulk terblokir atau menunggu stabilisasi resume, tiap 30 s. Bila hanya
+approval authority/angle yang hilang, topic Bulk normal membawa kandidat berlabel UNVERIFIED
+setelah syarat resume normal terpenuhi. Profile `control` tetap menahan array angular.
 
 Kandidat memakai Control QoS 0, expiry 3 s, tanpa retention, dan tidak menunggu receipt Ground.
 Timestamp sumber dipertahankan; publish ulang tidak menyegarkan umur sampel. Flags RDF2
-membawa bukti parsing, clock/freshness, DAQ, konvensi, dan atribusi konfigurasi. Jika Q16
-melewati rentangnya, diagnostic memakai U8 tanpa clipping.
+membawa bukti parsing, clock/freshness, DAQ, konvensi, atribusi konfigurasi, dan authority
+source. Jika Q16 melewati rentangnya, diagnostic memakai U8 tanpa clipping.
 
-Ground menyimpan frame lengkap terpisah dari Angular LIVE dan menyediakannya melalui
-`GET /api/v2/angular/diagnostic/latest`. Kandidat selalu `UNVERIFIED`; timestamp, health,
-processing, revision, dan flags menentukan `stale`/`validation_reasons`. Kandidat tidak
-memajukan receipt `aq` atau DoA/detection normal.
+Ground menyimpan frame diagnostic dan Angular normal-topic UNVERIFIED di jalur terpisah dari
+Angular LIVE dan menyediakannya melalui `GET /api/v2/angular/diagnostic/latest`. Kandidat
+selalu `UNVERIFIED`; timestamp, health, processing, revision, dan flags menentukan
+`stale`/`validation_reasons`. Kandidat tidak memajukan receipt `aq` atau DoA/detection normal.
 
 Kedua topic diagnostic memakai Control token bucket bersama health/DoA (default 850 B/s).
 Broker ACL harus mengizinkan Control Edge publish dan Ground subscribe. Chunk QoS 0 dapat

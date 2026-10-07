@@ -16,6 +16,8 @@ FLAG_FRESH=2
 FLAG_DAQ=4
 FLAG_CONVENTION=8
 FLAG_CONFIG=16
+FLAG_AUTHORITY=32
+ALL_FLAGS=63
 UNKNOWN_REV = 0xffffffff
 
 def encode(values, *, sid, seq, timestamp_ms, frequency_hz, revision=UNKNOWN_REV,
@@ -26,7 +28,7 @@ def encode(values, *, sid, seq, timestamp_ms, frequency_hz, revision=UNKNOWN_REV
     sid=integer(sid,0,0xffffffff); seq=integer(seq,0,0xffffffff)
     t=integer(timestamp_ms,1,0x7fffffffffffffff); f=integer(frequency_hz,1,0xffffffff)
     rev=UNKNOWN_REV if revision is None else integer(revision,0,UNKNOWN_REV)
-    vf=integer(vfo,0,15); conv=integer(convention,0,255); flag=integer(flags,0,31)
+    vf=integer(vfo,0,15); conv=integer(convention,0,255); flag=integer(flags,0,63)
     a=65535 if raw_doa is None else int(round((finite(raw_doa,0,360)%360)*100))%36000
     c=-32768 if confidence is None else int(round(finite(confidence,-327.67,327.67)*100))
     if encoding == 'q16':
@@ -47,7 +49,7 @@ def decode(frame: bytes) -> dict:
     if len(frame) < HEADER.size:
         raise ValueError('SHORT_FRAME')
     magic,v,enc,flags,sid,q,t,f,rev,vfo,conv,n,scale,offset,a,c=HEADER.unpack_from(frame)
-    if magic != b'RDF2' or v != 2 or flags & ~31 or n != 360 or vfo > 15 or conv not in (0,1):
+    if magic != b'RDF2' or v != 2 or flags & ~63 or n != 360 or vfo > 15 or conv not in (0,1):
         raise ValueError('INVALID_HEADER')
     if a != 65535 and not 0 <= a < 36000:
         raise ValueError('INVALID_ANGLE')

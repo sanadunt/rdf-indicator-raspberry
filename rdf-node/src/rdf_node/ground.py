@@ -12,7 +12,8 @@ import re
 import uuid
 from .util import now_ms, strict_json, integer, finite, compact
 from .mqtt import Client
-from .codec import Assembler, FLAG_PARSED, FLAG_FRESH, FLAG_DAQ, FLAG_CONVENTION, FLAG_CONFIG
+from .codec import (Assembler, FLAG_PARSED, FLAG_FRESH, FLAG_DAQ, FLAG_CONVENTION,
+                    FLAG_CONFIG, FLAG_AUTHORITY, ALL_FLAGS)
 from .journal import Journal, TERMINAL
 from .control import OPS, CommandManager
 
@@ -22,7 +23,10 @@ class Ground:
         self.lock=threading.RLock(); self.stop_event=threading.Event(); self.events=queue.Queue(64)
         self.journal=Journal(Path(cfg['state_dir'])/'ground.sqlite3')
         self.node_state={}; self.node_config={}; self.caps={}; self.health={}; self.doa={}; self.diagnostic_doa=None
+        self.regular_unverified_doa=None; self.regular_unverified_doa_seen=None
+        self.diagnostic_doa_q=0; self.regular_unverified_doa_q=0; self.diagnostic_doa_source_time=0
         self.diagnostic_angular=None; self.angular=None; self.detail={}
+        self.diagnostic_angular_q=0; self.regular_unverified_angular_q=0
         self.health_seen=0; self.doa_seen=0; self.diagnostic_seen=None; self.diagnostic_angular_seen=None
         self.angular_seen=0; self.state_seen=0; self.sid_map={}
         self.assembler=Assembler(); self.diagnostic_assembler=Assembler()
@@ -89,19 +93,32 @@ class Ground:
                 if a is None: return
                 if a['sid']!=self.node_state.get('sid'): raise ValueError('DIAGNOSTIC_ANGULAR_SESSION_MISMATCH')
                 if a['q']==0: raise ValueError('DIAGNOSTIC_ANGULAR_SEQUENCE_INVALID')
-                if self.diagnostic_angular and a['q']<=self.diagnostic_angular.get('q',0): return
+                if a['q']<=self.diagnostic_angular_q: return
                 a['source']='DOA_value.html'; a['trust']='UNVERIFIED'
-                self.diagnostic_angular=a; self.diagnostic_angular_seen=time.monotonic()
+                self.diagnostic_angular_q=a['q']; self.diagnostic_angular=a
+                self.diagnostic_angular_seen=time.monotonic()
                 return
             if suffix=='telemetry/angular':
                 if retained or not self.node_state: return
                 a=self.assembler.add(data)
                 if a is None: return
-                if a['sid']!=self.node_state.get('sid') or a['flags']!=31 or a['revision']!=self.node_config.get('rev'): raise ValueError('ANGULAR_AUTHORITY_MISMATCH')
+                if a['sid']!=self.node_state.get('sid') or a['revision']!=self.node_config.get('rev'):
+                    raise ValueError('ANGULAR_AUTHORITY_MISMATCH')
+                if a['q']==0: raise ValueError('ANGULAR_SEQUENCE_INVALID')
                 self._fresh(a['timestamp_ms'],10000)
-                if self.angular and a['q']<=self.angular['q']: return
-                if not self.health or self.health.get('daq')!=1 or time.monotonic()-self.health_seen>8: raise ValueError('ANGULAR_WITHOUT_HEALTH')
-                a['received_ms']=now_ms(); self.angular=a; self.angular_seen=time.monotonic(); return
+                required=FLAG_PARSED|FLAG_FRESH|FLAG_DAQ|FLAG_CONFIG
+                if a['flags']&required!=required: raise ValueError('ANGULAR_EVIDENCE_INCOMPLETE')
+                if not self.health or self.health.get('daq')!=1 or time.monotonic()-self.health_seen>8:
+                    raise ValueError('ANGULAR_WITHOUT_HEALTH')
+                if a['flags']==ALL_FLAGS:
+                    if self.angular and a['q']<=self.angular['q']: return
+                    a['received_ms']=now_ms(); self.angular=a; self.angular_seen=time.monotonic()
+                else:
+                    if a['q']<=self.regular_unverified_angular_q: return
+                    a['source']='DOA_value.html'; a['trust']='UNVERIFIED'
+                    self.regular_unverified_angular_q=a['q']
+                    self.diagnostic_angular=a; self.diagnostic_angular_seen=time.monotonic()
+                return
             j=strict_json(data)
             if not isinstance(j,dict) or j.get('v')!=2 or not isinstance(j.get('sid'),str): raise ValueError('BAD_JSON_PROTOCOL')
             sid=j['sid']
@@ -119,14 +136,19 @@ class Ground:
                         result=dict(old['result']);result['reason']='PPP_RESTART_SESSION_CHANGED'
                         self.journal.update(old['id'],'OUTCOME_UNKNOWN',result)
                     self.health={}; self.doa={}; self.diagnostic_doa=None; self.diagnostic_seen=None
+                    self.regular_unverified_doa=None; self.regular_unverified_doa_seen=None
+                    self.diagnostic_doa_q=0; self.regular_unverified_doa_q=0; self.diagnostic_doa_source_time=0
                     self.diagnostic_angular=None; self.diagnostic_angular_seen=None; self.angular=None
+                    self.diagnostic_angular_q=0; self.regular_unverified_angular_q=0
                     self.node_config={}; self.assembler.clear(); self.diagnostic_assembler.clear()
                 self.node_state=j; self.state_seen=time.monotonic(); return
             if suffix=='capabilities': self.caps=j; return
             if sid!=self.node_state.get('sid'): return
             if suffix=='config/reported':
                 if not isinstance(j.get('effective'),dict): raise ValueError('BAD_CONFIG_REPORT')
-                if j.get('rev')!=self.node_config.get('rev'): self.angular=None; self.doa={}; self.assembler.clear()
+                if j.get('rev')!=self.node_config.get('rev'):
+                    self.angular=None; self.doa={}; self.regular_unverified_doa=None
+                    self.regular_unverified_doa_seen=None; self.assembler.clear()
                 self.node_config=j; return
             if suffix.startswith('telemetry/') and retained: raise ValueError('RETAINED_TELEMETRY')
             if suffix=='telemetry/health':
@@ -140,11 +162,35 @@ class Ground:
                 self._reconcile_ppp_restart_health()
             elif suffix=='telemetry/doa':
                 self._fresh(j.get('t'),5000); q=integer(j.get('q'),1,0xffffffff)
-                if q<=self.doa.get('q',0): return
-                if j.get('ok')!=1 or j.get('rev')!=self.node_config.get('rev'): raise ValueError('DOA_NOT_VERIFIED')
-                finite(j['a'],0,360); finite(j['c'],-327.67,327.67); finite(j['p'],-1e6,1e6); integer(j['f'],1,0xffffffff)
-                if not self.health or self.health.get('daq')!=1 or time.monotonic()-self.health_seen>8: raise ValueError('DOA_WITHOUT_HEALTH')
-                self.doa=j; self.doa_seen=time.monotonic()
+                ok=j.get('ok')
+                if ok==1:
+                    if q<=self.doa.get('q',0): return
+                    if j.get('rev')!=self.node_config.get('rev'): raise ValueError('DOA_NOT_VERIFIED')
+                    finite(j['a'],0,360); finite(j['c'],-327.67,327.67); finite(j['p'],-1e6,1e6); integer(j['f'],1,0xffffffff)
+                    if not self.health or self.health.get('daq')!=1 or time.monotonic()-self.health_seen>8: raise ValueError('DOA_WITHOUT_HEALTH')
+                    self.doa=j; self.doa_seen=time.monotonic()
+                elif ok==0:
+                    if q<=self.regular_unverified_doa_q: return
+                    reasons=j.get('validation_reasons')
+                    allowed={'SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'}
+                    if (j.get('trust')!='UNVERIFIED' or j.get('angle_reference')!='RAW' or
+                            j.get('rev')!=self.node_config.get('rev') or
+                            not isinstance(reasons,list) or not 1<=len(reasons)<=2 or
+                            any(not isinstance(r,str) or r not in allowed for r in reasons) or
+                            len(set(reasons))!=len(reasons)):
+                        raise ValueError('BAD_UNVERIFIED_DOA')
+                    raw=finite(j['a'],0,360); frequency=integer(j['f'],1,0xffffffff)
+                    confidence=finite(j['c'],-327.67,327.67); power=finite(j['p'],-1e6,1e6)
+                    if not self.health or self.health.get('daq')!=1 or time.monotonic()-self.health_seen>8:
+                        raise ValueError('DOA_WITHOUT_HEALTH')
+                    self.regular_unverified_doa_q=q
+                    self.regular_unverified_doa={'v':2,'sid':sid,'q':q,'source':'DOA_value.html',
+                        'source_timestamp_ms':j['t'],'observed_timestamp_ms':now_ms(),'raw_doa_deg':raw,
+                        'frequency_mhz':frequency/1000000,'confidence_native_db':confidence,
+                        'power_native_db':power,'trust':'UNVERIFIED','validation_reasons':list(reasons)}
+                    self.regular_unverified_doa_seen=time.monotonic()
+                else:
+                    raise ValueError('DOA_NOT_VERIFIED')
             elif suffix=='telemetry/diagnostic/doa':
                 q=integer(j.get('q'),1,0xffffffff)
                 source_time=integer(j.get('source_timestamp_ms'),1000000000000,9999999999999)
@@ -157,9 +203,10 @@ class Ground:
                     any(not isinstance(r,str) or not re.fullmatch(r'[A-Z0-9_:-]{1,64}',r) for r in reasons) or
                     'DIAGNOSTIC_UNVERIFIED' not in reasons):
                     raise ValueError('BAD_DIAGNOSTIC_DOA')
-                if self.diagnostic_doa and q<=self.diagnostic_doa.get('q',0): return
-                if self.diagnostic_doa and source_time<self.diagnostic_doa['source_timestamp_ms']:
+                if q<=self.diagnostic_doa_q: return
+                if source_time<self.diagnostic_doa_source_time:
                     raise ValueError('DIAGNOSTIC_SOURCE_TIME_REGRESSED')
+                self.diagnostic_doa_q=q; self.diagnostic_doa_source_time=source_time
                 self.diagnostic_doa=j; self.diagnostic_seen=time.monotonic()
             elif suffix=='telemetry/health/detail': self.detail=j
             elif suffix in ('ack/config','ack/operation'):
@@ -199,8 +246,14 @@ class Ground:
             da=round((now-self.doa_seen)*1000) if self.doa else None
             fresh=bool(ha is not None and ha<8000)
             doa_valid=bool(fresh and self.health.get('daq')==1 and self.doa and da<5000 and now_ms()-self.doa.get('t',0)<5000)
-            diagnostic=copy.deepcopy(self.diagnostic_doa)
-            diagnostic_age=round((now-self.diagnostic_seen)*1000) if diagnostic else None
+            diagnostic_seen=self.diagnostic_seen
+            if (self.regular_unverified_doa is not None and self.regular_unverified_doa_seen is not None and
+                    now-self.regular_unverified_doa_seen<=5):
+                diagnostic=copy.deepcopy(self.regular_unverified_doa)
+                diagnostic_seen=self.regular_unverified_doa_seen
+            else:
+                diagnostic=copy.deepcopy(self.diagnostic_doa)
+            diagnostic_age=round((now-diagnostic_seen)*1000) if diagnostic else None
             if diagnostic:
                 diagnostic['available']=True
                 diagnostic['received_age_ms']=diagnostic_age
@@ -234,6 +287,7 @@ class Ground:
             flags=a['flags']; reasons=[]
             if not flags&FLAG_PARSED: reasons.append('SOURCE_PARSE_UNVERIFIED')
             if not flags&FLAG_FRESH: reasons.append('SOURCE_FRESHNESS_UNVERIFIED')
+            if not flags&FLAG_AUTHORITY: reasons.append('SOURCE_AUTHORITY_UNVERIFIED_AT_EDGE')
             if not flags&FLAG_DAQ: reasons.append('DAQ_NOT_HEALTHY_AT_EDGE')
             if not flags&FLAG_CONVENTION: reasons.append('ANGLE_UNVERIFIED_AT_EDGE')
             if not flags&FLAG_CONFIG: reasons.append('CONFIG_ATTRIBUTION_UNVERIFIED')

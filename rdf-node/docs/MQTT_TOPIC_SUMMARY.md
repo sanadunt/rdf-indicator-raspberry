@@ -26,8 +26,8 @@ Edge membuka dua MQTT client:
 
 | Kanal | Client ID | Hak data |
 |---|---|---|
-| Control | `{client_id}-control` | Publish JSON telemetry (termasuk topik diagnostik terpisah) dan binary `telemetry/diagnostic/angular`, state, capabilities, config report, availability, ACK; subscribe command dan receipt. |
-| Bulk | `{client_id}-bulk` | Publish `telemetry/angular` normal saja. Tidak subscribe command dan tidak memiliki hak command. |
+| Control | `{client_id}-control` | Publish JSON telemetry (termasuk `telemetry/doa` UNVERIFIED dan topik diagnostik), binary `telemetry/diagnostic/angular`, state, capabilities, config report, availability, ACK; subscribe command dan receipt. |
+| Bulk | `{client_id}-bulk` | Publish `telemetry/angular` normal, termasuk varian UNVERIFIED dengan flags parsial. Tidak subscribe command dan tidak memiliki hak command. |
 | Ground | `{node_id}-ground` | Subscribe data operasional/ACK; publish command dan receipt. |
 
 Kredensial Control dan Bulk terpisah bila digunakan; tanpa kredensial, client memakai anonymous
@@ -44,12 +44,12 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 
 | Topic suffix | Arah | Kanal | QoS | Retained | Interval / expiry | Isi |
 |---|---|---|---:|---|---|---|
-| `telemetry/doa` | Edge -> Ground | Control | 0 | Tidak | Umumnya tiap 1 s bila DoA valid; expiry 3 s | Ringkasan DoA, frekuensi, confidence, power, revision. |
+| `telemetry/doa` | Edge -> Ground | Control | 0 | Tidak | Maks. 1/s; valid atau UNVERIFIED bila hanya approval lokal yang absen; expiry 3 s | DoA, frekuensi, confidence, power, revision; `ok=0` menandai sudut raw dan alasan. |
 | `telemetry/diagnostic/doa` | Edge -> Ground | Control | 0 | Tidak | Setiap 3 s selama `doa.xml` tersedia; expiry 3 s | Sudut raw `doa.xml`, timestamp sumber/observasi, frekuensi MHz, status `UNVERIFIED` dan validation reasons. Diulang meski sampel tidak berubah, terlepas dari gate DoA normal. |
-| `telemetry/diagnostic/angular` | Edge -> Ground | Control | 0 | Tidak | Tiap 6 s jika strict source validity gagal; tiap 30 s jika source valid tetapi Bulk terblokir/menunggu stabilisasi; tidak ada duplikasi saat Bulk normal tersedia; profile `control` menahan array. Expiry 3 s | Frame RDF2 candidate dengan source timestamp; Ground menyimpan terpisah sebagai `UNVERIFIED`, tidak menunggu receipt dan tidak mengisi `aq`. |
+| `telemetry/diagnostic/angular` | Edge -> Ground | Control | 0 | Tidak | Tiap 6 s saat gate integritas source gagal; tiap 30 s jika source eligible tetapi Bulk terblokir/menunggu stabilisasi; tidak diduplikasi ketika Angular normal mengalir; profile `control` menahan array. Expiry 3 s | Frame RDF2 candidate dengan source timestamp; Ground menyimpan terpisah sebagai `UNVERIFIED`, tidak menunggu receipt dan tidak mengisi `aq`. |
 | `telemetry/health` | Edge -> Ground | Control | 0 | Tidak | Tiap 1 s; expiry 5 s | Status run, DAQ, clock, umur sumber, temperatur, dropped frames. |
 | `telemetry/health/detail` | Edge -> Ground | Control | 0 | Tidak | Tiap 10 s; expiry 15 s | Detail host, USB, sync DAQ, trafik, parse dan abort counter. |
-| `telemetry/angular` | Edge -> Ground | Bulk | 0 | Tidak | Profile-dependent; expiry 3 s | Frame 360 sampel dalam satu atau lebih payload binary. |
+| `telemetry/angular` | Edge -> Ground | Bulk | 0 | Tidak | Profile-dependent; expiry 3 s | Frame 360 sampel; flags `63` untuk LIVE atau trust-only partial untuk UNVERIFIED. |
 | `state` | Edge -> Ground | Control | 1 | Ya | Saat state berubah dan paling lambat tiap 60 s | Status run/DAQ, profile, clock dan identitas boot. Jangan dipakai sebagai heartbeat. |
 | `capabilities` | Edge -> Ground | Control | 1 | Ya | Saat generation koneksi Control berubah | Versi, identitas, codec, profile dan capability yang diizinkan. |
 | `config/reported` | Edge -> Ground | Control | 1 | Ya | Saat startup/reconnect atau report diminta/perubahan revision | Safe settings, revision, digest dan tingkat proof. Tidak berisi secret. |
@@ -73,12 +73,12 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 
 | Topic | Yang dilakukan Ground |
 |---|---|
-| `telemetry/doa` | Tampilkan DoA terbaru hanya jika `ok`, revision, sequence, timestamp dan health cocok; jangan anggap `c` sebagai probabilitas. |
-| `telemetry/diagnostic/doa` | Tampilkan terpisah sebagai diagnostik UNVERIFIED dengan timestamp dan reasons; jangan gabungkan ke `telemetry/doa`, receipt, atau keputusan kontrol. |
+| `telemetry/doa` | `ok=1`: validasi revision, sequence, timestamp dan health sebelum detection. `ok=0`: tampilkan sebagai raw diagnostic UNVERIFIED; jangan gabungkan ke detection, receipt atau keputusan kontrol. |
+| `telemetry/diagnostic/doa` | Tampilkan XML terpisah sebagai diagnostik UNVERIFIED dengan timestamp dan reasons; jangan gabungkan ke detection, receipt, atau keputusan kontrol. |
 | `telemetry/diagnostic/angular` | Simpan frame lengkap terbaru terpisah sebagai UNVERIFIED; expose lewat `GET /api/v2/angular/diagnostic/latest`; jangan gabungkan ke `telemetry/angular`, DoA, detection atau receipt. |
 | `telemetry/health` | Gunakan sebagai sumber utama freshness dan status DAQ; pisahkan MQTT tersambung dari `daq=1`. |
 | `telemetry/health/detail` | Pakai untuk diagnosis host, USB, sync, trafik dan error; jangan jadikan pengganti gate health. |
-| `telemetry/angular` | Rakit semua chunk sebelum menggambar kurva; receipt `aq` baru maju setelah frame lolos gate. |
+| `telemetry/angular` | Rakit semua chunk sebelum menggambar kurva. `flags=63` baru dapat maju ke LIVE/receipt `aq`; partial yang hanya kehilangan authority/convention masuk diagnostic UNVERIFIED. |
 | `state` | Bootstrap identitas boot/sesi dan profile; saat `sid` berubah, buang cache telemetry sesi lama. Retained state bukan heartbeat. |
 | `capabilities` | Tampilkan operasi sesuai capability node; tetap tegakkan ACL dan policy Ground. |
 | `config/reported` | Simpan safe settings, revision dan proof. Jika revision berubah, buang DoA/Angular dari revision sebelumnya. |
@@ -131,18 +131,18 @@ Angka berikut diukur dari serializer JSON compact (`util.compact`) dan paket MQT
 
 | Topic / profile | Interval saat syarat lolos | Payload contoh | MQTT PUBLISH |
 |---|---|---:|---:|
-| `telemetry/doa` | Maks. 1/s; hanya DoA valid dengan sequence baru | 109 B | 147 B |
+| `telemetry/doa` | Maks. 1/s; verified atau UNVERIFIED untuk trust-only blockers | 109 B verified (contoh; varian U menambah metadata) | 147 B verified (contoh; varian U lebih besar) |
 | `telemetry/diagnostic/doa` | Setiap 3 s selama XML tersedia; heartbeat mengulang sampel yang sama, independen dari gate DoA normal | 303 B | 352 B |
 | `telemetry/health` | 1/s | 113 B | 154 B |
 | `telemetry/health/detail` | 1/10 s | 179 B | 227 B |
 | `telemetry/angular` (`balanced`, Q16) | 2 chunk/4 s; tiap chunk | 396 B | 438 B |
 | `telemetry/angular` (`graph_u8`, U8) | 1 chunk/2 s | 420 B | 462 B |
 | `telemetry/angular` (`control`) | Tidak dipublish | — | — |
-| `telemetry/diagnostic/angular` (`balanced`, Q16) | 2 chunk/frame; 6 s saat source invalid, 30 s saat valid-source Bulk blocked; tidak dikirim saat Bulk normal tersedia | 396 B/chunk; 792 B/frame | 449 B/chunk; 898 B/frame |
-| `telemetry/diagnostic/angular` (`graph_u8`, U8) | 1 chunk/frame; 6 s saat source invalid, 30 s saat valid-source Bulk blocked; tidak dikirim saat Bulk normal tersedia | 420 B | 473 B |
+| `telemetry/diagnostic/angular` (`balanced`, Q16) | 2 chunk/frame; 6 s saat gate integritas gagal, 30 s saat valid-source Bulk blocked; tidak dikirim terus untuk trust-only fallback setelah resume | 396 B/chunk; 792 B/frame | 449 B/chunk; 898 B/frame |
+| `telemetry/diagnostic/angular` (`graph_u8`, U8) | 1 chunk/frame; 6 s saat gate integritas gagal, 30 s saat valid-source Bulk blocked; tidak dikirim terus untuk trust-only fallback setelah resume | 420 B | 473 B |
 | `telemetry/diagnostic/angular` (`control`) | Tidak dipublish | — | — |
 
-Satu frame Q16 normal berarti 792 B payload/876 B dalam dua PUBLISH; diagnostic Q16 memakai 898 B karena topic lebih panjang. Angular adalah binary, bukan JSON. Dengan biaya limiter `PUBLISH + 142 B` (ditambah 144 B untuk QoS 1), cadence 1/s untuk health, DoA, dan diagnostic DoA bersama detail tiap 10 s memerlukan sekitar 1.116 cost-B/s, di atas budget Control default 850. Karena itu diagnostic DoA dikirim setiap 3 s. Diagnostic angular menambah 197 cost-B/s Q16 atau 102.5 cost-B/s U8 saat source validity gagal (interval 6 s); ketika source valid tetapi Bulk diblokir, tambahan turun menjadi 39.4/20.5 cost-B/s (interval 30 s). Tidak ada biaya array diagnostik saat Bulk normal tersedia atau profile `control`.
+Satu frame Q16 normal berarti 792 B payload/876 B dalam dua PUBLISH; diagnostic Q16 memakai 898 B karena topic lebih panjang. Angular adalah binary, bukan JSON. Dengan biaya limiter `PUBLISH + 142 B` (ditambah 144 B untuk QoS 1), cadence 1/s untuk health, DoA, dan diagnostic DoA bersama detail tiap 10 s memerlukan sekitar 1.116 cost-B/s, di atas budget Control default 850. Karena itu diagnostic DoA dikirim setiap 3 s. Diagnostic angular menambah 197 cost-B/s Q16 atau 102.5 cost-B/s U8 saat gate integritas gagal (interval 6 s); ketika valid-source Bulk diblokir, tambahan turun menjadi 39.4/20.5 cost-B/s (interval 30 s). DoA UNVERIFIED membawa metadata tambahan dibanding contoh verified. Trust-only fallback Angular tidak menambah diagnostic traffic berulang setelah stabilisasi; tidak ada biaya array diagnostik saat Bulk normal tersedia atau profile `control`.
 
 ### Topic event-driven dan command
 
@@ -187,9 +187,9 @@ Asumsi steady-state: source valid, normal Bulk angular path tersedia, DoA baru t
 | `balanced` | 542.4 B/s | 664.0 B/s (5.31 kbit/s) | 1,085.3 cost-B/s (8.68 kbit/s) |
 | `graph_u8` | 554.4 B/s | 676.0 B/s (5.41 kbit/s) | 1,097.3 cost-B/s (8.78 kbit/s) |
 
-State periodik tiap 60 s sudah masuk tabel; receipt Ground sekitar 19.6 PUBLISH B/s pada arah balik. Pada `balanced`, Control memakai sekitar 795.3 cost-B/s dari budget 850 saat Bulk normal. Saat valid-source Bulk blocked, Q16 diagnostic menaikkan Control ke sekitar 834.7 cost-B/s; saat source invalid, DoA normal berhenti dan diagnostic 6 s memberi sekitar 703.3 cost-B/s. QoS 0 tetap dapat expiry saat event/backlog; angka ini bukan hard cap link.
+State periodik tiap 60 s sudah masuk tabel; receipt Ground sekitar 19.6 PUBLISH B/s pada arah balik. Pada `balanced`, Control memakai sekitar 795.3 cost-B/s dari budget 850 saat Bulk normal. Saat valid-source Bulk blocked, Q16 diagnostic menaikkan Control ke sekitar 834.7 cost-B/s; saat gate integritas source gagal, DoA normal berhenti dan diagnostic 6 s memberi sekitar 703.3 cost-B/s. Angka ini memakai payload DoA verified; varian UNVERIFIED lebih besar dan tidak menjadi hard cap link. QoS 0 tetap dapat expiry saat event/backlog.
 
-Health dan DoA normal dijadwalkan 1/s; detail 10 s, state 60 s, diagnostic DoA 3 s, capabilities/config saat event, command/ACK saat diminta atau ada progress. Angular normal dapat tertahan oleh source tidak eligible/fresh, command berjalan, Bulk tidak siap, backlog Control, atau masa stabilisasi; receipt Ground bukan gate publish. Saat jalur Bulk angular tidak tersedia, Edge mengirim kandidat terpisah: 6 s jika strict source validity gagal, 30 s jika source valid tetapi Bulk terblokir. QoS 0/expiry 3 s bisa membuang chunk; profile `control` menahan array diagnostik.
+Health dan DoA normal dijadwalkan 1/s; DoA dapat berupa varian `ok=0` bila hanya trust approval yang belum ada. Detail 10 s, state 60 s, diagnostic DoA 3 s, capabilities/config saat event, command/ACK saat diminta atau ada progress. Angular normal dapat tertahan oleh source tidak eligible/fresh, command berjalan, Bulk tidak siap, backlog Control, atau masa stabilisasi; receipt Ground bukan gate publish. Jika hanya authority/angle approval yang hilang, Angular normal memakai flags partial setelah stabilisasi dan tetap `UNVERIFIED`; jika gate integritas lain memblokir Bulk, Edge mengirim kandidat diagnostik terpisah (6 s untuk source invalid, 30 s untuk valid-source Bulk blocked). QoS 0/expiry 3 s bisa membuang chunk; profile `control` menahan array diagnostik.
 
 
 ## Payload yang dipublish Edge
@@ -200,18 +200,27 @@ Health dan DoA normal dijadwalkan 1/s; detail 10 s, state 60 s, diagnostic DoA 3
 {"v":2,"sid":"7a8b9c0d","q":1245,"t":1790668800123,"f":433920000,"a":137.4,"c":8.27,"p":-54.2,"rev":7,"ok":1}
 ```
 
+Varian unverified pada topic yang sama:
+
+```json
+{"v":2,"sid":"7a8b9c0d","q":1246,"t":1790668800123,"f":433920000,"a":10.0,"c":8.27,"p":-54.2,"rev":7,"ok":0,"trust":"UNVERIFIED","angle_reference":"RAW","validation_reasons":["SOURCE_UNVERIFIED","ANGLE_UNVERIFIED"]}
+```
+
+Hanya dikirim bila parsing, freshness/clock, DAQ, dan atribusi config lulus, sementara satu-satunya gate yang gagal adalah authority dan/atau verifikasi sudut. Untuk `ok=0`, `a` adalah raw source degree, bukan sudut relatif.
+
 | Field | Makna |
 |---|---|
 | `q` | Urutan record DoA adapter. |
 | `t` | Timestamp native source, bukan waktu publish MQTT. |
 | `f` | Frekuensi VFO output dalam Hz. |
-| `a` | Sudut DoA relatif menurut konfigurasi konvensi angle. Bukan otomatis true north. |
+| `a` | `ok=1`: sudut relatif menurut konfigurasi angle, bukan otomatis true north. `ok=0`: raw source degree; tafsirkan RAW hanya dengan `angle_reference="RAW"`. |
 | `c` | Confidence/PAPR native dB, bukan probabilitas atau persen. |
 | `p` | Power native bertanda, bukan level absolut terkalibrasi. |
 | `rev` | Revision konfigurasi aman saat sampel dibaca. |
-| `ok` | `1` menandakan DoA lolos gate source Edge. |
+| `ok` | `1` menandakan DoA lolos gate source Edge; `0` menandakan varian `trust=UNVERIFIED`. |
+| `trust`, `angle_reference`, `validation_reasons` | Wajib pada varian `ok=0`; metadata trust-only; reasons hanya `SOURCE_UNVERIFIED` dan/atau `ANGLE_UNVERIFIED`. |
 
-Ground menolak DoA yang retained, lebih lama dari 5 s, sequence tidak maju, `ok` bukan `1`, revision tidak cocok, atau tidak didukung health DAQ fresh dengan `daq=1`.
+Ground menerima `ok=1` sebagai detection hanya jika revision, sequence, timestamp, dan health DAQ fresh cocok. `ok=0` dirutekan ke diagnostic DoA view dengan `trust=UNVERIFIED`; ia tidak mengisi detection atau receipt `dq`. Ground menolak varian unverified dengan reason lain, revision mismatch, timestamp stale, atau tanpa health DAQ fresh.
 
 ### `telemetry/diagnostic/doa`
 
@@ -324,7 +333,7 @@ Setelah semua chunk terkumpul, frame dimulai dengan header 48 byte `<4sBBHIIQIIB
 | Field header | Makna |
 |---|---|
 | magic, version, encoding | `RDF2`, versi `2`, encoding `1` Q16 atau `2` U8. |
-| flags | Bit parsed/fresh/DAQ/convention/config; frame LIVE harus bernilai `31`, diagnostic boleh membawa subset bukti yang tersedia. |
+| flags | Bit parsed/fresh/DAQ/convention/config/source-authority; LIVE harus `63`, diagnostic boleh membawa subset bukti yang tersedia. |
 | sid, q, timestamp | Identitas sesi, sequence dan source timestamp. |
 | frequency, revision, vfo | Frekuensi Hz, revision (`0xffffffff` berarti unknown), dan index VFO. |
 | convention, count | Konvensi angle dan jumlah sampel, wajib `360`. |
@@ -354,13 +363,13 @@ for payload in mqtt_payloads:  # payload adalah bytes dari telemetry/angular
     )})
 ```
 
-Ground menunggu seluruh frame, memeriksa `sid`, `flags==31`, revision, source age maksimum 10 s, health fresh dengan `daq=1`, dan sequence yang maju. Fragment parsial tidak boleh ditampilkan. Assembler menerima maksimal dua frame incomplete dan membuang frame setelah deadline 3 s.
+Ground menunggu seluruh frame, memeriksa `sid`, revision, `flags==63`, source age maksimum 10 s, health fresh dengan `daq=1`, dan sequence yang maju untuk LIVE. Flags legacy `31` tidak membuktikan authority dan hanya masuk diagnostic UNVERIFIED bila bit parsed/fresh/DAQ/config lengkap; partial yang juga kehilangan salah satu bit integritas ditolak. Fragment parsial tidak boleh ditampilkan. Assembler menerima maksimal dua frame incomplete dan membuang frame setelah deadline 3 s.
 
 ### `telemetry/diagnostic/angular` (binary)
 
-Topic ini memakai framing chunk dan frame RDF2 yang sama seperti `telemetry/angular`; tiap frame membawa 360 sampel terkuantisasi dan timestamp sumber `DOA_value.html`. Edge mengirim candidate hanya saat normal Bulk tidak dapat mengirimnya: tiap 6 s jika strict source validity gagal, tiap 30 s jika source valid tetapi Bulk terblokir/menunggu stabilisasi, dan tidak ada duplikasi saat Bulk normal tersedia. QoS 0, non-retained, expiry 3 s, tanpa menunggu receipt; `control` tidak mengirim array diagnostik. `balanced` memakai Q16, `graph_u8` U8; Q16 overflow memakai U8 tanpa clipping.
+Topic ini memakai framing chunk dan frame RDF2 yang sama seperti `telemetry/angular`; tiap frame membawa 360 sampel terkuantisasi dan timestamp sumber `DOA_value.html`. Edge mengirim candidate hanya saat normal Bulk tidak dapat mengirimnya: tiap 6 s jika gate integritas source gagal selain trust-only approval, tiap 30 s jika source valid tetapi Bulk terblokir/menunggu stabilisasi, dan tidak ada duplikasi saat Bulk normal tersedia. QoS 0, non-retained, expiry 3 s, tanpa menunggu receipt; `control` tidak mengirim array diagnostik. `balanced` memakai Q16, `graph_u8` U8; Q16 overflow memakai U8 tanpa clipping.
 
-Flags menyimpan bukti parsial saat publish: bit 0 parsed, bit 1 clock/fresh, bit 2 DAQ, bit 3 angle convention, bit 4 config attribution. Ground hanya menampilkan frame lengkap dengan `trust=UNVERIFIED`, serta `stale` dan `validation_reasons`; frame tidak mengubah DoA/Angular LIVE atau `aq`. Kandidat terbaru tersedia melalui `GET /api/v2/angular/diagnostic/latest`, termasuk `values`, `encoding`, `source_timestamp_ms`, `source_age_ms`, `received_age_ms`, `flags`, dan alasan validasi.
+Flags menyimpan bukti parsial saat publish: bit 0 parsed, bit 1 clock/fresh, bit 2 DAQ, bit 3 angle convention, bit 4 config attribution, bit 5 source authority. Ground menampilkan frame lengkap dengan `trust=UNVERIFIED` pada diagnostic view bila hanya bit authority/convention yang hilang; flags dan status lain menentukan `stale`/`validation_reasons`. Frame tidak mengubah DoA/Angular LIVE atau `aq`. Kandidat terbaru tersedia melalui `GET /api/v2/angular/diagnostic/latest`, termasuk `values`, `encoding`, `source_timestamp_ms`, `source_age_ms`, `received_age_ms`, `flags`, dan alasan validasi.
 
 ## Payload Ground -> Edge
 

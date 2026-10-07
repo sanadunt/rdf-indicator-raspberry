@@ -120,6 +120,80 @@ class ApplicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ground.receive(ground.prefix+'/telemetry/diagnostic/doa',compact(older))
 
+    def test_ground_routes_regular_unverified_doa_to_diagnostics(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-unverified-doa')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd';timestamp=now_ms()
+        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test'}))
+        ground.receive(ground.prefix+'/config/reported',compact(
+            {'v':2,'sid':sid,'rev':7,'t':timestamp,'proof':'test','effective':{}}))
+        ground.receive(ground.prefix+'/telemetry/health',compact(
+            {'v':2,'sid':sid,'q':1,'t':timestamp,'run':1,'daq':1,'drop':0,'age':0,'temp':None,'clk':1,'rev':7}))
+        sample={'v':2,'sid':sid,'q':1,'t':timestamp,'f':433920000,'a':10.0,'c':8.27,'p':-90.17,'rev':7,
+                'ok':0,'trust':'UNVERIFIED','angle_reference':'RAW',
+                'validation_reasons':['SOURCE_UNVERIFIED','ANGLE_UNVERIFIED']}
+        ground.receive(ground.prefix+'/telemetry/doa',compact(sample))
+        snapshot=ground.snapshot()
+        self.assertEqual((snapshot['diagnostic_doa']['source'],snapshot['diagnostic_doa']['raw_doa_deg']),
+                         ('DOA_value.html',10.0))
+        self.assertEqual(snapshot['diagnostic_doa']['trust'],'UNVERIFIED')
+        self.assertFalse(snapshot['detection']['valid'])
+        self.assertEqual(ground.doa,{})
+        xml={'v':2,'sid':sid,'q':1,'source':'doa.xml','source_timestamp_ms':timestamp,
+             'observed_timestamp_ms':timestamp,'raw_doa_deg':200.0,'frequency_mhz':137.0,
+             'trust':'UNVERIFIED','validation_reasons':['DIAGNOSTIC_UNVERIFIED']}
+        ground.receive(ground.prefix+'/telemetry/diagnostic/doa',compact(xml))
+        self.assertEqual(ground.snapshot()['diagnostic_doa']['source'],'DOA_value.html')
+
+    def test_ground_downgrades_angular_frames_without_authority_evidence(self):
+        from rdf_node.codec import encode,split
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-unverified-angular')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd';timestamp=now_ms()
+        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test'}))
+        ground.receive(ground.prefix+'/config/reported',compact(
+            {'v':2,'sid':sid,'rev':7,'t':timestamp,'proof':'test','effective':{}}))
+        ground.receive(ground.prefix+'/telemetry/health',compact(
+            {'v':2,'sid':sid,'q':1,'t':timestamp,'run':1,'daq':1,'drop':0,'age':0,'temp':None,'clk':1,'rev':7}))
+        frame=encode([-10+i/100 for i in range(360)],sid=int(sid,16),seq=1,
+                     timestamp_ms=timestamp,frequency_hz=433920000,revision=7,flags=31,raw_doa=10)
+        for chunk in split(frame):
+            ground.receive(ground.prefix+'/telemetry/angular',chunk)
+        view=ground.diagnostic_angular_view()
+        self.assertEqual((view['source'],view['trust']),('DOA_value.html','UNVERIFIED'))
+        self.assertIn('SOURCE_AUTHORITY_UNVERIFIED_AT_EDGE',view['validation_reasons'])
+        self.assertIsNone(ground.angular_view())
+        self.assertFalse(ground.snapshot()['detection']['valid'])
+        rejected=encode([-10+i/100 for i in range(360)],sid=int(sid,16),seq=2,
+                        timestamp_ms=timestamp,frequency_hz=433920000,revision=7,flags=27,raw_doa=10)
+        with self.assertRaisesRegex(ValueError,'ANGULAR_EVIDENCE_INCOMPLETE'):
+            for chunk in split(rejected):
+                ground.receive(ground.prefix+'/telemetry/angular',chunk)
+        self.assertEqual(ground.diagnostic_angular_view()['q'],1)
+
+    def test_scheduler_publishes_trust_only_unverified_data_on_regular_topics(self):
+        from rdf_node.codec import CHUNK,HEADER
+        agent=self.a;agent.cfg['source'].update(authority_verified=False,angle_verified=False)
+        agent.source.poll(force=True);agent._snapshot()
+        snapshot=agent.snapshot()
+        self.assertFalse(snapshot['detection']['valid'])
+        self.assertEqual(set(snapshot['detection']['reasons']),{'SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'})
+        agent.profile='balanced';agent.bulk_resume_after=0
+        offers=self._run_agent_scheduler_once(agent,snapshot)
+        doa=next(payload for key,topic,payload in offers if key=='doa')
+        self.assertEqual((doa['ok'],doa['trust'],doa['angle_reference'],doa['a']),
+                         (0,'UNVERIFIED','RAW',10.0))
+        self.assertEqual(doa['validation_reasons'],['SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'])
+        angular=next(payload for key,topic,payload in offers if key=='angular')
+        self.assertEqual(CHUNK.unpack_from(angular)[3],2)
+        flags=HEADER.unpack_from(angular,12)[3]
+        self.assertEqual(flags,23)
+        agent.last_doa_q=0;agent.last_angular_q=0;agent.angular_parts=[]
+        blocked=copy.deepcopy(snapshot);blocked['detection']['reasons'].append('NO_FRESH_DOA')
+        blocked_offers=self._run_agent_scheduler_once(agent,blocked)
+        blocked_keys=[key for key,topic,payload in blocked_offers]
+        self.assertNotIn('doa',blocked_keys)
+        self.assertNotIn('angular',blocked_keys)
     def test_ground_keeps_diagnostic_angular_unverified_and_out_of_live_detection(self):
         from rdf_node.codec import encode,split
         cfg=load_config();cfg['state_dir']=str(self.path/'ground-diagnostic-angular')
@@ -842,6 +916,68 @@ class EndToEndTests(unittest.TestCase):
                 self.assertFalse(broker.errors)
             finally:
                 stop.set();thread.join(2);agent.stop();broker.stop()
+
+    def test_unverified_regular_telemetry_never_advances_detection_or_receipt(self):
+        from rdf_node.codec import Assembler
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp);initial=make_agent(path);cfg=initial.cfg;initial.journal.close()
+            cfg['source'].update(authority_verified=False,angle_verified=False)
+            broker=Broker();creds=path/'mqtt.json'
+            creds.write_bytes(compact({'username':'test','password':'test-password'}))
+            cfg['mqtt'].update(enabled=True,host='127.0.0.1',port=broker.port,tls=False,allow_insecure_loopback=True,
+                               control_credentials_file=str(creds),bulk_credentials_file=str(creds))
+            cfg['telemetry']['resume_stable_seconds']=1
+            agent=Agent(cfg);agent.monitor=FakeMonitor(cfg)
+            ground_cfg=copy.deepcopy(cfg);ground_cfg['state_dir']=str(path/'ground')
+            ground=Ground(ground_cfg);stop=threading.Event()
+            def writer():
+                index=2
+                while not stop.wait(.25):
+                    index+=1
+                    atomic_write(path/'share'/'status.json',compact(status(idx=index)))
+                    atomic_write(path/'share'/'DOA_value.html',csv_bytes(record()))
+            thread=threading.Thread(target=writer,daemon=True);thread.start()
+            agent.start();ground.start()
+            prefix='sdr/v2/uav-01/'
+            def received(suffix):
+                with broker.lock:
+                    return [message for message in broker.messages if message['topic']==prefix+suffix]
+            try:
+                self.assertTrue(wait(lambda:
+                    agent.snapshot().get('link',{}).get('mqtt_topic_delivery',{}).get('telemetry/doa',{}).get('state')=='SENT' and
+                    agent.snapshot().get('link',{}).get('mqtt_topic_delivery',{}).get('telemetry/angular',{}).get('state')=='SENT' and
+                    (ground.snapshot().get('diagnostic_doa') or {}).get('source')=='DOA_value.html' and
+                    ground.diagnostic_angular_view() is not None,20),
+                    [agent.snapshot(),ground.snapshot(),broker.errors])
+                doa=json.loads(received('telemetry/doa')[-1]['payload'])
+                self.assertEqual((doa['ok'],doa['trust'],doa['angle_reference'],doa['a']),
+                                 (0,'UNVERIFIED','RAW',10.0))
+                assembler=Assembler();frame=None
+                for message in received('telemetry/angular'):
+                    frame=assembler.add(message['payload']) or frame
+                    if frame: break
+                self.assertIsNotNone(frame)
+                self.assertEqual(frame['flags'],23)
+                self.assertTrue(wait(lambda:
+                    ground.diagnostic_angular_view() is not None and
+                    ground.diagnostic_angular_view()['q']>=frame['q'],5),
+                    [frame,ground.diagnostic_angular_view()])
+                self.assertEqual(ground.diagnostic_angular_view()['trust'],'UNVERIFIED')
+                self.assertIsNone(ground.angular_view())
+                self.assertEqual(ground.doa,{})
+                self.assertFalse(ground.snapshot()['detection']['valid'])
+                self.assertFalse(agent.snapshot()['detection']['valid'])
+                self.assertTrue(wait(lambda:agent.receipt_view()['state']=='RECEIVING',12),
+                                [agent.receipt_view(),ground.snapshot()])
+                self.assertEqual(agent.receipt_view()['last'].get('dq'),0)
+                self.assertEqual(agent.receipt_view()['last'].get('aq'),0)
+                for suffix in ('telemetry/doa','telemetry/angular'):
+                    self.assertTrue(received(suffix))
+                    self.assertTrue(all(message['qos']==0 and not message['retain']
+                                        for message in received(suffix)))
+                self.assertFalse(broker.errors)
+            finally:
+                stop.set();thread.join(2);agent.stop();ground.stop();broker.stop()
 
     def test_agent_graph_receipt_query_and_stopped_health(self):
         with tempfile.TemporaryDirectory() as tmp:

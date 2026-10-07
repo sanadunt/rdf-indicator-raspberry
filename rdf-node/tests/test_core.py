@@ -216,6 +216,10 @@ class CodecTests(unittest.TestCase):
     def test_q16_payload_size(self):self.assertEqual(len(self.frame()),768);self.assertEqual([len(x) for x in split(self.frame())],[396,396])
     def test_u8_payload_size(self):self.assertEqual(len(self.frame(encoding='u8')),408);self.assertEqual(len(split(self.frame(encoding='u8'))[0]),420)
     def test_constant_u8(self):self.assertEqual(decode(self.frame([-4]*360,'u8'))['values'],[-4.0]*360)
+    def test_authority_flag_round_trips_in_rdf2_header(self):
+        frame=encode([0]*360,sid=0x1234,seq=8,timestamp_ms=now_ms(),frequency_hz=433920000,
+                     revision=4,flags=63)
+        self.assertEqual(decode(frame)['flags'],63)
     def test_q16_range_not_clipped(self):
         with self.assertRaises(ValueError):self.frame([400]*360)
     def test_nan_codec_rejected(self):
