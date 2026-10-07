@@ -352,15 +352,15 @@ Availability adalah nilai terakhir, bukan heartbeat dan bukan bukti DAQ sehat. C
 Setiap PUBLISH berisi satu object JSON dengan metadata dan seluruh 360 sampel. Tidak ada
 envelope chunk; `values` memakai index source dan tidak diquantize.
 
-| Field | Makna |
+| Field | Format dan batas |
 |---|---|
-| `v`, `encoding` | Wajib `2` dan `"json"`. |
-| `sid`, `q` | Session alias 8 digit lowercase hex dan sequence publish. |
-| `timestamp_ms`, `frequency_hz` | Timestamp source dalam ms dan frekuensi Hz. |
-| `revision`, `vfo`, `convention` | Revision atau `null`, index VFO, dan convention sudut. |
-| `flags` | Bukti parse, freshness/clock, DAQ, convention, config, authority. |
-| `raw_doa_deg`, `confidence_native_db` | Metadata native, dapat `null`. |
-| `values` | Tepat 360 angka finite dalam urutan index native. |
+| `v`, `encoding` | Wajib literal `2` dan `"json"`. |
+| `sid`, `q` | `sid`: 8 digit lowercase hex; `q`: integer `1..0xffffffff`. |
+| `timestamp_ms`, `frequency_hz` | Timestamp source: integer `1..0x7fffffffffffffff` ms; frekuensi: integer `1..0xffffffff` Hz. |
+| `revision`, `vfo`, `convention` | `revision`: `null` atau integer `0..0xfffffffe`; `vfo`: `0..15`; `convention`: `0` atau `1`. |
+| `flags` | Integer `0..63`; bitmask bukti parse, freshness/clock, DAQ, convention, config, authority. |
+| `raw_doa_deg`, `confidence_native_db` | Keduanya dapat `null`; bila ada, finite dengan batas `0..360` dan `-327.67..327.67` dB. |
+| `values` | JSON array tepat 360 angka finite dalam rentang `-1e8..1e8`, urutan index native. |
 
 Ground menerima satu payload bytes dan langsung memvalidasinya:
 
@@ -375,6 +375,39 @@ print({key: frame[key] for key in (
     'raw_doa_deg', 'confidence_native_db',
 )})
 ```
+
+Contoh pembuat payload lengkap untuk kedua topic Angular. Array berisi tepat 360 angka; semua
+nilainya sintetis, bukan capture radio. Ganti metadata agar sesuai dengan sesi dan revision yang
+sedang diuji. Jangan kirim fixture ini ke Ground produksi.
+
+```python
+import json
+import time
+
+frame = {
+    "v": 2,
+    "encoding": "json",
+    "sid": "7a8b9c0d",
+    "q": 1245,
+    "timestamp_ms": int(time.time() * 1000),
+    "frequency_hz": 433920000,
+    "revision": 7,
+    "vfo": 0,
+    "convention": 1,
+    "flags": 63,
+    "raw_doa_deg": 137.4,
+    "confidence_native_db": 8.27,
+    "values": [0.0] * 359 + [1.0],
+}
+payload = json.dumps(
+    frame, separators=(",", ":"), allow_nan=False
+).encode("utf-8")
+topic = "sdr/v2/uav-01/telemetry/angular"
+```
+
+Untuk candidate diagnostik, schema dan bentuk payload sama; suffix topic menjadi
+`telemetry/diagnostic/angular`. Frame diagnostik tetap `UNVERIFIED`, sekalipun fixture di atas
+memakai `flags=63`.
 
 Ground memeriksa `sid`, revision, source age maksimum 10 s, health fresh dengan `daq=1`, flags,
 dan sequence yang maju untuk LIVE. LIVE memerlukan `flags=63`. Pesan `telemetry/angular` yang
@@ -446,6 +479,7 @@ Ground HTTP API juga menerima `id` klien opsional dan meneruskannya tanpa peruba
 | `cmd/config/patch` | `config.patch` | `{"changes":{"center_frequency_hz":433920000,"vfo0_frequency_hz":433920000}}`; subset field safe dan tidak kosong. |
 | `cmd/processing/set` | `processing.set` | `{"desired":"STOPPED"}` atau `{"desired":"RUNNING"}`. |
 | `cmd/service/restart` | `service.restart` | Tidak ada. Hanya unit SDR stack yang di-approve. |
+| `cmd/service/ppp/restart` | `ppp.restart` | Tidak ada. Membutuhkan `ppp_restart` dan `remote_commands`; Ground perlu mengelola konfirmasi operator bila hasil request sebelumnya belum diketahui. |
 | `cmd/system/reboot/prepare` | `system.reboot.prepare` | Tidak ada. ACK mengembalikan `prepare_id`, `challenge`, `valid_seconds` (30). |
 | `cmd/system/reboot/execute` | `system.reboot.execute` | `{"prepare_id":"<prepare-id>","challenge":"<one-time-challenge>"}` dari ACK prepare. Challenge sekali pakai; jangan log atau simpan sebagai credential permanen. |
 | `cmd/system/shutdown/prepare` | `system.shutdown.prepare` | Tidak ada. ACK mengembalikan `prepare_id`, `challenge`, `valid_seconds` (30). |
@@ -491,6 +525,86 @@ Status yang dikenal jurnal mencakup `ACCEPTED`, `APPLYING`, `VERIFYING`, `REBOOT
 | Ground viewer | Subscribe saja; tanpa hak publish command dan tanpa credential controller. |
 
 Prefix, `node_id`, ACL, broker, credential dan konfigurasi Edge/Ground harus cocok. Jangan memberi hak wildcard lintas node bila Ground hanya mengelola satu node. Pada broker yang mengizinkan anonymous CONNECT, ACL tetap wajib membatasi operasi yang dapat dilakukan client.
+
+## Mendiagnosis telemetri invalid di Ground
+
+Bedakan tiga tahap: Edge menulis PUBLISH, broker menerima PUBLISH, dan aplikasi Ground menerima
+serta memvalidasi payload. Pada API Edge `GET /api/v2/link`, `mqtt_topic_delivery.<suffix>.state`
+dan `confirmation` menunjukkan tahap pengiriman. Untuk QoS 0, `confirmation="SOCKET_WRITE"` hanya
+membuktikan penulisan ke socket lokal. Untuk QoS 1, `PUBACK` membuktikan broker mengakui PUBLISH,
+bukan bahwa aplikasi Ground memprosesnya. `link.ground` hanya berubah setelah Edge menerima receipt
+Ground dengan sequence health yang maju; `UNCONFIRMED` berarti belum ada progress receipt.
+
+Pada API Ground, `GET /api/v2/link` menunjukkan status client dan counter kumulatif `rejected`.
+Counter itu juga naik ketika antrean penerimaan penuh; ia bukan error code dan tidak menunjukkan
+alasan tiap payload ditolak. `GET /api/v2/angular/latest` menampilkan frame LIVE atau `null`;
+`GET /api/v2/angular/diagnostic/latest` menampilkan candidate Angular yang disimpan terpisah.
+Gunakan `GET /api/v2/snapshot` untuk memeriksa `node_state`, `config`, `health_fresh`,
+`detection`, dan `diagnostic_doa`.
+
+### Urutan validasi Angular
+
+1. Subscribe ke prefix node yang benar: `sdr/v2/{node_id}/telemetry/angular`. `node_id` pada
+   Edge, Ground, broker ACL, dan topic harus identik. Tunggu retained `state`, `capabilities`, dan
+   `config/reported`; pastikan `capabilities.codecs` memuat `"json"` dan `count=360`. Telemetry
+   non-retained yang datang sebelum state dikenali dapat diabaikan.
+2. Kaitkan frame dengan `state.sid` dan `config/reported.rev` terkini. Untuk topic normal,
+   `sid` dan `revision` harus cocok. Saat `sid` berubah, buang cache sesi sebelumnya.
+3. Decode satu payload PUBLISH langsung sebagai satu object JSON v2 dengan
+   `encoding="json"`. Jangan jalankan decoder binary/RDF2, base64 decode, atau chunk reassembly.
+   `values` harus berupa array berisi tepat 360 angka finite, masing-masing dalam rentang
+   `-1e8..1e8`.
+4. Validasi waktu source `timestamp_ms` terhadap jam Ground: paling lama 10 s dan tidak boleh
+   lebih dari 1 s di masa depan. Jangan mengganti timestamp source dengan waktu penerimaan untuk
+   membuat frame stale terlihat fresh.
+5. Wajib ada `telemetry/health` dengan `daq=1`, timestamp health fresh (maksimum 8 s), dan
+   sequence `q` yang maju. Health menunjukkan kesehatan DAQ; koneksi MQTT atau `state.daq` saja
+   tidak menggantikannya.
+6. Terapkan flags secara terpisah dari validasi struktur:
+
+| Bit | Nilai mask | Bukti |
+|---:|---:|---|
+| 0 | 1 | Record berhasil diparse. |
+| 1 | 2 | Clock dipercaya dan source fresh. |
+| 2 | 4 | DAQ sehat. |
+| 3 | 8 | Konvensi sudut diverifikasi. |
+| 4 | 16 | Atribusi konfigurasi cocok. |
+| 5 | 32 | Authority source diverifikasi. |
+
+Untuk `telemetry/angular`, mask integritas minimum adalah `1|2|4|16 = 23`. Jika
+`flags & 23 != 23`, frame tidak memenuhi bukti integritas dan ditolak. Jika mask minimum lolos
+dan `flags == 63`, frame dapat masuk LIVE setelah semua gate lain lolos. Jika mask minimum lolos
+tetapi `flags != 63`, simpan sebagai `UNVERIFIED` di jalur diagnostic, jangan masukkan ke deteksi
+LIVE atau receipt `aq`. Hilangnya bit convention dan/atau authority bukan alasan mengubah nilainya
+menjadi valid.
+
+`telemetry/diagnostic/angular` juga membawa satu JSON object dengan 360 values. Ground menyimpannya
+terpisah sebagai `UNVERIFIED`; ia tidak pernah mengisi Angular LIVE atau `aq`. Endpoint diagnostic
+menambahkan umur dan validation reasons agar UI dapat membedakan candidate stale dari candidate
+yang hanya belum memiliki authority/convention.
+
+### Petunjuk dari hasil validasi
+
+| Hasil / gejala | Periksa |
+|---|---|
+| `BAD_ANGULAR_JSON` | Payload harus JSON object dengan `v=2` dan `encoding="json"`; decoder binary lama tidak kompatibel. |
+| `EXPECTED_360_SAMPLES` | Payload harus memuat seluruh 360 angka dalam satu PUBLISH, bukan potongan atau array parsial. |
+| `ANGULAR_AUTHORITY_MISMATCH` | `sid` harus cocok dengan `state.sid`, dan `revision` dengan `config/reported.rev`. |
+| `SOURCE_TIMESTAMP_NOT_FRESH` | `timestamp_ms` adalah Unix ms dari source; cek satuan, freshness source, dan sinkronisasi clock kedua host. |
+| `ANGULAR_EVIDENCE_INCOMPLETE` | Salah satu bit parsed, fresh, DAQ, atau config tidak ada. Perbaiki bukti di Edge/source; jangan mengisi bit di Ground. |
+| `ANGULAR_WITHOUT_HEALTH` | Health belum diterima, sudah stale, atau `daq` bukan `1`. Tunggu health fresh sebelum memproses frame LIVE. |
+| `flags` lolos mask `23`, tetapi bukan `63` | Frame trust-only `UNVERIFIED`; baca endpoint diagnostic. `detection.valid=false` dan `aq=0` adalah hasil yang diharapkan, bukan kegagalan JSON. |
+| `link.rejected` bertambah | Counter tidak mengungkap alasan. Periksa bentuk payload/topic dan korelasi `sid`, revision, waktu, health, flags, dan sequence. |
+
+Untuk DoA berlaku pembedaan serupa: `telemetry/doa` dengan `ok=1` dapat mengisi detection dan
+receipt `dq` setelah gate freshness, revision, sequence, serta health lolos. `ok=0` hanya
+diterima sebagai raw `UNVERIFIED` bila `trust`, `angle_reference="RAW"`, revision, health, dan
+reasons yang diizinkan cocok; ia tidak mengisi detection atau `dq`. `telemetry/diagnostic/doa`
+juga selalu terpisah dari deteksi LIVE.
+
+Versi Edge yang mengirim Angular JSON tidak kompatibel dengan Ground RDF2 yang mengharapkan
+binary chunk. Perbarui decoder Ground ke kontrak JSON v2 sebelum mengubah gate validitas.
+Jangan mempromosikan frame parsial menjadi LIVE hanya agar dashboard tampak valid.
 
 ## Referensi implementasi
 
