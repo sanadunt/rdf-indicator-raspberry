@@ -25,7 +25,7 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
 - Collector file lokal `DOA_value.html` (CSV 377 field), `status.json`, dan subset aman settings.
 - Gate DAQ, kemajuan frame, freshness, konfigurasi, clock, dan verifikasi konvensi sudut.
 - Dua koneksi MQTT: control/health/DoA dan diagnostic angular; bulk membawa angular normal. Akun/ACL control dan bulk terpisah.
-- Q16 360 titik, dua chunk; alternatif U8 tetap 360 titik. Bukan kurva buatan dari satu DoA.
+- Angular dikirim sebagai satu JSON PUBLISH berisi metadata dan tepat 360 angka source, tanpa Q16/U8 quantization atau chunk.
 - Receipt dari backend Ground; MQTT CONNECTED tidak otomatis berarti Ground menerima data.
 - Panel **Utama | Link | Sistem | Config | Data**, logical viewport **480x320**, login PIN 6 digit dengan keypad layar sentuh.
 - API loopback; login PIN dibatasi percobaan, dengan session dan CSRF/Origin checks.
@@ -267,14 +267,15 @@ Grafik BALANCED mulai setelah receipt Ground valid dan kondisi stabil **20 detik
 | Current DoA radio | 1 detik; hanya sampel baru valid |
 | Health radio | 1 detik; tetap berjalan saat RDF STOPPED |
 | Detail health | 10 detik |
-| Grafik Q16 lengkap | 4 detik, 2 chunk |
+| Grafik Angular (`balanced`) | Minimum 4 detik; ukuran JSON dan budget Bulk dapat memperpanjang |
 | Receipt Ground | 5 detik |
 | State/config | event/reconnect/request; state refresh 60 detik |
 
-Profil CONTROL mematikan grafik. GRAPH U8 memakai 360 titik dengan ketelitian amplitudo
-lebih rendah, interval 2 detik. Nav/spectrum/audio/recording tidak diaktifkan.
-Jadwal bukan jaminan throughput: saat token budget/receiver/clock/source tidak memadai,
-data lama dibuang dan grafik dipause. Tidak ada jaminan performa T900 tanpa capture nyata.
+Profil CONTROL mematikan grafik. Profile `graph_u8` tetap tersedia untuk konfigurasi lama dan
+memiliki interval minimum 2 detik, tetapi kini memakai JSON yang sama, bukan encoding U8.
+Nav/spectrum/audio/recording tidak diaktifkan. Jadwal bukan jaminan throughput: saat token
+budget/receiver/clock/source tidak memadai, data lama dibuang dan grafik dipause. Tidak ada
+jaminan performa T900 tanpa capture nyata.
 
 ## 7. Mengaktifkan command write secara terkontrol
 

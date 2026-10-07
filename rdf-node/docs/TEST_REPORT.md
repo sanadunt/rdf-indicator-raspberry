@@ -3,6 +3,9 @@
 Tanggal build: 29 September 2026. Lingkungan Linux container x86_64, Python3.13.
 Aplikasi sendiri menargetkan Python3.10+ pada Raspberry/Ubuntu systemd.
 
+Catatan: hasil 113 test di bawah adalah arsip release 1.0.0 sebelum Angular beralih ke JSON.
+Coverage RDF2/Q16/U8 di bagian tersebut tidak menggambarkan source saat ini.
+
 ## Hasil yang benar-benar dijalankan
 
 **113 automated tests lulus**, 19.598 detik pada run final terdokumentasi.
@@ -74,3 +77,9 @@ python3 run.py selftest
 TLS tests memerlukan executable openssl; jika tidak tersedia, test tersebut ditandai skipped,
 bukan dianggap lulus TLS. Simpan hasil rerun pada perangkat sebagai bukti terpisah.
 Jangan menjalankan tester throughput bersamaan dengan operasi penting melalui radio.
+
+## Verifikasi setelah cutover Angular JSON
+
+`bash scripts/check-package.sh` lulus pada checkout saat ini: 224 tests lulus, 2 dilewati karena
+memerlukan Linux `ping`. End-to-end memakai broker fixture loopback dan Ground decoder; tidak
+mencakup Mosquitto, Raspberry, display fisik, PPP, atau T900 nyata.

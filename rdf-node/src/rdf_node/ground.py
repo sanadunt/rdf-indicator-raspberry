@@ -12,8 +12,7 @@ import re
 import uuid
 from .util import now_ms, strict_json, integer, finite, compact
 from .mqtt import Client
-from .codec import (Assembler, FLAG_PARSED, FLAG_FRESH, FLAG_DAQ, FLAG_CONVENTION,
-                    FLAG_CONFIG, FLAG_AUTHORITY, ALL_FLAGS)
+from .codec import decode, FLAG_PARSED, FLAG_FRESH, FLAG_DAQ, FLAG_CONVENTION, FLAG_CONFIG, FLAG_AUTHORITY, ALL_FLAGS
 from .journal import Journal, TERMINAL
 from .control import OPS, CommandManager
 
@@ -29,7 +28,6 @@ class Ground:
         self.diagnostic_angular_q=0; self.regular_unverified_angular_q=0
         self.health_seen=0; self.doa_seen=0; self.diagnostic_seen=None; self.diagnostic_angular_seen=None
         self.angular_seen=0; self.state_seen=0; self.sid_map={}
-        self.assembler=Assembler(); self.diagnostic_assembler=Assembler()
         self.rejected=0; self.receipt_count=0; self.snapshot_seq=0; self.current_gen=-1
         self.client=Client(cfg=cfg['mqtt'],client_id=cfg['node_id']+'-ground'+('-demo' if demo else ''),
             credentials_file=cfg['mqtt']['control_credentials_file'],rate=1000,
@@ -55,7 +53,7 @@ class Ground:
             except Exception: self.rejected+=1
             now=time.monotonic()
             if self.client.generation!=self.current_gen:
-                self.current_gen=self.client.generation; self.assembler.clear(); self.diagnostic_assembler.clear()
+                self.current_gen=self.client.generation
             if now>=next_receipt and self.client.ready:
                 next_receipt=now+5
                 with self.lock:
@@ -89,10 +87,8 @@ class Ground:
         with self.lock:
             if suffix=='telemetry/diagnostic/angular':
                 if retained or not self.node_state: return
-                a=self.diagnostic_assembler.add(data)
-                if a is None: return
+                a=decode(data)
                 if a['sid']!=self.node_state.get('sid'): raise ValueError('DIAGNOSTIC_ANGULAR_SESSION_MISMATCH')
-                if a['q']==0: raise ValueError('DIAGNOSTIC_ANGULAR_SEQUENCE_INVALID')
                 if a['q']<=self.diagnostic_angular_q: return
                 a['source']='DOA_value.html'; a['trust']='UNVERIFIED'
                 self.diagnostic_angular_q=a['q']; self.diagnostic_angular=a
@@ -100,11 +96,9 @@ class Ground:
                 return
             if suffix=='telemetry/angular':
                 if retained or not self.node_state: return
-                a=self.assembler.add(data)
-                if a is None: return
+                a=decode(data)
                 if a['sid']!=self.node_state.get('sid') or a['revision']!=self.node_config.get('rev'):
                     raise ValueError('ANGULAR_AUTHORITY_MISMATCH')
-                if a['q']==0: raise ValueError('ANGULAR_SEQUENCE_INVALID')
                 self._fresh(a['timestamp_ms'],10000)
                 required=FLAG_PARSED|FLAG_FRESH|FLAG_DAQ|FLAG_CONFIG
                 if a['flags']&required!=required: raise ValueError('ANGULAR_EVIDENCE_INCOMPLETE')
@@ -140,7 +134,7 @@ class Ground:
                     self.diagnostic_doa_q=0; self.regular_unverified_doa_q=0; self.diagnostic_doa_source_time=0
                     self.diagnostic_angular=None; self.diagnostic_angular_seen=None; self.angular=None
                     self.diagnostic_angular_q=0; self.regular_unverified_angular_q=0
-                    self.node_config={}; self.assembler.clear(); self.diagnostic_assembler.clear()
+                    self.node_config={}
                 self.node_state=j; self.state_seen=time.monotonic(); return
             if suffix=='capabilities': self.caps=j; return
             if sid!=self.node_state.get('sid'): return
@@ -148,7 +142,7 @@ class Ground:
                 if not isinstance(j.get('effective'),dict): raise ValueError('BAD_CONFIG_REPORT')
                 if j.get('rev')!=self.node_config.get('rev'):
                     self.angular=None; self.doa={}; self.regular_unverified_doa=None
-                    self.regular_unverified_doa_seen=None; self.assembler.clear()
+                    self.regular_unverified_doa_seen=None
                 self.node_config=j; return
             if suffix.startswith('telemetry/') and retained: raise ValueError('RETAINED_TELEMETRY')
             if suffix=='telemetry/health':

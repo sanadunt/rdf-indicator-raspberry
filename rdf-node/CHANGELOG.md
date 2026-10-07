@@ -13,7 +13,7 @@
 
 - Publish diagnostic `doa.xml` every 3 s when available, independent of normal DoA validity. Ground keeps it `UNVERIFIED`, separate from live DoA, receipts, and commands.
 
-- Send timestamped diagnostic angular candidates to Ground when the normal Bulk path is blocked: every 6 s when strict source validity fails, every 30 s when valid-source Bulk is paused, and no duplicate while normal Bulk flows. Candidates stay `UNVERIFIED`, separate from LIVE detection and receipt; profile `control` suppresses angular arrays.
+- Replace RDF2/Q16/U8 Angular chunk transport with one JSON PUBLISH containing all 360 source values on normal and diagnostic topics. Ground validates metadata and flags before keeping LIVE, UNVERIFIED, and receipt paths separate. Edge and Ground must be upgraded together; byte-budget pacing can extend the minimum profile and diagnostic intervals.
 
 - Distinguish local API outage from stale cached data in both panels; add immediate manual retry while regular polling continues, without automatic service or SDR recovery.
 - Prevent duplicate shutdown scheduling per boot, retain unresolved outcomes across all journal pages/sessions, and add root-only systemd-evidence-checked local reconciliation.

@@ -29,6 +29,12 @@ def make_agent(path):
     a=Agent(cfg);a.monitor=FakeMonitor(cfg);a.source.poll(force=True)
     (path/'share'/'status.json').write_bytes(compact(status(idx=2)))
     a.source.poll(force=True);a._snapshot();return a
+def angular_payload(sid,q,timestamp,revision,flags,values=None,raw_doa=10.0,confidence=8.27):
+    return {'v':2,'encoding':'json','sid':sid,'q':q,'timestamp_ms':timestamp,
+            'frequency_hz':433920000,'revision':revision,'vfo':0,'convention':1,
+            'flags':flags,'raw_doa_deg':raw_doa,'confidence_native_db':confidence,
+            'values':[-10+i/100 for i in range(360)] if values is None else values}
+
 
 class ApplicationTests(unittest.TestCase):
     def setUp(self):
@@ -145,8 +151,25 @@ class ApplicationTests(unittest.TestCase):
         ground.receive(ground.prefix+'/telemetry/diagnostic/doa',compact(xml))
         self.assertEqual(ground.snapshot()['diagnostic_doa']['source'],'DOA_value.html')
 
-    def test_ground_downgrades_angular_frames_without_authority_evidence(self):
-        from rdf_node.codec import encode,split
+    def test_ground_accepts_json_angular_live_frame(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-json-angular')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd';timestamp=now_ms();values=[-10+i/100 for i in range(360)]
+        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test'}))
+        ground.receive(ground.prefix+'/config/reported',compact(
+            {'v':2,'sid':sid,'rev':7,'t':timestamp,'proof':'test','effective':{}}))
+        ground.receive(ground.prefix+'/telemetry/health',compact(
+            {'v':2,'sid':sid,'q':1,'t':timestamp,'run':1,'daq':1,'drop':0,'age':0,'temp':None,'clk':1,'rev':7}))
+        payload={'v':2,'encoding':'json','sid':sid,'q':1,'timestamp_ms':timestamp,
+                 'frequency_hz':433920000,'revision':7,'vfo':0,'convention':1,'flags':63,
+                 'raw_doa_deg':10.0,'confidence_native_db':8.27,'values':values}
+        ground.receive(ground.prefix+'/telemetry/angular',compact(payload))
+        view=ground.angular_view()
+        self.assertEqual(view['values'],values)
+        self.assertEqual(view['encoding'],'json')
+        self.assertEqual(view['peak_index'],359)
+
+    def test_ground_routes_json_angular_without_authority_to_diagnostics(self):
         cfg=load_config();cfg['state_dir']=str(self.path/'ground-unverified-angular')
         ground=Ground(cfg);self.addCleanup(ground.journal.close)
         sid='12ab34cd';timestamp=now_ms()
@@ -155,25 +178,24 @@ class ApplicationTests(unittest.TestCase):
             {'v':2,'sid':sid,'rev':7,'t':timestamp,'proof':'test','effective':{}}))
         ground.receive(ground.prefix+'/telemetry/health',compact(
             {'v':2,'sid':sid,'q':1,'t':timestamp,'run':1,'daq':1,'drop':0,'age':0,'temp':None,'clk':1,'rev':7}))
-        frame=encode([-10+i/100 for i in range(360)],sid=int(sid,16),seq=1,
-                     timestamp_ms=timestamp,frequency_hz=433920000,revision=7,flags=31,raw_doa=10)
-        for chunk in split(frame):
-            ground.receive(ground.prefix+'/telemetry/angular',chunk)
+        payload={'v':2,'encoding':'json','sid':sid,'q':1,'timestamp_ms':timestamp,
+                 'frequency_hz':433920000,'revision':7,'vfo':0,'convention':1,'flags':31,
+                 'raw_doa_deg':10.0,'confidence_native_db':8.27,
+                 'values':[-10+i/100 for i in range(360)]}
+        ground.receive(ground.prefix+'/telemetry/angular',compact(payload))
         view=ground.diagnostic_angular_view()
         self.assertEqual((view['source'],view['trust']),('DOA_value.html','UNVERIFIED'))
         self.assertIn('SOURCE_AUTHORITY_UNVERIFIED_AT_EDGE',view['validation_reasons'])
         self.assertIsNone(ground.angular_view())
         self.assertFalse(ground.snapshot()['detection']['valid'])
-        rejected=encode([-10+i/100 for i in range(360)],sid=int(sid,16),seq=2,
-                        timestamp_ms=timestamp,frequency_hz=433920000,revision=7,flags=27,raw_doa=10)
+        rejected=dict(payload,q=2,flags=27)
         with self.assertRaisesRegex(ValueError,'ANGULAR_EVIDENCE_INCOMPLETE'):
-            for chunk in split(rejected):
-                ground.receive(ground.prefix+'/telemetry/angular',chunk)
+            ground.receive(ground.prefix+'/telemetry/angular',compact(rejected))
         self.assertEqual(ground.diagnostic_angular_view()['q'],1)
 
     def test_scheduler_publishes_trust_only_unverified_data_on_regular_topics(self):
-        from rdf_node.codec import CHUNK,HEADER
         agent=self.a;agent.cfg['source'].update(authority_verified=False,angle_verified=False)
+        self.assertEqual(agent.capabilities()['codecs'],['json'])
         agent.source.poll(force=True);agent._snapshot()
         snapshot=agent.snapshot()
         self.assertFalse(snapshot['detection']['valid'])
@@ -184,28 +206,23 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual((doa['ok'],doa['trust'],doa['angle_reference'],doa['a']),
                          (0,'UNVERIFIED','RAW',10.0))
         self.assertEqual(doa['validation_reasons'],['SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'])
-        angular=next(payload for key,topic,payload in offers if key=='angular')
-        self.assertEqual(CHUNK.unpack_from(angular)[3],2)
-        flags=HEADER.unpack_from(angular,12)[3]
-        self.assertEqual(flags,23)
-        agent.last_doa_q=0;agent.last_angular_q=0;agent.angular_parts=[]
+        angular=json.loads(next(payload for key,topic,payload in offers if key=='angular'))
+        self.assertEqual((angular['encoding'],angular['flags'],len(angular['values'])),('json',23,360))
+        self.assertEqual(angular['values'],agent.source.record['values'])
+        agent.last_doa_q=0;agent.last_angular_q=0
         blocked=copy.deepcopy(snapshot);blocked['detection']['reasons'].append('NO_FRESH_DOA')
         blocked_offers=self._run_agent_scheduler_once(agent,blocked)
         blocked_keys=[key for key,topic,payload in blocked_offers]
         self.assertNotIn('doa',blocked_keys)
         self.assertNotIn('angular',blocked_keys)
     def test_ground_keeps_diagnostic_angular_unverified_and_out_of_live_detection(self):
-        from rdf_node.codec import encode,split
         cfg=load_config();cfg['state_dir']=str(self.path/'ground-diagnostic-angular')
         ground=Ground(cfg);self.addCleanup(ground.journal.close)
         sid='12ab34cd'
         ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test'}))
         timestamp=now_ms()-30000
-        frame=encode([-10+i/100 for i in range(360)],sid=int(sid,16),seq=1,
-                     timestamp_ms=timestamp,frequency_hz=433920000,revision=None,
-                     flags=1,raw_doa=123.45,confidence=8.2)
-        for chunk in split(frame):
-            ground.receive(ground.prefix+'/telemetry/diagnostic/angular',chunk)
+        frame=angular_payload(sid,1,timestamp,None,1,raw_doa=123.45,confidence=8.2)
+        ground.receive(ground.prefix+'/telemetry/diagnostic/angular',compact(frame))
         view=ground.diagnostic_angular_view()
         self.assertEqual((view['source'],view['trust'],view['timestamp_ms']),('DOA_value.html','UNVERIFIED',timestamp))
         self.assertEqual(len(view['values']),360)
@@ -217,17 +234,14 @@ class ApplicationTests(unittest.TestCase):
         self.assertFalse(ground.snapshot()['detection']['valid'])
 
     def test_ground_diagnostic_angular_api_returns_candidate_values(self):
-        from rdf_node.codec import encode,split
         cfg=load_config();cfg['state_dir']=str(self.path/'ground-angular-api')
         cfg['api']['admin_hash_file']=str(self.path/'ground-api-auth.json');cfg['api']['port']=0
         ground=Ground(cfg)
         sid='12ab34cd'
         ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test'}))
         timestamp=now_ms()
-        frame=encode([-10+i/100 for i in range(360)],sid=int(sid,16),seq=1,
-                     timestamp_ms=timestamp,frequency_hz=433920000,revision=None,flags=1)
-        for chunk in split(frame):
-            ground.receive(ground.prefix+'/telemetry/diagnostic/angular',chunk)
+        ground.receive(ground.prefix+'/telemetry/diagnostic/angular',
+                       compact(angular_payload(sid,1,timestamp,None,1)))
         server=Server(ground,cfg,ground=True)
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         try:
@@ -240,6 +254,7 @@ class ApplicationTests(unittest.TestCase):
             self.assertAlmostEqual(payload['values'][0],-10.0,places=2)
         finally:
             server.shutdown();server.server_close();thread.join(2);ground.journal.close()
+
 
     def _run_agent_scheduler_once(self,agent,snapshot,queued_diagnostic=False):
         offers=[]
@@ -267,18 +282,12 @@ class ApplicationTests(unittest.TestCase):
         offers=self._run_agent_scheduler_once(agent,snapshot)
         self.assertNotIn('diagnostic-angular',[item[0] for item in offers])
 
-    def test_control_profile_discards_inflight_diagnostic_angular_frame(self):
-        from rdf_node.codec import encode,split
-        agent=self.a;r=agent.source.record;snapshot=agent.snapshot()
-        frame=encode(r['values'],sid=int(agent.sid,16),seq=1,
-                     timestamp_ms=r['timestamp_ms'],frequency_hz=r['frequency_hz'],flags=1)
-        agent.profile='control'
-        agent.diagnostic_angular_parts=split(frame)
-        agent.diagnostic_angular_started=time.monotonic()
+    def test_control_profile_discards_queued_diagnostic_angular_message(self):
+        agent=self.a;snapshot=agent.snapshot();agent.profile='control'
         offers=self._run_agent_scheduler_once(agent,snapshot,queued_diagnostic=True)
         self.assertNotIn('diagnostic-angular',[item[0] for item in offers])
-        self.assertEqual(agent.diagnostic_angular_parts,[])
         self.assertEqual(agent.clients['control'].outbox.status()['depth'],0)
+
 
     def test_diagnostic_angular_not_duplicated_when_live_bulk_is_available(self):
         agent=self.a;agent.profile='balanced';agent.bulk_resume_after=0
@@ -302,7 +311,6 @@ class ApplicationTests(unittest.TestCase):
         self.assertNotIn('diagnostic-angular',keys)
 
     def test_stopped_source_resets_valid_blocked_diagnostic_interval(self):
-        from rdf_node.codec import CHUNK,FLAG_DAQ,HEADER
         agent=self.a;agent.profile='balanced';agent.bulk_resume_after=0
         live=agent.snapshot();live['link']['ground']['state']='UNCONFIRMED'
         self.assertTrue(live['detection']['valid']);self.assertTrue(live['daq']['healthy'])
@@ -321,11 +329,9 @@ class ApplicationTests(unittest.TestCase):
             offers.append((args[0],args[1],args[2]));return True
         agent.snapshot=next_snapshot;agent._offer=offer
         agent._schedule()
-        diagnostic=[payload for key,topic,payload in offers if key=='diagnostic-angular']
-        frames=[(CHUNK.unpack_from(payload),HEADER.unpack_from(payload,12))
-                for payload in diagnostic if CHUNK.unpack_from(payload)[1]==2]
-        self.assertTrue(frames)
-        self.assertEqual(frames[0][1][3]&FLAG_DAQ,0)
+        diagnostic=[json.loads(payload) for key,topic,payload in offers if key=='diagnostic-angular']
+        self.assertTrue(diagnostic)
+        self.assertTrue(any(payload['flags']&4==0 for payload in diagnostic))
 
     def test_ground_rejects_success_ack_for_shutdown_execution(self):
         cfg=load_config();cfg['state_dir']=str(self.path/'ground')
@@ -867,7 +873,6 @@ class ApiTests(unittest.TestCase):
 
 class EndToEndTests(unittest.TestCase):
     def test_telemetry_publishes_without_ground_consumer_and_legacy_gate(self):
-        from rdf_node.codec import Assembler
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp);initial=make_agent(path);initial.journal.close()
             legacy=path/'legacy-config.yaml'
@@ -907,18 +912,13 @@ class EndToEndTests(unittest.TestCase):
                 angular=received('telemetry/angular')
                 for messages in (health,doa,angular):
                     self.assertTrue(all(m['qos']==0 and not m['retain'] for m in messages))
-                assembler=Assembler();frame=None
-                for message in angular:
-                    frame=assembler.add(message['payload']) or frame
-                    if frame: break
-                self.assertIsNotNone(frame)
-                self.assertEqual(len(frame['values']),360)
+                frame=json.loads(angular[0]['payload'])
+                self.assertEqual((frame['encoding'],len(frame['values']),frame['flags']),('json',360,63))
                 self.assertFalse(broker.errors)
             finally:
                 stop.set();thread.join(2);agent.stop();broker.stop()
 
     def test_unverified_regular_telemetry_never_advances_detection_or_receipt(self):
-        from rdf_node.codec import Assembler
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp);initial=make_agent(path);cfg=initial.cfg;initial.journal.close()
             cfg['source'].update(authority_verified=False,angle_verified=False)
@@ -952,12 +952,8 @@ class EndToEndTests(unittest.TestCase):
                 doa=json.loads(received('telemetry/doa')[-1]['payload'])
                 self.assertEqual((doa['ok'],doa['trust'],doa['angle_reference'],doa['a']),
                                  (0,'UNVERIFIED','RAW',10.0))
-                assembler=Assembler();frame=None
-                for message in received('telemetry/angular'):
-                    frame=assembler.add(message['payload']) or frame
-                    if frame: break
-                self.assertIsNotNone(frame)
-                self.assertEqual(frame['flags'],23)
+                frame=json.loads(received('telemetry/angular')[-1]['payload'])
+                self.assertEqual((frame['encoding'],len(frame['values']),frame['flags']),('json',360,23))
                 self.assertTrue(wait(lambda:
                     ground.diagnostic_angular_view() is not None and
                     ground.diagnostic_angular_view()['q']>=frame['q'],5),
@@ -1116,7 +1112,7 @@ class EndToEndTests(unittest.TestCase):
                 self.assertEqual(diagnostic['timestamp_ms'],timestamp)
                 self.assertEqual((len(diagnostic['values']),diagnostic['raw_doa_deg']),(360,10.0))
                 self.assertAlmostEqual(diagnostic['values'][0],-10.0,places=2)
-                self.assertEqual(diagnostic['encoding'],'u8')
+                self.assertEqual(diagnostic['encoding'],'json')
                 self.assertAlmostEqual(diagnostic['values'][-1],50000.0,places=2)
                 self.assertEqual(diagnostic['trust'],'UNVERIFIED')
                 self.assertIn('DAQ_NOT_HEALTHY_AT_EDGE',diagnostic['validation_reasons'])

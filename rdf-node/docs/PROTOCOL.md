@@ -78,45 +78,46 @@ Clock: 0 untrusted, 1 synced. Field unavailable dapat null. Health q tetap maju 
 
 ## Grafik lengkap 360 titik
 
-MQTT payload binary, bukan JSON/Base64. Decoder tersedia:
+`telemetry/angular` dan `telemetry/diagnostic/angular` masing-masing membawa satu object JSON
+compact per MQTT message. `values` berisi semua 360 sampel dalam urutan index native. Edge tidak
+memecah frame menjadi chunk dan tidak mengkuantisasi sampel menjadi Q16 atau U8.
+
+| Field | Bentuk |
+|---|---|
+| `v`, `encoding` | Wajib `2` dan `"json"`. |
+| `sid`, `q` | Alias sesi 8 digit hex huruf kecil; sequence publish positif 32-bit. |
+| `timestamp_ms`, `frequency_hz` | Timestamp source dalam ms dan frekuensi Hz positif. |
+| `revision` | Revision konfigurasi 32-bit atau `null` bila tidak diketahui. |
+| `vfo`, `convention` | VFO `0..15`; convention `0` atau `1`. Index native tetap dipakai, tidak otomatis menjadi true north. |
+| `flags` | Bitmask bukti `0..63`, didefinisikan di bawah. |
+| `raw_doa_deg`, `confidence_native_db` | Nilai metadata native; keduanya dapat `null`. |
+| `values` | Tepat 360 angka JSON finite, tanpa kuantisasi, dalam batas decoder `-1e8..1e8`. |
+
+Contoh decode:
 
 ```python
-from rdf_node.codec import Assembler
-assembler = Assembler()
-# payload berasal dari telemetry/angular, satu envelope chunk per MQTT message
-frame = assembler.add(payload)
-if frame is not None:
-    samples = frame['values']  # exact 360 reconstructed numeric values
+import json
+
+frame = json.loads(payload)  # bytes dari satu PUBLISH Angular
+assert frame['encoding'] == 'json'
+samples = frame['values']
+assert len(samples) == 360
 ```
 
-Sebelum diterima sebagai LIVE, Ground memeriksa sid/boot, revision, flags lengkap (`63`),
-source age, health fresh, dan monotonic q. Varian normal-topic UNVERIFIED dirutekan ke jalur
-diagnostic hanya bila bit parsed/fresh/DAQ/config ada; assembler saja bukan semua gate.
+Ground memeriksa session, revision, source age, health fresh dengan `daq=1`, dan bukti flags.
+Frame LIVE memerlukan `flags=63`, timestamp paling lama 10 s, dan sequence yang maju. Pesan
+`telemetry/angular` yang memiliki bit parsed/fresh/DAQ/config tetapi kehilangan convention
+dan/atau authority masuk ke diagnostic sebagai `UNVERIFIED`; pesan yang juga kehilangan salah
+satu bit integritas ditolak. Pesan diagnostic tetap terpisah dari LIVE dan tidak memenuhi receipt.
 
-Header little-endian `<4sBBHIIQIIBBHffHh`, 48 bytes:
+Flags: bit 0 parsed, bit 1 clock/fresh, bit 2 DAQ sehat, bit 3 convention verified, bit 4
+config attribution, bit 5 source authority verified.
 
-| Field | Jenis |
-|---|---|
-| magic | 4 bytes RDF2 |
-| version, encoding | u8, u8 (1 Q16, 2 U8) |
-| flags | u16: parsed/fresh/DAQ/convention/config/source-authority bits |
-| sid, q | u32, u32 |
-| timestamp | u64 ms |
-| frequency, revision | u32, u32; revision ffffffff berarti unknown |
-| vfo, convention, count | u8, u8, u16; count wajib360 |
-| scale, offset | float32, float32 |
-| raw CSV DoA cdeg, confidence centi | u16, i16 |
+Ukuran JSON mengikuti digit metadata dan nilai source. Broker menerima satu payload berisi seluruh
+array; consumer dapat langsung menjalankan `json.loads` dan memeriksa panjang `values`.
 
-Q16: sample signed int16, scale0.01 offset0. Header48+720=768 bytes.
-Range -327.67..327.67; -32768 reserved invalid; overflow ditolak, tidak clipped.
-U8: sample unsigned byte, scale/offset per frame; header48+360=408 bytes.
-Constant array scale0 menghasilkan semua offset. Keduanya kuantisasi, bukan lossless CSV.
-
-Envelope chunk little-endian `<IIBBH`:
-`sid(u32), q(u32), index(u8), count(u8), total-frame-length(u16)`.
-Q16 default2 x (12+384)=792 payload bytes. U8 1 x (12+408)=420.
-Assembler maximum2 incomplete frames, deadline3s, consistency and duplicate checks.
-Kurva parsial tidak dirender. Konvensi1 mempertahankan index native; tidak otomatis true north.
+Timestamp convention 1 mempertahankan index native; Ground tidak mengonversi sudut ke true north.
+Kurva hanya dinyatakan LIVE sesudah seluruh gate di atas lolos.
 
 ## Receipt
 
@@ -124,8 +125,8 @@ Kurva parsial tidak dirender. Konvensi1 mempertahankan index native; tidak otoma
 {"v":2,"sid":"7a8b9c0d","dq":1245,"hq":86,"aq":1238,"rev":7}
 ```
 
-Dikirim setiap5s oleh satu receiver yang benar-benar mendecode. `aq` baru maju setelah
-frame selesai dan lolos. Bukan PUBACK MQTT, bukan bukti operator melihat browser.
+Dikirim setiap5s oleh satu receiver yang berhasil memvalidasi satu object Angular JSON. `aq`
+baru maju setelah message lolos semua gate LIVE. Bukan PUBACK MQTT atau bukti operator melihat browser.
 Unknown sid, q yang tidak pernah terkirim, regressi, dan retained receipt ditolak.
 `telemetry/doa` dan `telemetry/angular` tidak dibatasi receipt atau keberadaan subscriber
 Ground. Edge publish saat source/profile dan koneksi MQTT ke broker memenuhi syarat; receipt
@@ -141,9 +142,9 @@ buruk, clock/config tidak terbukti, atau error lain tetap memblokir topic normal
 memetakan kedua varian ke tampilan diagnostic; receipt `dq`/`aq` tetap 0 untuk record itu,
 dan nilainya tidak menjadi detection LIVE atau dasar command.
 
-Perubahan ini memerlukan Edge dan Ground package yang diperbarui bersama. Decoder lama menolak
-bit flags baru; consumer DoA lama juga dapat menolak `ok=0` atau salah menafsirkan `a` sebagai
-sudut relatif. Consumer MQTT lain harus mengerti metadata UNVERIFIED sebelum memakai topic ini.
+Perubahan Angular wire format memerlukan Edge dan Ground package yang diperbarui bersama. Consumer
+RDF2 lama yang mengharapkan binary chunk tidak dapat membaca JSON baru. Consumer DoA lama juga
+dapat menolak `ok=0` atau salah menafsirkan `a` sebagai sudut relatif.
 
 `telemetry/diagnostic/doa` dikirim tiap 3 s selama XML tersedia, terlepas dari validitas DoA
 normal. `q` bertambah tiap publish; timestamp sumber/observasi tetap menunjuk pembacaan file
@@ -151,19 +152,19 @@ yang sama. Ground menyimpan sampel sebagai `UNVERIFIED`, tidak masuk ke `dq`, Do
 angular, atau otorisasi command.
 
 Kedua topic diagnostic memakai Control token bucket bersama health/DoA normal (default
-850 B/s), sehingga chunk QoS 0 dapat expired saat backlog. Broker ACL harus mengizinkan
-Control Edge publish dan Control Ground subscribe ke kedua topic. Diagnostic angular tidak
-memenuhi `aq`.
+850 B/s). Frame JSON multi-kilobyte dijadwalkan dengan headroom Control yang tersisa; QoS 0
+tetap dapat expired jika backlog atau trafik lain memakai budget. Broker ACL harus mengizinkan
+Control Edge publish dan Control Ground subscribe. Diagnostic angular tidak memenuhi `aq`.
 
 ## Diagnostic angular candidate
 
-Topic `telemetry/diagnostic/angular` membawa frame RDF2 terakhir dari 360 sampel `DOA_value.html`
-yang berhasil diparse, hanya saat jalur angular Bulk normal tidak dapat mengirimnya. Jika gate
-validitas source strict gagal, Edge menjadwalkan setiap 6 s; jika source valid tetapi Bulk
-terblokir atau menunggu stabilisasi resume, setiap 30 s. Tidak ada duplikasi saat Bulk normal
-tersedia; profile `control` menahan array. Topic memakai Control QoS 0, non-retained, expiry 3 s,
-dan tidak menunggu receipt Ground. Timestamp sumber dipertahankan; `q` adalah sequence publish
-diagnostic, bukan sequence file sumber.
+Topic `telemetry/diagnostic/angular` membawa satu object JSON berisi 360 sampel terakhir dari
+`DOA_value.html`, hanya saat jalur angular Bulk normal tidak dapat mengirimnya. Interval 6 s
+saat gate integritas source gagal dan 30 s saat source valid tetapi Bulk terblokir adalah
+minimum; ukuran payload dan headroom Control dapat memperpanjangnya. Tidak ada duplikasi saat
+Bulk normal tersedia; profile `control` menahan array. Topic memakai Control QoS 0,
+non-retained, expiry 3 s, dan tidak menunggu receipt Ground. Timestamp sumber dipertahankan;
+`q` adalah sequence publish diagnostic, bukan sequence file sumber.
 
 Bits `flags` menyatakan bukti yang tersedia saat Edge mengirim:
 
@@ -183,16 +184,15 @@ fresh, DAQ, atau config.
 Frame diagnostic tetap terpisah dari `telemetry/angular`, `telemetry/doa`, dan receipt.
 Timestamp stale, health/processing, revision, dan flags menjadi `validation_reasons`/`stale`,
 bukan alasan membuang sampel. Baca melalui `GET /api/v2/angular/diagnostic/latest`
-(mengembalikan `null` sebelum frame lengkap diterima). Frame diagnostic tidak memenuhi
-receipt `aq` atau detection LIVE.
+(`null` sebelum pesan JSON diterima). Frame diagnostic tidak memenuhi receipt `aq` atau detection LIVE.
 
 Response memuat 360 `values`, `encoding`, `frequency_hz`, `raw_doa_deg`,
 `source_timestamp_ms`, `source_age_ms`, `received_age_ms`, `flags`,
 `validation_reasons`, dan `stale`.
 
-Encoding mengikuti profile; bila Q16 tidak dapat merepresentasikan rentang tanpa clipping,
-Edge memakai U8. Keduanya terkuantisasi, bukan salinan lossless CSV. Gate LIVE pada
-`telemetry/angular` mensyaratkan seluruh flags `63` dan verifikasi Ground.
+Encoding selalu `"json"` untuk semua profile. Seluruh 360 nilai dikirim sebagai angka JSON tanpa
+kuantisasi Q16/U8. Gate LIVE pada `telemetry/angular` mensyaratkan seluruh flags `63` dan
+verifikasi Ground.
 
 ## Command envelope
 

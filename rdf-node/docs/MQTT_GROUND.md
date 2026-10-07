@@ -114,10 +114,11 @@ Default pause setelah command/source/link issue dan resume20s stabil dipertahank
 Setelah MQTT dikonfigurasi:
 1. Pastikan kedua client READY pada tab Link.
 2. Cek health receiver meningkat dan Ground receipt menjadi RECEIVING.
-3. Validasi output source lalu lihat DoA serta array360 pada receiver.
+3. Validasi output source lalu lihat DoA serta satu PUBLISH `telemetry/angular` berformat JSON,
+   dengan `encoding="json"` dan tepat 360 angka pada `values`.
 4. Jika authority/angle approval belum ada tetapi seluruh gate integritas data lulus, pastikan Edge tetap mengirim `telemetry/doa` (`ok=0`, RAW) dan `telemetry/angular` (flags parsial) pada topic normal. Ground menampilkan keduanya sebagai `UNVERIFIED`; detection tetap invalid dan receipt `dq`/`aq` tetap 0.
 5. Pastikan `telemetry/diagnostic/doa` berulang setiap 3 detik selama XML tersedia, termasuk saat sampel sama dan DoA normal valid; tetap `UNVERIFIED` serta tidak menambah `dq`. Saat gate normal memblokir, pastikan panel utama Edge menampilkan sudut raw dan frekuensi XML secara terpisah.
-6. Saat `DOA_value.html` berisi record 360 sampel dan gate integritas source gagal (misalnya service/DAQ berhenti atau source stale), pastikan `telemetry/diagnostic/angular` tiba tiap 6 detik. Saat source eligible tetapi Bulk terblokir, interval diagnostik 30 detik; saat Bulk normal mengalir, tidak ada duplikasi. Periksa timestamp sumber dan 360 values di `/api/v2/angular/diagnostic/latest`; kandidat tetap `UNVERIFIED`, tidak mengubah detection LIVE atau `aq`. Profile `control` sengaja tidak mengirim array diagnostik.
+6. Saat `DOA_value.html` berisi record 360 sampel dan gate integritas source gagal (misalnya service/DAQ berhenti atau source stale), pastikan `telemetry/diagnostic/angular` tiba. Interval 6 detik saat source tidak eligible dan 30 detik saat source eligible tetapi Bulk terblokir adalah minimum; ukuran JSON dan headroom Control dapat memperpanjangnya. Saat Bulk normal mengalir, tidak ada duplikasi. Periksa timestamp sumber dan 360 values di `/api/v2/angular/diagnostic/latest`; kandidat tetap `UNVERIFIED`, tidak mengubah detection LIVE atau `aq`. Profile `control` sengaja tidak mengirim array diagnostik.
 7. Putuskan radio sementara dengan jalur management aman, lihat stale/lost, reconnect tanpa burst data lama; jangan reset SDR.
 8. Jalankan command config/read-only, lalu subset write yang sudah di-approve.
 9. Ukur actual PPP counters, capture MQTT/TCP terkontrol, latency dan loss >30menit.

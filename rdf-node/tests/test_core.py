@@ -4,7 +4,7 @@ from unittest import mock
 from rdf_node.config import load_config,validate_config
 from rdf_node.util import compact,strict_json,now_ms,digest
 from rdf_node.source import parse_csv,parse_doa_xml,parse_status,safe_settings,Source
-from rdf_node.codec import HEADER,CHUNK,encode,decode,split,Assembler
+from rdf_node.codec import decode
 from rdf_node.journal import Journal
 from rdf_node.helper import DEFAULT_POLICY,Controller,HelperError,validate_changes,patch_file
 from rdf_node.mqtt import vi,read_vi,Reader,publish_packet,connect_packet,properties,utf,Message,Outbox
@@ -208,37 +208,32 @@ class SourceTests(unittest.TestCase):
         self.assertNotEqual(self.src.revision,oldrev);self.assertEqual(self.src.record['observed_revision'],oldrev);self.assertFalse(self.src.view(True)['config_attributed'])
 
 class CodecTests(unittest.TestCase):
-    def frame(self,values=None,encoding='q16'):
-        return encode(values or [-20+math.sin(i/15)*5 for i in range(360)],sid=0x1234,seq=8,timestamp_ms=now_ms(),frequency_hz=433920000,revision=4,raw_doa=10,confidence=8.27,encoding=encoding)
-    def test_header_sizes(self):self.assertEqual(HEADER.size,48);self.assertEqual(CHUNK.size,12)
-    def test_q16_full_roundtrip(self):
-        vals=[-30+i/17 for i in range(360)];out=decode(self.frame(vals));self.assertLess(max(abs(a-b) for a,b in zip(vals,out['values'])),.0051)
-    def test_q16_payload_size(self):self.assertEqual(len(self.frame()),768);self.assertEqual([len(x) for x in split(self.frame())],[396,396])
-    def test_u8_payload_size(self):self.assertEqual(len(self.frame(encoding='u8')),408);self.assertEqual(len(split(self.frame(encoding='u8'))[0]),420)
-    def test_constant_u8(self):self.assertEqual(decode(self.frame([-4]*360,'u8'))['values'],[-4.0]*360)
-    def test_authority_flag_round_trips_in_rdf2_header(self):
-        frame=encode([0]*360,sid=0x1234,seq=8,timestamp_ms=now_ms(),frequency_hz=433920000,
-                     revision=4,flags=63)
-        self.assertEqual(decode(frame)['flags'],63)
-    def test_q16_range_not_clipped(self):
-        with self.assertRaises(ValueError):self.frame([400]*360)
-    def test_nan_codec_rejected(self):
-        with self.assertRaises(ValueError):self.frame([math.nan]*360)
-    def test_wrong_count(self):
-        with self.assertRaises(ValueError):self.frame([1]*359)
-    def test_chunk_reverse_order(self):
-        chunks=split(self.frame());a=Assembler();self.assertIsNone(a.add(chunks[1]));self.assertEqual(len(a.add(chunks[0])['values']),360)
-    def test_duplicate_conflict(self):
-        c=split(self.frame());a=Assembler();a.add(c[0]);bad=c[0][:-1]+bytes([c[0][-1]^1])
-        with self.assertRaises(ValueError):a.add(bad)
-    def test_assembly_deadline(self):
-        c=split(self.frame());a=Assembler();a.add(c[0],now=1);self.assertIsNone(a.add(c[1],now=5))
-    def test_bad_magic(self):
-        f=self.frame()
-        with self.assertRaises(ValueError):decode(b'BAD!'+f[4:])
-    def test_envelope_sid_mismatch(self):
-        c=split(self.frame());c=[b'\x99\0\0\0'+p[4:] for p in c];a=Assembler();a.add(c[0])
-        with self.assertRaises(ValueError):a.add(c[1])
+    def frame(self,values=None,**updates):
+        payload={'v':2,'encoding':'json','sid':'00001234','q':8,'timestamp_ms':now_ms(),
+                 'frequency_hz':433920000,'revision':4,'vfo':0,'convention':1,'flags':63,
+                 'raw_doa_deg':10.0,'confidence_native_db':8.27,
+                 'values':[-20+math.sin(i/15)*5 for i in range(360)]}
+        if values is not None: payload['values']=values
+        payload.update(updates)
+        return compact(payload)
+    def test_json_round_trip_preserves_all_samples_and_metadata(self):
+        values=[-30+i/17 for i in range(360)]
+        payload=self.frame(values);expected=json.loads(payload);result=decode(payload)
+        self.assertEqual(result['values'],values)
+        self.assertEqual((result['sid'],result['q'],result['flags']),('00001234',8,63))
+        self.assertEqual((result['timestamp_ms'],result['frequency_hz'],result['revision']),
+                         (expected['timestamp_ms'],433920000,4))
+        self.assertEqual(result['encoding'],'json')
+        self.assertEqual(result['peak_index'],max(range(360),key=values.__getitem__))
+    def test_wrong_sample_count_rejected(self):
+        with self.assertRaises(ValueError): decode(self.frame([1]*359))
+    def test_out_of_range_sample_rejected(self):
+        values=[0]*360;values[5]=1e100
+        with self.assertRaises(ValueError): decode(self.frame(values))
+    def test_unknown_flags_rejected(self):
+        with self.assertRaises(ValueError): decode(self.frame(flags=64))
+    def test_non_json_frame_rejected(self):
+        with self.assertRaises(ValueError): decode(b'RDF2'+b'\0'*100)
 
 class JournalTests(unittest.TestCase):
     def setUp(self):

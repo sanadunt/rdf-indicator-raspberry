@@ -216,30 +216,32 @@ approval yang hilang. Ground merutekan record ke diagnostic view yang sudah ada,
 `detection`, `dq`, `aq`, atau otorisasi command. Kegagalan freshness, DAQ, clock, config,
 parse, atau control tidak memakai fallback normal-topic ini.
 
-Edge dan Ground harus diperbarui bersama. Decoder RDF2 lama menolak bit authority baru; JSON
-consumer lama mungkin menganggap `a` selalu relatif atau menolak `ok=0`. Perbarui consumer
-lain yang membaca topic normal sebelum mengaktifkan varian UNVERIFIED.
+Edge dan Ground harus diperbarui bersama untuk Angular. Publisher kini mengirim satu JSON object
+per PUBLISH dengan metadata dan seluruh 360 angka `values`; consumer RDF2 yang menunggu binary
+chunk tidak kompatibel. Consumer DoA lain juga dapat menganggap `a` selalu relatif atau menolak
+`ok=0`, sehingga perlu memahami metadata UNVERIFIED sebelum memakai topic normal.
 
-`telemetry/diagnostic/angular` mengirim record 360 sampel terakhir dari `DOA_value.html`
-hanya saat jalur angular Bulk normal tidak dapat mengirimnya. Jika gate integritas source
-strict gagal (misalnya DAQ berhenti atau stale), Edge menjadwalkan kandidat tiap 6 s; jika
-source valid tetapi Bulk terblokir atau menunggu stabilisasi resume, tiap 30 s. Bila hanya
-approval authority/angle yang hilang, topic Bulk normal membawa kandidat berlabel UNVERIFIED
-setelah syarat resume normal terpenuhi. Profile `control` tetap menahan array angular.
+`telemetry/diagnostic/angular` mengirim JSON berisi 360 sampel terakhir `DOA_value.html` hanya
+saat jalur Angular Bulk normal tidak dapat mengirimnya. Interval 6 s saat gate integritas source
+gagal dan 30 s saat source eligible tetapi Bulk terblokir adalah minimum. Edge memperpanjang
+interval sesuai ukuran serialisasi dan headroom Control; profile `control` tetap menahan array.
 
-Kandidat memakai Control QoS 0, expiry 3 s, tanpa retention, dan tidak menunggu receipt Ground.
-Timestamp sumber dipertahankan; publish ulang tidak menyegarkan umur sampel. Flags RDF2
-membawa bukti parsing, clock/freshness, DAQ, konvensi, atribusi konfigurasi, dan authority
-source. Jika Q16 melewati rentangnya, diagnostic memakai U8 tanpa clipping.
+Angular normal memakai interval minimum profile (`balanced` 4 s, `graph_u8` 2 s), lalu
+memperpanjangnya sesuai ukuran JSON dan `bulk_budget_bytes_s`. Nama `graph_u8` dipertahankan
+untuk kompatibilitas konfigurasi; semua profile memakai JSON dan tidak mengkuantisasi sampel.
 
-Ground menyimpan frame diagnostic dan Angular normal-topic UNVERIFIED di jalur terpisah dari
-Angular LIVE dan menyediakannya melalui `GET /api/v2/angular/diagnostic/latest`. Kandidat
-selalu `UNVERIFIED`; timestamp, health, processing, revision, dan flags menentukan
-`stale`/`validation_reasons`. Kandidat tidak memajukan receipt `aq` atau DoA/detection normal.
+Kedua jalur memakai QoS 0, expiry 3 s, tanpa retention dan tanpa menunggu receipt Ground.
+Timestamp source dipertahankan; publish ulang tidak menyegarkan umur sampel. JSON membawa flags
+parsed, clock/freshness, DAQ, konvensi, atribusi konfigurasi, dan authority source.
 
-Kedua topic diagnostic memakai Control token bucket bersama health/DoA (default 850 B/s).
-Broker ACL harus mengizinkan Control Edge publish dan Ground subscribe. Chunk QoS 0 dapat
-expired saat backlog.
+Ground memvalidasi JSON serta `sid`, revision, freshness, health, flags dan sequence. Ground
+menyimpan diagnostic serta Angular normal UNVERIFIED terpisah dari Angular LIVE, tersedia lewat
+`GET /api/v2/angular/diagnostic/latest`; kandidat tidak memajukan receipt `aq` atau detection.
+
+
+Kedua topic diagnostic berbagi Control token bucket dengan health/DoA (default 850 B/s).
+Scheduler menyisihkan headroom bagi telemetri Control periodik sebelum menjadwalkan frame JSON
+multi-kilobyte. QoS 0 tetap dapat expired saat backlog atau trafik lain memakai budget.
 
 
 Panel utama Edge membaca `diagnostic_doa` dari snapshot lokal dan polling API tiap 500 ms.

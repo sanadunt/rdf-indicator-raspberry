@@ -22,7 +22,7 @@ const mqttTopics=[
   ['telemetry/health/detail','QoS 0 / ~10 dtk','Payload: v,sid,t,usb,sync,cpu,mem,disk_free,throt,uv,tx,rx,adrop,parse.'],
   ['telemetry/doa','QoS 0','Payload: v,sid,q,t,f,a,c,p,rev,ok. f=Hz, a=DoA relatif, c=confidence dB, p=power dB.'],
   ['telemetry/diagnostic/doa','QoS 0 / heartbeat tiap 3 dtk bila XML tersedia','Sampel doa.xml diulang meski tidak berubah; raw angle + source/observation timestamps; UNVERIFIED; bukan receipt.'],
-  ['telemetry/angular','QoS 0 / binary','Envelope sid/q/index/count/total + frame RDF2 berisi metadata dan 360 nilai terkuantisasi Q16/U8; digate data/receipt. Bukan raw IQ.'],
+  ['telemetry/angular','QoS 0 / JSON','Satu object per pesan, metadata dan tepat 360 nilai source. Flags 63 untuk LIVE; flags parsial untuk UNVERIFIED. Bukan raw IQ.'],
   ['ack/config','QoS 1','Payload ACK: v,sid,id,status,t,rev,result.'],
   ['ack/operation','QoS 1','Payload ACK: v,sid,id,status,t,rev,result.']
  ],true],
@@ -513,7 +513,7 @@ async function command(op,extras={}){
  try{const result=await post('/api/v2/commands',r);if(op==='system.shutdown.execute')result.requestId=r.id;$('modalmsg').textContent=`${result.stage}: ${result.id||''}`;return result;}
  catch(error){if(op!=='system.shutdown.execute')throw error;const failure=new Error(error.message);failure.operationId=r.id;failure.status=error.status;throw failure;}
 }
-$('profilebtn').onclick=()=>{if(needLogin())return;const box=modal('Profil telemetry');text(box,'Grafik otomatis dipause saat command, data invalid, atau receipt hilang.');action(box,'CONTROL',()=>command('stream.set',{profile:'control'}));action(box,'BALANCED',()=>command('stream.set',{profile:'balanced'}));action(box,'GRAPH U8',()=>command('stream.set',{profile:'graph_u8'}));};
+$('profilebtn').onclick=()=>{if(needLogin())return;const box=modal('Profil telemetry');text(box,'Grafik dipause saat command berlangsung, source invalid, atau jalur Bulk belum siap.');action(box,'CONTROL',()=>command('stream.set',{profile:'control'}));action(box,'BALANCED',()=>command('stream.set',{profile:'balanced'}));action(box,'GRAPH',()=>command('stream.set',{profile:'graph_u8'}));};
 function preferences(){
  if(needLogin())return;
  const box=modal('Tema dan font');text(box,'Pilihan ini disimpan pada perangkat.');

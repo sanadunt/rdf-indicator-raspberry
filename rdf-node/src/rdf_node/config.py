@@ -11,9 +11,9 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SDR_SERVICE = 'rdfsdr.service'
 
 PROFILES = {
-    'control': {'doa_s': 1.0, 'angular_s': None, 'encoding': 'q16'},
-    'balanced': {'doa_s': 1.0, 'angular_s': 4.0, 'encoding': 'q16'},
-    'graph_u8': {'doa_s': 1.0, 'angular_s': 2.0, 'encoding': 'u8'},
+    'control': {'doa_s': 1.0, 'angular_s': None},
+    'balanced': {'doa_s': 1.0, 'angular_s': 4.0},
+    'graph_u8': {'doa_s': 1.0, 'angular_s': 2.0},
 }
 
 def _merge(base, value, path=''):
