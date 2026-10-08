@@ -106,29 +106,76 @@ function mqttPairState(l){
 }
 const SVG_NS='http://www.w3.org/2000/svg';
 let needleTurn=null;
-function buildDial(){
- const ticks=$('dialticks');if(!ticks)return;
+function createDial(host){
+ if(!host)return null;
+ const svg=document.createElementNS(SVG_NS,'svg');
+ svg.setAttribute('viewBox','-72 -72 144 144');svg.setAttribute('aria-hidden','true');svg.setAttribute('focusable','false');
+ const add=(tag,attrs,parent=svg)=>{const node=document.createElementNS(SVG_NS,tag);for(const [key,value] of Object.entries(attrs))node.setAttribute(key,String(value));parent.append(node);return node;};
+ add('circle',{class:'dial-face',r:66});
+ const spectrum=add('path',{class:'dial-spectrum',d:''});
+ add('circle',{class:'dial-ring',r:64});add('circle',{class:'dial-inner',r:40});add('path',{class:'dial-cross',d:'M-64 0H64M0-64V64'});
+ const ticks=add('g',{});
  for(let deg=0;deg<360;deg+=10){
-  const major=deg%30===0,theta=deg*Math.PI/180,inner=major?55:59,line=document.createElementNS(SVG_NS,'line');
-  line.setAttribute('x1',(inner*Math.sin(theta)).toFixed(2));line.setAttribute('y1',(-inner*Math.cos(theta)).toFixed(2));
-  line.setAttribute('x2',(64*Math.sin(theta)).toFixed(2));line.setAttribute('y2',(-64*Math.cos(theta)).toFixed(2));
-  line.setAttribute('class',major?'dial-tick major':'dial-tick');ticks.append(line);
+  const major=deg%30===0,theta=deg*Math.PI/180,inner=major?55:59;
+  add('line',{class:major?'dial-tick major':'dial-tick',x1:(inner*Math.sin(theta)).toFixed(2),y1:(-inner*Math.cos(theta)).toFixed(2),x2:(64*Math.sin(theta)).toFixed(2),y2:(-64*Math.cos(theta)).toFixed(2)},ticks);
  }
+ const labels=add('g',{class:'dial-labels'});
+ for(const [text,x,y] of [['0',0,-44],['90',46,0],['180',0,48],['270',-46,0]])add('text',{x,y},labels).textContent=text;
+ const needle=add('g',{class:'needle'});
+ add('path',{class:'needle-wedge',d:'M0 0L-9.1-63.3A64 64 0 0 1 9.1-63.3Z'},needle);add('path',{class:'needle-line',d:'M0 10V-52'},needle);add('path',{class:'needle-head',d:'M0-64L-6-51H6Z'},needle);
+ add('circle',{class:'dial-hub',r:4});
+ const note=add('text',{class:'dial-note',y:24});
+ host.dataset.spectrum='off';host.append(svg);
+ return {host,needle,spectrum,note};
 }
+const dials=[createDial($('dial')),createDial($('focusdial'))].filter(Boolean);
 // Only a gate-valid relative DoA moves the needle. Raw/UNVERIFIED angles use a different
 // convention and stay numeric-only so the dial never implies a verified bearing.
 function updateDial(angle,unverified){
- const dial=$('dial');if(!dial)return;
  const valid=typeof angle==='number'&&Number.isFinite(angle);
- dial.dataset.state=valid?'valid':unverified?'unverified':'none';
- $('dialnote').textContent=valid?'':unverified?'UNVERIFIED':'TANPA DATA';
- if(!valid){dial.setAttribute('aria-label',unverified?'Dial arah relatif: sudut belum terverifikasi, jarum disembunyikan':'Dial arah relatif: belum ada pengukuran valid');return;}
- const target=((angle%360)+360)%360;
- needleTurn=needleTurn===null?target:needleTurn+((target-needleTurn)%360+540)%360-180;
- $('needle').style.setProperty('--a',`${needleTurn.toFixed(2)}deg`);
- dial.setAttribute('aria-label',`Dial arah relatif ${fmt(target)} derajat, 0 di atas searah jarum jam`);
+ const target=valid?((angle%360)+360)%360:null;
+ if(valid)needleTurn=needleTurn===null?target:needleTurn+((target-needleTurn)%360+540)%360-180;
+ const description=valid?`Dial arah relatif ${fmt(target)} derajat, 0 di atas searah jarum jam`:unverified?'Dial arah relatif: sudut belum terverifikasi, jarum disembunyikan':'Dial arah relatif: belum ada pengukuran valid';
+ for(const dial of dials){
+  dial.host.dataset.state=valid?'valid':unverified?'unverified':'none';
+  dial.note.textContent=valid?'':unverified?'UNVERIFIED':'TANPA DATA';
+  if(valid)dial.needle.style.setProperty('--a',`${needleTurn.toFixed(2)}deg`);
+  dial.host.setAttribute('aria-label',dial.host.id==='dial'?`${description}. Ketuk untuk mode baca jauh.`:description);
+ }
 }
-buildDial();
+// The 360-value Angular frame is indexed by theta, which equals the relative DoA axis only
+// under theta_mirror. It is drawn (scaled per frame, no units) only for the same sample q as
+// the displayed gate-valid detection; anything else hides the curve rather than guessing.
+let spectrumQ=null,spectrumShownAt=0,spectrumPending=false;
+function setSpectrum(values){
+ let d='';
+ if(values){
+  const min=Math.min(...values),max=Math.max(...values),range=max-min;
+  d=values.map((value,index)=>{const radius=range>0?14+48*(value-min)/range:38,theta=index*Math.PI/180;return `${index?'L':'M'}${(radius*Math.sin(theta)).toFixed(1)} ${(-radius*Math.cos(theta)).toFixed(1)}`;}).join('')+'Z';
+ }
+ for(const dial of dials){dial.spectrum.setAttribute('d',d);dial.host.dataset.spectrum=values?'on':'off';}
+}
+function spectrumVisible(){return $('blank').hidden&&($('home').classList.contains('active')||!$('focus').hidden);}
+async function refreshSpectrum(s){
+ const d=s.detection||{};
+ if(!d.valid||d.angle_convention!=='theta_mirror'||typeof d.q!=='number'){if(spectrumQ!==null){spectrumQ=null;setSpectrum(null);}return;}
+ if(spectrumQ!==null&&spectrumQ!==d.q&&Date.now()-spectrumShownAt>2000){spectrumQ=null;setSpectrum(null);}
+ if(!spectrumVisible()||spectrumPending||d.q===spectrumQ)return;
+ spectrumPending=true;
+ try{
+  const frame=await get('/api/v2/angular/latest'),current=snapshot.detection||{};
+  if(frame&&frame.live===true&&current.valid&&frame.q===current.q&&Array.isArray(frame.values)&&frame.values.length===360&&frame.values.every(Number.isFinite)){
+   spectrumQ=frame.q;spectrumShownAt=Date.now();setSpectrum(frame.values);
+  }
+ }catch{/* keep the last matching frame; the 2 s age check hides it if updates stop */}
+ finally{spectrumPending=false;}
+}
+function openFocus(){$('focus').hidden=false;void refreshSpectrum(snapshot);}
+function closeFocus(){if($('focus').hidden)return;$('focus').hidden=true;$('dial').focus({preventScroll:true});}
+$('dial').addEventListener('click',openFocus);
+$('dial').addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();openFocus();}});
+$('focus').addEventListener('click',closeFocus);
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&$('modal').hidden)closeFocus();});
 function renderData(s){
  const l=s.link||{};
  const control=l.mqtt_control||{},bulk=l.mqtt_bulk||{};
@@ -160,6 +207,10 @@ function render(s){
  const alerts=s.active_alerts||[];const a=alerts.find(x=>x.severity==='error')||alerts[0];
  $('alert').textContent=a?a.text:'Status lokal normal';$('alertbox').className=`alert ${a?(a.severity==='error'?'bad':'warn'):'good'}`;
  $('alerticon').textContent=a?'!':'\u2713';$('temp').textContent=`${fmt(h.temperature_c)}\u00b0C`;
+ $('focus-angle-label').textContent=$('angle-label').textContent;$('focusangle').textContent=$('angle').textContent;$('focusangle').className=$('angle').className;
+ $('focusage').textContent=$('age').textContent;$('focusfreq').textContent=$('freq').textContent;
+ label('focusppp',`PPP ${l.ppp||'--'}`,l.ppp);label('focusmqtt',`MQTT ${l.mqtt_control?.state||'DISABLED'}`,l.mqtt_control?.state);label('focusdaq',`DAQ ${q.state==='HEALTHY'?'SINKRON':q.state||'UNKNOWN'}`,q.state);
+ $('focusalert').textContent=a?a.text:'';$('focusalert').className=`focus-alert ${a?(a.severity==='error'?'bad':'warn'):''}`;
  if(!linkData){rows('linkrows',[["T900 USB",l.usb,l.usb],["PPP / interface",`${l.ppp||'--'} / ${l.interface||'--'}`,l.ppp],[`Ping ${l.ppp_peer||'peer'}`,pppProbeNames[l.ppp_probe]||'BELUM DICEK',l.ppp_probe],["MQTT CTRL / BULK",`${l.mqtt_control?.state||'--'} / ${l.mqtt_bulk?.state||'--'}`,mqttPairState(l)],["TX / RX (PPP/IP)",`${fmt(l.tx_kbit_s,2)} / ${fmt(l.rx_kbit_s,2)} kbit/s`]]);}
  else rows('linkrows',[["Profil diminta",l.profile],["Grafik pause",l.bulk_pause||'STREAMING'],["Queue CTRL / BULK",`${l.mqtt_control?.depth||0} / ${l.mqtt_bulk?.depth||0}`],["Parse / angular drop",`${d.parse_errors||0} / ${l.angular_aborted||0}`]]);
  const syn=q.sync||{},syncFlags=[syn.frame,syn.sample_delay,syn.iq];
@@ -220,7 +271,7 @@ async function poll(manual=false){
  pollPending=true;
  const retry=$('retry');
  if(manual&&retry){retry.disabled=true;retry.textContent='Mencoba lagi...';}
- try{const s=await get('/api/v2/snapshot');lastApi=Date.now();if(s.snapshot_seq!==lastSeq&&s.snapshot_seq!=null){lastSeq=s.snapshot_seq;lastProgress=Date.now();}snapshot=s;try{await checkShutdownHistory();}catch{}render(s);}
+ try{const s=await get('/api/v2/snapshot');lastApi=Date.now();if(s.snapshot_seq!==lastSeq&&s.snapshot_seq!=null){lastSeq=s.snapshot_seq;lastProgress=Date.now();}snapshot=s;try{await checkShutdownHistory();}catch{}render(s);void refreshSpectrum(s);}
  catch(e){/* local watchdog displays staleness independently */}
  finally{
   pollPending=false;
@@ -248,7 +299,7 @@ async function keepAdminSessionAlive(){
 }
 setInterval(keepAdminSessionAlive,ADMIN_SESSION_CHECK_MS);
 setInterval(()=>{const stale=Date.now()-lastProgress>5000;$('stale').hidden=!stale;if(stale)$('stalereason').textContent=Date.now()-lastApi>5000?'API lokal tidak merespons.':'API hidup, snapshot tidak bergerak.';const sec=snapshot.config?.preferences?.blank_after_seconds||0;if(sec>0&&Date.now()-lastTouch>sec*1000&&!snapshot.active_alerts?.some(x=>x.severity==='error'))$('blank').hidden=false;},250);
-for(const button of document.querySelectorAll('nav button'))button.addEventListener('click',()=>{for(const e of document.querySelectorAll('.page'))e.classList.toggle('active',e.id===button.dataset.tab);for(const e of document.querySelectorAll('nav button')){const active=e===button;e.classList.toggle('selected',active);if(active)e.setAttribute('aria-current','page');else e.removeAttribute('aria-current');}});
+for(const button of document.querySelectorAll('nav button'))button.addEventListener('click',()=>{for(const e of document.querySelectorAll('.page'))e.classList.toggle('active',e.id===button.dataset.tab);for(const e of document.querySelectorAll('nav button')){const active=e===button;e.classList.toggle('selected',active);if(active)e.setAttribute('aria-current','page');else e.removeAttribute('aria-current');}void refreshSpectrum(snapshot);});
 function segmented(id,onChange){
  const host=$(id);
  host.addEventListener('click',event=>{
@@ -538,24 +589,27 @@ async function command(op,extras={}){
 $('profilebtn').onclick=()=>{if(needLogin())return;const box=modal('Profil telemetry');text(box,'Grafik dipause saat command berlangsung, source invalid, atau jalur Bulk belum siap.');action(box,'CONTROL',()=>command('stream.set',{profile:'control'}));action(box,'BALANCED',()=>command('stream.set',{profile:'balanced'}));action(box,'GRAPH',()=>command('stream.set',{profile:'graph_u8'}));};
 function preferences(){
  if(needLogin())return;
- const box=modal('Tema dan font');text(box,'Pilihan ini disimpan pada perangkat.');
- const current={theme:'dark',accent:'teal',font:'system',...(snapshot.config?.preferences||{})};
+ const box=modal('Tampilan');text(box,'Disimpan pada perangkat. Layar tidak dipadamkan selama ada alarm error.');
+ const current={theme:'dark',accent:'teal',font:'system',blank_after_seconds:0,...(snapshot.config?.preferences||{})};
  const grid=document.createElement('div');grid.className='preference-grid';const selects={};
  const fields=[
   ['theme','Mode',[['dark','Gelap'],['light','Terang']]],
   ['accent','Warna aksen',[['teal','Teal'],['blue','Biru'],['amber','Amber']]],
-  ['font','Jenis huruf',[['system','Sistem'],['serif','Serif'],['mono','Monospace']]]
+  ['font','Jenis huruf',[['system','Sistem'],['serif','Serif'],['mono','Monospace']]],
+  ['blank_after_seconds','Layar padam',[['0','Tidak pernah'],['60','1 menit'],['300','5 menit'],['900','15 menit']]]
  ];
  for(const [key,label,choices] of fields){
   const field=document.createElement('label');field.className='preference-field';
   const caption=document.createElement('span');caption.textContent=label;
   const select=document.createElement('select');select.setAttribute('aria-label',label);
   for(const [value,title] of choices){const option=document.createElement('option');option.value=value;option.textContent=title;select.append(option);}
-  select.value=current[key];field.append(caption,select);grid.append(field);selects[key]=select;
+  const value=String(current[key]);
+  if(!choices.some(([choice])=>choice===value)){const option=document.createElement('option');option.value=value;option.textContent=`${value} dtk`;select.append(option);}
+  select.value=value;field.append(caption,select);grid.append(field);selects[key]=select;
  }
  box.append(grid);
  action(box,'Simpan tampilan',async()=>{
-  const body={};for(const [key,select] of Object.entries(selects))body[key]=select.value;
+  const body={};for(const [key,select] of Object.entries(selects))body[key]=key==='blank_after_seconds'?Number(select.value):select.value;
   const saved=await post('/api/v2/display/preferences',body);
   snapshot.config={...(snapshot.config||{}),preferences:saved};render(snapshot);$('modalmsg').textContent='Tampilan disimpan pada perangkat.';
  });

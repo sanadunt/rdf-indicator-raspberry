@@ -28,7 +28,11 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
 - Edge tidak menerima konfirmasi aplikasi Ground atas telemetry; MQTT CONNECTED bukan bukti telemetry diproses Ground.
 - Panel **Utama | Link | Sistem | Config | Data**, logical viewport **480x320**, login PIN 6 digit dengan keypad layar sentuh.
 - API loopback; login PIN dibatasi percobaan, dengan session dan CSRF/Origin checks.
-- `Config > Tampilan` menyimpan mode gelap/terang, aksen warna, dan font lokal.
+- Halaman Utama menampilkan dial arah relatif (0 di atas, searah jarum jam). Jarum dan kurva
+  spektrum 360° (skala relatif per frame) hanya tampil untuk deteksi valid dengan sampel yang sama;
+  sudut raw/UNVERIFIED tetap berupa angka. Ketuk dial untuk **mode baca jauh** layar penuh.
+- `Config > Tampilan` menyimpan mode gelap/terang, aksen warna, font lokal, dan waktu layar padam
+  (tidak pernah, 1, 5, atau 15 menit; layar tidak padam selama ada alarm error).
 - `Data > Atur` mengubah host/port, transport MQTT/TCP atau WebSocket, pilihan TLS, dua pasangan akun, dan Client ID dasar (akhiran `-control`/`-bulk`).
   TLS aktif memverifikasi sertifikat/nama host; TLS nonaktif mengirim kredensial dan payload tanpa enkripsi—gunakan hanya pada link tepercaya.
   Pengaturan disimpan lokal dan diterapkan tanpa restart layanan; perubahan koneksi memulai sesi transport baru.

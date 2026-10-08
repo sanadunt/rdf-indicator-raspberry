@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Edge panel: draw the latest 360-value Angular frame as a per-frame-scaled curve inside the DoA
+  dial, only under `theta_mirror` and only when its `q` matches the displayed gate-valid detection
+  (the curve hides after 2 s without a matching frame). Tap the dial for a full-screen
+  far-reading mode with a larger dial, 68 px angle, frequency, link/DAQ status, and the active
+  alert. `Config > Tampilan` now exposes `blank_after_seconds` (off, 1, 5, 15 minutes).
+
 - Refresh the 480x320 Edge panel for small touchscreens. Utama gets a relative-DoA dial (0 at the
   top, clockwise, matching the Ground plot) that moves only for gate-valid detections; raw or
   UNVERIFIED angles stay numeric with the needle hidden. Status values gain colour dots, Link and

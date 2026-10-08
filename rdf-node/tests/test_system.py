@@ -983,6 +983,21 @@ class ApiTests(unittest.TestCase):
         code,_,response=self.http('POST','/api/v2/display/preferences',{'accent':'amber'})
         self.assertEqual(code,200)
         self.assertEqual(json.loads(response)['font'],'system')
+    def test_panel_blank_choices_persist_and_non_integer_rejected(self):
+        self.login()
+        for seconds in (60,300,900,0):
+            code,_,response=self.http('POST','/api/v2/display/preferences',{'blank_after_seconds':seconds})
+            self.assertEqual(code,200);self.assertEqual(json.loads(response)['blank_after_seconds'],seconds)
+        for value in ('300',300.5,-1,86401):
+            self.assertEqual(self.http('POST','/api/v2/display/preferences',{'blank_after_seconds':value})[0],400)
+        self.assertEqual(self.a.journal.get('display')['blank_after_seconds'],0)
+    def test_angular_latest_matches_detection_sample_for_panel_spectrum(self):
+        self.a._snapshot();detection=self.http('GET','/api/v2/snapshot')
+        snap=json.loads(detection[2])['detection']
+        code,_,body=self.http('GET','/api/v2/angular/latest');frame=json.loads(body)
+        self.assertEqual(code,200)
+        self.assertEqual((frame['q'],frame['live'],len(frame['values'])),(snap['q'],snap['valid'],360))
+        self.assertEqual(snap['angle_convention'],'theta_mirror')
     def test_unknown_or_invalid_preference_rejected(self):
         self.login()
         for body in ({'run_shell':'true'},{'accent':'ultraviolet'},{'font':'comic-sans'}):

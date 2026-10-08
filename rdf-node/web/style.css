@@ -50,7 +50,8 @@ header{height:28px;padding:0 8px 0 10px;display:flex;align-items:center;justify-
 .stat b::before{content:'';flex:0 0 7px;width:7px;height:7px;border-radius:50%;background:currentColor}
 .stat b,.rows b,.data-summary b{overflow:hidden;text-overflow:ellipsis}
 .hero{height:150px;display:grid;grid-template-columns:146px minmax(0,1fr);align-items:center}
-.dial{width:140px;height:140px;margin-left:6px}
+.dial{width:140px;height:140px;margin-left:6px;border-radius:50%;cursor:pointer}
+.dial:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .dial svg{width:140px;height:140px;overflow:visible}
 .dial-face{fill:var(--surface)}
 .dial-ring{fill:none;stroke:var(--line);stroke-width:1.5}
@@ -69,7 +70,9 @@ header{height:28px;padding:0 8px 0 10px;display:flex;align-items:center;justify-
 .dial[data-state="valid"] .dial-ring{stroke:var(--ok);stroke-opacity:.45}
 .dial[data-state="unverified"] .dial-note{fill:var(--warn)}
 .dial[data-state="unverified"] .dial-ring{stroke:var(--warn);stroke-opacity:.5;stroke-dasharray:4 4}
-@media(prefers-reduced-motion:reduce){.needle{transition:none}}
+.dial-spectrum{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1;stroke-linejoin:round;opacity:0;transition:opacity .25s}
+.dial[data-state="valid"][data-spectrum="on"] .dial-spectrum{opacity:.9}
+@media(prefers-reduced-motion:reduce){.needle,.dial-spectrum{transition:none}}
 .readout{min-width:0;height:100%;padding:4px 12px 4px 10px;display:flex;flex-direction:column;justify-content:center}
 .reading{min-width:0}
 .reading label{display:block;font-size:12px;line-height:15px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -211,11 +214,32 @@ nav button.selected svg{stroke-width:2.2}
 .mqtt-numeric-keyboard .mqtt-keyboard-row{display:grid;grid-template-columns:repeat(3,44px);justify-content:center;gap:2px}
 .mqtt-key:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 
+/* Far-reading mode: full-screen dial + large readings, tap anywhere to return */
+#focus{position:absolute;inset:0;z-index:4;background:var(--bg);display:flex;align-items:center;gap:14px;padding:10px 14px 10px 10px;cursor:pointer}
+.dial-large{width:236px;height:236px;margin:0;flex:0 0 236px;cursor:inherit}
+.dial-large svg{width:236px;height:236px}
+.dial-large .dial-labels text{font-size:8px}
+.focus-readout{flex:1;min-width:0;display:flex;flex-direction:column}
+.focus-angle,.focus-freq{display:flex;align-items:baseline;gap:3px;white-space:nowrap}
+.focus-angle strong{font-size:68px;line-height:70px;font-weight:750;letter-spacing:-2.5px;font-variant-numeric:tabular-nums}
+.focus-angle .unit{font-size:30px;color:var(--dim);align-self:flex-start;margin-top:6px}
+#focusage{font-size:13px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.focus-freq{margin-top:8px;padding-top:6px;border-top:1px solid var(--line)}
+.focus-freq strong{font-size:30px;line-height:34px;font-weight:700;letter-spacing:-.8px;font-variant-numeric:tabular-nums}
+.focus-freq .unit{font-size:13px;color:var(--dim);font-weight:600}
+.focus-status{display:flex;flex-wrap:wrap;gap:3px 10px;margin-top:8px}
+.focus-status b{display:flex;align-items:center;gap:4px;font-size:11px;white-space:nowrap}
+.focus-status b::before{content:'';width:7px;height:7px;border-radius:50%;background:currentColor}
+.focus-alert{margin:6px 0 0;font-size:11.5px;font-weight:600;line-height:14px;max-height:28px;overflow:hidden}
+.focus-alert:empty{display:none}
+.focus-exit{margin-top:6px;font-size:9.5px;color:var(--faint);text-transform:none;letter-spacing:.2px}
+
 #blank{position:absolute;inset:0;background:#000;z-index:20;display:flex;align-items:center;justify-content:center;color:#67717d;font-size:12px}
 
 /* Narrow fallback (the kiosk itself is 480 wide) */
 @media(max-width:420px){
  .hero{grid-template-columns:118px minmax(0,1fr)}.dial,.dial svg{width:112px;height:112px}
+ .dial-large,.dial-large svg{width:180px;height:180px;flex-basis:180px}.focus-angle strong{font-size:52px;line-height:56px}
  .value-big strong{font-size:38px;line-height:44px}.value-mid strong{font-size:20px}
  .stat{padding:5px 4px 0 6px}.stat b{font-size:11.5px}
  nav button{font-size:10px}.seg button{min-width:56px;padding:0 8px}
