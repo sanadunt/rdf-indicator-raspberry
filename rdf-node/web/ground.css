@@ -27,7 +27,6 @@ main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;pad
 .card,.ppp-control,.settings-form{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;min-width:0}
 main.data-stale .card{border-color:var(--warn)}
 .card-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
-.axis-note{letter-spacing:.2px;font-weight:500;color:var(--faint)}
 h1{font-size:56px;line-height:1.05;margin:6px 0 4px;color:var(--ok);font-variant-numeric:tabular-nums;letter-spacing:-1.5px}
 .meta{margin:4px 0;font-size:12.5px}
 .plot{max-width:460px;margin:8px auto 0;border-radius:50%}

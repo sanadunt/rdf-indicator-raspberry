@@ -37,7 +37,8 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
   halaman dapat digeser kiri/kanan di layar sentuh.
 - `Config > Tampilan` menyimpan mode gelap/terang/malam (merah), aksen warna, font lokal, dan
   **layar hitam otomatis** (mati, 1, 5, atau 15 menit tanpa sentuhan). Tombol `Config > Layar hitam`
-  menghitamkan layar seketika. Ketukan pertama hanya menyalakan layar (tidak menekan tombol di
+  menghitamkan layar seketika. Layar hitam hanya menampilkan jam redup (jam sistem Pi; ditandai
+  BELUM SINKRON bila Edge melaporkan jam belum dipercaya). Ketukan pertama hanya menyalakan layar (tidak menekan tombol di
   bawahnya). Layar tidak dihitamkan otomatis selama ada alarm error, dan alarm error baru
   menyalakannya kembali. Ini overlay hitam, bukan pemutusan backlight; backlight tetap diatur OS.
 - Frekuensi center + VFO0 diisi lewat keypad angka di layar, sehingga tidak memerlukan keyboard fisik.

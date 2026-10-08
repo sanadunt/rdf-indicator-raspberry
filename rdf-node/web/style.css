@@ -116,14 +116,13 @@ header{height:28px;padding:0 8px 0 10px;display:flex;align-items:center;justify-
 .row b{font-size:14px;text-align:right;white-space:nowrap;min-width:0}
 .rows b.good::before,.rows b.warn::before,.rows b.bad::before{content:'';flex:0 0 7px;width:7px;height:7px;border-radius:50%;background:currentColor}
 #config .pagetitle{height:40px}
-.configrows .row{height:29px}
-.configbuttons{display:grid;grid-template-columns:repeat(4,1fr);height:46px;gap:6px;margin:6px 0 3px}
+.configrows .row{height:33px}
+.configbuttons{display:grid;grid-template-columns:repeat(4,1fr);height:54px;gap:6px;margin:8px 0 0}
 .configbuttons button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0 4px;font-size:11.5px;font-weight:600;white-space:nowrap}
 .configbuttons svg,nav svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
 .configbuttons svg{width:17px;height:17px;color:var(--accent)}
 #blankbtn svg{color:var(--dim)}
 .hint{font-size:11px;color:var(--dim);margin:3px 0;line-height:14px;overflow-wrap:anywhere;max-height:42px;overflow:hidden}
-#configreason{max-height:28px}
 
 /* Navigation */
 nav{height:48px;display:grid;grid-template-columns:repeat(5,1fr);background:var(--nav);border-top:1px solid var(--line)}
@@ -255,7 +254,6 @@ nav button[data-alert="bad"]::before{background:var(--bad)}
 .focus-status b::before{content:'';width:7px;height:7px;border-radius:50%;background:currentColor}
 .focus-alert{margin:6px 0 0;font-size:11.5px;font-weight:600;line-height:14px;max-height:28px;overflow:hidden}
 .focus-alert:empty{display:none}
-.focus-exit{margin-top:6px;font-size:9.5px;color:var(--faint);text-transform:none;letter-spacing:.2px}
 
 /* Icons created by app.js */
 .ico{width:16px;height:16px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
@@ -307,9 +305,12 @@ nav button[data-alert="bad"]::before{background:var(--bad)}
 .freq-pad .ico{width:20px;height:20px;margin:auto}
 
 #blank{position:absolute;inset:0;background:#000;z-index:20;display:flex;align-items:center;justify-content:center;cursor:pointer}
-.blank-hint{display:flex;align-items:center;gap:8px;color:#4b5563;font-size:12px;animation:blank-hint 4s ease-in forwards}
-.blank-hint svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
-@keyframes blank-hint{0%,60%{opacity:1}100%{opacity:0}}
+.blank-clock{display:flex;flex-direction:column;align-items:center;gap:2px;color:#5b6573;font-variant-numeric:tabular-nums}
+.blank-clock strong{font-size:84px;line-height:88px;font-weight:300;letter-spacing:-2px}
+.blank-clock span{font-size:15px;font-weight:500;letter-spacing:.3px}
+.blank-clock em{margin-top:6px;font-style:normal;font-size:10px;font-weight:700;letter-spacing:.8px;color:#7a5a20}
+#blank.untrusted .blank-clock strong{color:#4a4f57}
+body.night .blank-clock{color:#5c1f19}body.night .blank-clock em{color:#7a3a14}
 
 /* Narrow fallback (the kiosk itself is 480 wide) */
 @media(max-width:420px){

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Edge panel: the black screen shows a dim clock and date from the Pi system time, marked
+  `BELUM SINKRON` when the Edge reports the clock as untrusted. Remove explanatory captions from
+  the panel (Config approval note, PIN keypad hint, Profil intro, frequency note, far-reading exit
+  hint) and shorten destructive-action dialogs to one line; status and disabled reasons remain.
+  Ground drops the plot axis caption.
+
 - Edge panel black screen: `Config > Layar hitam` blanks immediately; the automatic timeout is a
   tap-to-choose setting (off, 1, 5, 15 min). The overlay is pure black with a hint that fades out,
   the waking tap is swallowed so it cannot press a control underneath, and a new error alert wakes

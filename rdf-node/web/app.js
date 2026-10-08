@@ -314,7 +314,6 @@ function render(s){
  else rows('sysrows',[["CPU / RAM",`${fmt(h.cpu_percent)}% / ${fmt(h.memory_percent)}%`,'','gauge'],["Suhu / disk kosong",`${fmt(h.temperature_c)} C / ${fmt(h.disk_free_percent)}%`,'','thermo'],["Throttle / under-voltage",`${h.throttled??'unknown'} / ${h.undervoltage??'unknown'}`,'','bolt'],["Uptime",h.uptime_s==null?'--':`${Math.floor(h.uptime_s/60)} menit`,'','power'],["Jam sistem",h.clock_state,h.clock_state,'clock']]);
  rows('configrows',[["Node / profil",`${s.node_id||'--'} / ${c.profile||'--'}`,'','pin'],["Source / MQTT",`${c.source_configured?'OK':'SETUP'} / ${c.mqtt_configured?'CONFIGURED':'OFF'}`,'','folder'],["RF revision / proof",`${c.sdr_revision??'--'} / ${c.proof||'--'}`,'','hash'],["Akses / helper",`${authenticated?'ADMIN':'READ ONLY'} / ${s.capabilities?.helper_available?'SIAP':'OFF'}`,'','shield']]);
  setButtonLabel($('admin'),authenticated?'Logout':'Login',authenticated?'unlock':'lock');$('adminchip').hidden=!authenticated;
- $('configreason').textContent='Kontrol lokal memerlukan approval root satu kali; aksi tetap meminta PIN Admin dan konfirmasi layar.';
  const prefs={theme:'dark',accent:'teal',font:'system',...(c.preferences||{})};
  document.body.classList.toggle('light',prefs.theme==='light');document.body.classList.toggle('night',prefs.theme==='night');
  document.body.dataset.accent=prefs.accent;document.body.dataset.font=prefs.font;
@@ -398,9 +397,18 @@ setInterval(keepAdminSessionAlive,ADMIN_SESSION_CHECK_MS);
 // that tap is swallowed; a new error alert that appears while black wakes it automatically.
 let blankErrors=new Set();
 function errorAlertCodes(){return new Set((snapshot.active_alerts||[]).filter(alert=>alert.severity==='error').map(alert=>alert.code||alert.text));}
-function enterBlank(){blankErrors=errorAlertCodes();$('blank').hidden=false;}
+// The clock is the Pi system time; when the Edge reports it untrusted it is marked, not hidden.
+function updateBlankClock(){
+ const now=new Date(),pad=value=>String(value).padStart(2,'0');
+ $('blanktime').textContent=`${pad(now.getHours())}:${pad(now.getMinutes())}`;
+ let date='';try{date=now.toLocaleDateString('id-ID',{weekday:'long',day:'numeric',month:'long'});}catch{date=now.toDateString();}
+ $('blankdate').textContent=date;
+ const trusted=snapshot.host?.clock_trusted===true;
+ $('blankclock').hidden=trusted;$('blank').classList.toggle('untrusted',!trusted);
+}
+function enterBlank(){blankErrors=errorAlertCodes();updateBlankClock();$('blank').hidden=false;}
 function wakeScreen(){if($('blank').hidden)return false;$('blank').hidden=true;lastTouch=Date.now();void refreshSpectrum(snapshot);return true;}
-setInterval(()=>{const stale=Date.now()-lastProgress>5000;$('stale').hidden=!stale;if(stale)$('stalereason').textContent=Date.now()-lastApi>5000?'API lokal tidak merespons.':'API hidup, snapshot tidak bergerak.';const sec=snapshot.config?.preferences?.blank_after_seconds||0,errors=errorAlertCodes();if($('blank').hidden){if(sec>0&&Date.now()-lastTouch>sec*1000&&!errors.size)enterBlank();}else if([...errors].some(code=>!blankErrors.has(code)))wakeScreen();},250);
+setInterval(()=>{const stale=Date.now()-lastProgress>5000;$('stale').hidden=!stale;if(stale)$('stalereason').textContent=Date.now()-lastApi>5000?'API lokal tidak merespons.':'API hidup, snapshot tidak bergerak.';const sec=snapshot.config?.preferences?.blank_after_seconds||0,errors=errorAlertCodes();if($('blank').hidden){if(sec>0&&Date.now()-lastTouch>sec*1000&&!errors.size)enterBlank();}else if([...errors].some(code=>!blankErrors.has(code)))wakeScreen();else updateBlankClock();},250);
 const tabOrder=Array.from(document.querySelectorAll('nav button'),button=>button.dataset.tab);
 function selectTab(tab,direction=0){
  for(const page of document.querySelectorAll('.page')){
@@ -467,7 +475,7 @@ function section(parent,title,iconName,klass=''){
 function needLogin(){if(authenticated)return false;login();return true;}
 function login(){
  let pin='',pending=false;
- const box=modal('PIN admin lokal','lock');text(box,'Masukkan 6 angka menggunakan keypad.');
+ const box=modal('PIN admin lokal','lock');
  const layout=document.createElement('div');layout.className='pin-layout';
  const pad=document.createElement('div');pad.className='pin-pad';pad.setAttribute('role','group');pad.setAttribute('aria-label','Keypad PIN');
  const readout=document.createElement('div');readout.className='pin-readout';readout.setAttribute('role','img');
@@ -554,11 +562,11 @@ async function openMqttSettings(){
  const clientId=mqttField(grid,'Client ID dasar',settings.client_id,'text','rdf-node',48);
  const websocketPath=mqttField(grid,'Path WebSocket',settings.websocket_path||'/mqtt','text','/mqtt',256);
  const websocketPathField=websocketPath.closest('label');
- groupHeading('Akun CTRL / BULK (kosongkan bila tidak diubah)','lock');
- const controlUser=mqttField(grid,'User CTRL','','text','',128);controlUser.autocomplete='off';
- const controlPassword=mqttField(grid,'Pass CTRL','','password','',512);controlPassword.autocomplete='new-password';
- const bulkUser=mqttField(grid,'User BULK','','text','',128);bulkUser.autocomplete='off';
- const bulkPassword=mqttField(grid,'Pass BULK','','password','',512);bulkPassword.autocomplete='new-password';
+ groupHeading('Akun CTRL / BULK','lock');
+ const controlUser=mqttField(grid,'User CTRL','','text','tidak diubah',128);controlUser.autocomplete='off';
+ const controlPassword=mqttField(grid,'Pass CTRL','','password','tidak diubah',512);controlPassword.autocomplete='new-password';
+ const bulkUser=mqttField(grid,'User BULK','','text','tidak diubah',128);bulkUser.autocomplete='off';
+ const bulkPassword=mqttField(grid,'Pass BULK','','password','tidak diubah',512);bulkPassword.autocomplete='new-password';
  box.append(grid);
  function updateTransportVisibility(){websocketPathField.hidden=transport.value!=='websocket';}
  transport.addEventListener('change',updateTransportVisibility);
@@ -726,14 +734,13 @@ async function command(op,extras={}){
  catch(error){if(op!=='system.shutdown.execute')throw error;const failure=new Error(error.message);failure.operationId=r.id;failure.status=error.status;throw failure;}
 }
 const profileChoices=[
- ['control','CONTROL','pause','Grafik 360° ditahan; hanya DoA, health, dan kontrol. Paling hemat link.'],
- ['balanced','BALANCED','activity','Grafik 360° minimal tiap 4 dtk, diperpanjang sesuai budget link.'],
- ['graph_u8','GRAPH','wave','Grafik 360° minimal tiap 2 dtk; paling banyak memakai link.']
+ ['control','CONTROL','pause','Tanpa grafik 360°'],
+ ['balanced','BALANCED','activity','Grafik 360° ≥ 4 dtk'],
+ ['graph_u8','GRAPH','wave','Grafik 360° ≥ 2 dtk']
 ];
 $('profilebtn').onclick=()=>{
  if(needLogin())return;
  const box=modal('Profil telemetry','activity'),current=snapshot.config?.profile;
- text(box,'Grafik tetap dipause saat command berlangsung, source invalid, atau jalur Bulk belum siap.').className='hint';
  const list=document.createElement('div');list.className='option-list';box.append(list);
  for(const [value,name,iconName,description] of profileChoices){
   const button=document.createElement('button');button.type='button';button.className=`option${value===current?' on':''}`;
@@ -749,7 +756,7 @@ const preferenceGroups=[
  ['theme','Mode','sun',[['dark','Gelap','moon'],['light','Terang','sun'],['night','Malam','eye']]],
  ['accent','Warna aksen','drop',[['teal','Teal'],['blue','Biru'],['amber','Amber']]],
  ['font','Jenis huruf','type',[['system','Sistem'],['serif','Serif'],['mono','Mono']]],
- ['blank_after_seconds','Layar hitam otomatis · tidak saat alarm error','screenoff',[['0','Mati'],['60','1 mnt'],['300','5 mnt'],['900','15 mnt']]]
+ ['blank_after_seconds','Layar hitam otomatis','screenoff',[['0','Mati'],['60','1 mnt'],['300','5 mnt'],['900','15 mnt']]]
 ];
 // Each choice saves immediately; the server still validates and returns the stored set.
 function preferences(){
@@ -775,7 +782,7 @@ function preferences(){
      const saved=await post('/api/v2/display/preferences',{[key]:key==='blank_after_seconds'?Number(choice):choice});
      snapshot.config={...(snapshot.config||{}),preferences:saved};render(snapshot);
      for(const item of chips.children){const active=item===chip;item.classList.toggle('on',active);item.setAttribute('aria-pressed',String(active));}
-     $('modalmsg').textContent=`${label.split(' · ')[0]}: ${title} tersimpan.`;
+     $('modalmsg').textContent=`${label}: ${title} tersimpan.`;
     }catch(e){if(e.message==='AUTHENTICATION_AND_CSRF_REQUIRED'){authenticated=false;csrf=null;render(snapshot);login();return;}$('modalmsg').textContent=e.message;}
     finally{for(const item of chips.children)item.disabled=false;}
    };
@@ -802,7 +809,7 @@ $('controlbtn').onclick=()=>{if(needLogin())return;const box=modal('Kontrol RDF'
    !caps.reboot?'Reboot lokal memerlukan mode controlled dan approval root (--reboot).':'';
   if(rebootReason){const note=text(host,rebootReason);note.className='hint';}
 };
-function confirmOperation(label,op,extra){const box=modal(label,'warn','bad');text(box,'Aksi ini mengganggu pemrosesan RDF. Bridge tetap hidup kecuali reboot OS. Pastikan kondisi operasi aman sebelum melanjutkan.');cancelAction(box);action(box,'Konfirmasi',()=>command(op,extra),true,'check');}
+function confirmOperation(label,op,extra){const box=modal(label,'warn','bad');text(box,'Pemrosesan RDF akan terhenti.');cancelAction(box);action(box,'Konfirmasi',()=>command(op,extra),true,'check');}
 // The kiosk has no physical keyboard, so frequency entry uses an on-screen keypad. Range and
 // policy checks stay on the Edge; this only builds a well-formed MHz number.
 function frequency(){
@@ -813,8 +820,7 @@ function frequency(){
  const side=document.createElement('div');side.className='freq-side';
  const readout=document.createElement('div');readout.className='freq-readout';readout.setAttribute('role','status');readout.setAttribute('aria-live','polite');
  const number=document.createElement('strong'),unit=document.createElement('span');unit.textContent='MHz';readout.append(number,unit);
- const note=document.createElement('p');note.className='hint';note.textContent='Center dan VFO0 diset sama. File tersimpan belum berarti runtime terverifikasi.';
- side.append(readout,note);
+ side.append(readout);
  const pad=document.createElement('div');pad.className='freq-pad';pad.setAttribute('role','group');pad.setAttribute('aria-label','Keypad frekuensi');
  function refresh(){number.textContent=value||'--';number.classList.toggle('dim',fresh);apply.disabled=!/^\d{1,4}(\.\d{1,6})?$/.test(value)||Number(value)<=0;}
  function press(key){
@@ -842,16 +848,16 @@ function frequency(){
  };
  refresh();pad.querySelector('button')?.focus();
 }
-async function prepareReboot(){const box=modal('Reboot Raspberry','sync','bad');text(box,'Node akan offline. Admin harus unlock; approval root --reboot disimpan satu kali. Konfirmasi akhir tetap diperlukan. Health berhenti selama boot.');cancelAction(box);action(box,'Siapkan reboot',async()=>{const r=await command('system.reboot.prepare');$('modalmsg').textContent='Menunggu challenge...';let op=null;for(let i=0;i<20;i++){await new Promise(r=>setTimeout(r,300));const list=await get('/api/v2/operations/latest');op=list.find(x=>x.id===r.id);if(op&&['FAILED','APPLIED','REJECTED'].includes(op.stage))break;}
+async function prepareReboot(){const box=modal('Reboot Raspberry','sync','bad');text(box,'Node offline selama boot.');cancelAction(box);action(box,'Siapkan reboot',async()=>{const r=await command('system.reboot.prepare');$('modalmsg').textContent='Menunggu challenge...';let op=null;for(let i=0;i<20;i++){await new Promise(r=>setTimeout(r,300));const list=await get('/api/v2/operations/latest');op=list.find(x=>x.id===r.id);if(op&&['FAILED','APPLIED','REJECTED'].includes(op.stage))break;}
  // Challenges are deliberately not returned by public history. A local reboot is
  // issued through authenticated command result access (private endpoint below).
  const result=await post('/api/v2/operation/result',{id:r.id});
  if(result.stage!=='APPLIED'||!result.result?.challenge)throw new Error(result.result?.error||'Challenge belum tersedia');
- const cbox=modal('Konfirmasi reboot OS','warn','bad');text(cbox,'Konfirmasi dalam 30 detik. Reboot mulai setelah hasil dijurnal.');cancelAction(cbox);action(cbox,'REBOOT SEKARANG',()=>command('system.reboot.execute',{prepare_id:r.id,challenge:result.result.challenge}),true,'sync');
+ const cbox=modal('Konfirmasi reboot OS','warn','bad');text(cbox,'Berlaku 30 detik.');cancelAction(cbox);action(cbox,'REBOOT SEKARANG',()=>command('system.reboot.execute',{prepare_id:r.id,challenge:result.result.challenge}),true,'sync');
  },true,'sync');}
 async function prepareShutdown(){
  const box=modal('Shutdown Raspberry','power','bad');
- text(box,'Raspberry akan dimatikan sepenuhnya; akses lokal diperlukan untuk menyalakannya lagi. Fitur memerlukan Admin PIN dan approval root --shutdown yang disimpan satu kali.');
+ text(box,'Pi mati total; nyalakan ulang secara lokal.');
  cancelAction(box);
  action(box,'Siapkan shutdown',async()=>{
   if(readShutdownUncertainty())setShutdownUncertainty(true);
@@ -867,7 +873,7 @@ async function prepareShutdown(){
   try{await checkShutdownHistory(true);}catch{$('modalmsg').textContent='Status shutdown berubah/tidak tersedia; execute tidak dikirim.';return;}
   if(shutdownUncertain&&!confirm('Ada shutdown terdahulu yang belum pasti. Periksa Raspberry lokal dan rekonsiliasi intent hanya bila unit systemd tidak aktif. Lanjutkan?'))return;
   const cbox=modal('Konfirmasi shutdown OS','warn','bad');
-  text(cbox,'Pi akan mati dalam 5 detik setelah jadwal diterima. Tidak ada bukti OS sudah berhenti; nyalakan kembali secara lokal.');
+  text(cbox,'Pi mati 5 detik setelah dijadwalkan.');
   cancelAction(cbox);
   action(cbox,'SHUTDOWN PI SEKARANG',async()=>{
    const executeId=`local-${Date.now()}-${crypto.randomUUID().slice(0,8)}`;
