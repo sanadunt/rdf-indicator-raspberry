@@ -3,7 +3,7 @@ const $=id=>document.getElementById(id);
 function readShutdownUncertainty(){try{return localStorage.getItem('rdf-node-edge-shutdown-uncertain')==='1';}catch{return false;}}
 function setShutdownUncertainty(value){shutdownUncertain=value;try{if(value)localStorage.setItem('rdf-node-edge-shutdown-uncertain','1');else localStorage.removeItem('rdf-node-edge-shutdown-uncertain');}catch{}}
 let snapshot={}, csrf=null, authenticated=false, lastSeq=null, lastProgress=0, lastApi=0, linkData=false, hostPage=false, lastTouch=Date.now(), lastAdminSessionRefresh=0, adminSessionRefreshPending=false, pinKeyHandler=null, modalReturnFocus=null, mqttKeyboardDismiss=null, pollPending=false, pollAgain=false, pollTimer=null, shutdownUncertain=readShutdownUncertainty(), shutdownHistoryChecked=false, shutdownHistoryAt=0, shutdownHistoryRequest=null;
-const good=['UP','CONNECTED','HEALTHY','SYNCED','APPLIED','REPLY'];
+const good=['UP','CONNECTED','HEALTHY','SYNCED','APPLIED','REPLY','PRESENT'];
 const bad=['ERROR','LOST','DEGRADED','FAILED','UNAVAILABLE'];
 const ADMIN_SESSION_REFRESH_MS=20000, ADMIN_SESSION_ACTIVITY_MS=30000, ADMIN_SESSION_CHECK_MS=10000;
 const pppProbeNames={UNKNOWN:'BELUM DICEK',NO_INTERFACE:'TANPA INTERFACE',REPLY:'BALASAN',NO_REPLY:'TANPA BALASAN',ERROR:'ERROR PROBE'};
@@ -47,41 +47,29 @@ function renderTopicList(){
   const group=document.createElement('section');group.className='topic-group';
   const heading=document.createElement('h3');heading.textContent=title;group.append(heading);
   if(outbound){
-   const table=document.createElement('table');table.className='topic-table';
-   const caption=document.createElement('caption');caption.className='sr-only';
+   const caption=document.createElement('p');caption.className='sr-only';
    caption.textContent='Topik keluar dari Raspberry ke Ground. QoS 0 berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker, bukan konfirmasi pemrosesan Ground.';
-   const thead=document.createElement('thead'),header=document.createElement('tr');
-   for(const text of ['Topik','QoS','Payload','Status kirim']){
-    const th=document.createElement('th');th.scope='col';th.textContent=text;header.append(th);
-   }
-   thead.append(header);table.append(caption,thead);
-   const body=document.createElement('tbody');
+   group.append(caption);
    for(const [suffix,quality,description] of topics){
-    const tr=document.createElement('tr'),nameCell=document.createElement('td');
-    const name=document.createElement('code');name.textContent=suffix;nameCell.append(name);
-    const mobileInfo=document.createElement('details');mobileInfo.className='topic-mobile-info';
-    const mobileSummary=document.createElement('summary');mobileSummary.textContent='QoS / payload';
-    mobileSummary.setAttribute('aria-label',`${suffix}: QoS and payload details`);
-    const mobileNote=document.createElement('span');mobileNote.textContent=`${quality} · ${description}`;
-    mobileInfo.append(mobileSummary,mobileNote);nameCell.append(mobileInfo);
-    const qos=document.createElement('td');qos.textContent=quality;
-    const payload=document.createElement('td'),detail=document.createElement('details');
-    const summary=document.createElement('summary');summary.textContent='Lihat';
-    const note=document.createElement('span');note.textContent=description;
-    detail.append(summary,note);payload.append(detail);
-    const delivery=document.createElement('td');delivery.className='delivery-cell';
-    const result=document.createElement('div');result.className='delivery-result';
+    const item=document.createElement('details'),summary=document.createElement('summary');
+    const nameBlock=document.createElement('span');nameBlock.className='topic-name';
+    const name=document.createElement('code');name.textContent=suffix;
+    const qos=document.createElement('span');qos.textContent=quality;nameBlock.append(name,qos);
+    const delivery=document.createElement('span');delivery.className='delivery-cell';
+    const result=document.createElement('span');result.className='delivery-result';
     const dot=document.createElement('span');dot.className='delivery-dot';dot.setAttribute('aria-hidden','true');
     const label=document.createElement('strong'),info=document.createElement('small');
     result.append(dot,label,info);delivery.append(result);
-    tr.append(nameCell,qos,payload,delivery);body.append(tr);
+    summary.append(nameBlock,delivery);
+    const note=document.createElement('p');note.textContent=description;
+    item.append(summary,note);group.append(item);
     topicStatusCells.set(suffix,{cell:delivery,label,info});
    }
-   table.append(body);group.append(table);
   }else{
    for(const [suffix,quality,description] of topics){
     const detail=document.createElement('details');const summary=document.createElement('summary');
-    const name=document.createElement('span');name.textContent=suffix;
+    const name=document.createElement('span');name.className='topic-name';
+    const code=document.createElement('code');code.textContent=suffix;name.append(code);
     const qos=document.createElement('span');qos.className='topic-qos';qos.textContent=quality;
     summary.append(name,qos);const note=document.createElement('p');note.textContent=description;
     detail.append(summary,note);group.append(detail);
@@ -112,12 +100,39 @@ function setTopicDelivery(entry,status){
 function updateTopicStatuses(statuses){
  for(const [suffix,entry] of topicStatusCells)setTopicDelivery(entry,statuses?.[suffix]);
 }
+function mqttPairState(l){
+ const states=[l.mqtt_control?.state||'DISABLED',l.mqtt_bulk?.state||'DISABLED'];
+ return states.includes('ERROR')?'ERROR':states.every(value=>value==='CONNECTED')?'CONNECTED':states.every(value=>value==='DISABLED')?'':'CONNECTING';
+}
+const SVG_NS='http://www.w3.org/2000/svg';
+let needleTurn=null;
+function buildDial(){
+ const ticks=$('dialticks');if(!ticks)return;
+ for(let deg=0;deg<360;deg+=10){
+  const major=deg%30===0,theta=deg*Math.PI/180,inner=major?55:59,line=document.createElementNS(SVG_NS,'line');
+  line.setAttribute('x1',(inner*Math.sin(theta)).toFixed(2));line.setAttribute('y1',(-inner*Math.cos(theta)).toFixed(2));
+  line.setAttribute('x2',(64*Math.sin(theta)).toFixed(2));line.setAttribute('y2',(-64*Math.cos(theta)).toFixed(2));
+  line.setAttribute('class',major?'dial-tick major':'dial-tick');ticks.append(line);
+ }
+}
+// Only a gate-valid relative DoA moves the needle. Raw/UNVERIFIED angles use a different
+// convention and stay numeric-only so the dial never implies a verified bearing.
+function updateDial(angle,unverified){
+ const dial=$('dial');if(!dial)return;
+ const valid=typeof angle==='number'&&Number.isFinite(angle);
+ dial.dataset.state=valid?'valid':unverified?'unverified':'none';
+ $('dialnote').textContent=valid?'':unverified?'UNVERIFIED':'TANPA DATA';
+ if(!valid){dial.setAttribute('aria-label',unverified?'Dial arah relatif: sudut belum terverifikasi, jarum disembunyikan':'Dial arah relatif: belum ada pengukuran valid');return;}
+ const target=((angle%360)+360)%360;
+ needleTurn=needleTurn===null?target:needleTurn+((target-needleTurn)%360+540)%360-180;
+ $('needle').style.setProperty('--a',`${needleTurn.toFixed(2)}deg`);
+ dial.setAttribute('aria-label',`Dial arah relatif ${fmt(target)} derajat, 0 di atas searah jarum jam`);
+}
+buildDial();
 function renderData(s){
  const l=s.link||{};
  const control=l.mqtt_control||{},bulk=l.mqtt_bulk||{};
- const states=[control.state||'DISABLED',bulk.state||'DISABLED'];
- const state=states.includes('ERROR')?'ERROR':states.every(value=>value==='CONNECTED')?'CONNECTED':states.every(value=>value==='DISABLED')?'':'CONNECTING';
- label('mqttclients',`${control.state||'DISABLED'} / ${bulk.state||'DISABLED'}`,state);
+ label('mqttclients',`${control.state||'DISABLED'} / ${bulk.state||'DISABLED'}`,mqttPairState(l));
  if($('mqttsettings'))$('mqttsettings').textContent=authenticated?'Atur':'Login';
  const node=s.node_id||'--',prefix=`${s.mode==='DEMO'?'sdr/demo/v2':'sdr/v2'}/${node}/`;
  if(prefix!==renderedTopicPrefix){renderedTopicPrefix=prefix;$('topicprefix').textContent=prefix;renderTopicList();}
@@ -132,11 +147,12 @@ function render(s){
  label('run',names[p.observed]||'MENUNGGU',p.observed==='RUNNING'?'HEALTHY':p.observed);
  label('ppp',l.ppp||'--',l.ppp);label('mqtt',l.mqtt_control?.state||'DISABLED',l.mqtt_control?.state);
  $('angle-label').textContent=showDiagnostic?'DOA RAW / UNVERIFIED':'ARAH RELATIF';
- $('angle').textContent=showDiagnostic?`${fmt(diag.raw_doa_deg)}\u00b0`:d.valid?`${fmt(d.relative_doa_deg)}\u00b0`:'--';
+ $('angle').textContent=showDiagnostic?fmt(diag.raw_doa_deg):d.valid?fmt(d.relative_doa_deg):'--';
+ updateDial(d.valid?d.relative_doa_deg:null,showDiagnostic);
  $('angle').className=showDiagnostic?'warn':d.valid?'good':'neutral';
  $('age').textContent=showDiagnostic?`doa.xml / umur ${age(diag.source_age_ms)}`:d.valid?`Umur ${age(d.source_age_ms)}`:`${d.state||'MENUNGGU'} / ${age(d.source_age_ms)}`;
  $('frequency-label').textContent=showDiagnostic?'FREKUENSI XML':'FREKUENSI VFO';
- $('freq').textContent=showDiagnostic?`${fmt(diag.frequency_mhz,3)} MHz`:d.frequency_hz?`${fmt(d.frequency_hz/1e6,3)} MHz`:'-- MHz';
+ $('freq').textContent=showDiagnostic?fmt(diag.frequency_mhz,3):d.frequency_hz?fmt(d.frequency_hz/1e6,3):'--';
  $('quality').textContent=showDiagnostic?`Gate: ${diagnosticReason}`:`PAPR ${fmt(d.confidence_native_db,2)} dB / P ${fmt(d.power_native_db)} dB`;
  label('daq',q.state==='HEALTHY'?'SINKRON':q.state||'UNKNOWN',q.state);
  label('sync',c.sdr_revision==null?'--':`r${c.sdr_revision}`,'');
@@ -144,13 +160,14 @@ function render(s){
  const alerts=s.active_alerts||[];const a=alerts.find(x=>x.severity==='error')||alerts[0];
  $('alert').textContent=a?a.text:'Status lokal normal';$('alertbox').className=`alert ${a?(a.severity==='error'?'bad':'warn'):'good'}`;
  $('alerticon').textContent=a?'!':'\u2713';$('temp').textContent=`${fmt(h.temperature_c)}\u00b0C`;
- if(!linkData){rows('linkrows',[["T900 USB",l.usb],["PPP / interface",`${l.ppp||'--'} / ${l.interface||'--'}`],[`Ping ${l.ppp_peer||'peer'}`,pppProbeNames[l.ppp_probe]||'BELUM DICEK',l.ppp_probe],["MQTT CTRL / BULK",`${l.mqtt_control?.state||'--'} / ${l.mqtt_bulk?.state||'--'}`],["TX / RX (PPP/IP)",`${fmt(l.tx_kbit_s,2)} / ${fmt(l.rx_kbit_s,2)} kbit/s`]]);}
+ if(!linkData){rows('linkrows',[["T900 USB",l.usb,l.usb],["PPP / interface",`${l.ppp||'--'} / ${l.interface||'--'}`,l.ppp],[`Ping ${l.ppp_peer||'peer'}`,pppProbeNames[l.ppp_probe]||'BELUM DICEK',l.ppp_probe],["MQTT CTRL / BULK",`${l.mqtt_control?.state||'--'} / ${l.mqtt_bulk?.state||'--'}`,mqttPairState(l)],["TX / RX (PPP/IP)",`${fmt(l.tx_kbit_s,2)} / ${fmt(l.rx_kbit_s,2)} kbit/s`]]);}
  else rows('linkrows',[["Profil diminta",l.profile],["Grafik pause",l.bulk_pause||'STREAMING'],["Queue CTRL / BULK",`${l.mqtt_control?.depth||0} / ${l.mqtt_bulk?.depth||0}`],["Parse / angular drop",`${d.parse_errors||0} / ${l.angular_aborted||0}`]]);
- const syn=q.sync||{};
- if(!hostPage) rows('sysrows',[["Engine / desired",`${p.observed||'--'} / ${p.desired||'BELUM DIAMBIL'}`],["Frame / Delay / IQ",`${syn.frame??'?'} / ${syn.sample_delay??'?'} / ${syn.iq??'?'}`],["Frame / progress",`${q.frame_index??'--'} / ${q.frame_progressing?'MAJU':'BELUM'}`],["Drop total / delta",`${q.dropped_frames??'--'} / ${q.drop_delta??'--'}`],["DAQ umur / USB SDR",`${age(q.source_age_ms)} / ${h.usb_count??'--'} terdeteksi`]]);
+ const syn=q.sync||{},syncFlags=[syn.frame,syn.sample_delay,syn.iq];
+ const syncCode=syncFlags.every(flag=>flag===true)?'SYNCED':syncFlags.includes(false)?'DEGRADED':'UNKNOWN';
+ if(!hostPage) rows('sysrows',[["Engine / desired",`${p.observed||'--'} / ${p.desired||'BELUM DIAMBIL'}`,p.observed==='RUNNING'?'HEALTHY':p.observed],["Frame / Delay / IQ",`${syn.frame??'?'} / ${syn.sample_delay??'?'} / ${syn.iq??'?'}`,syncCode],["Frame / progress",`${q.frame_index??'--'} / ${q.frame_progressing?'MAJU':'BELUM'}`,q.frame_progressing?'HEALTHY':'UNKNOWN'],["Drop total / delta",`${q.dropped_frames??'--'} / ${q.drop_delta??'--'}`],["DAQ umur / USB SDR",`${age(q.source_age_ms)} / ${h.usb_count??'--'} terdeteksi`]]);
  else rows('sysrows',[["CPU / RAM",`${fmt(h.cpu_percent)}% / ${fmt(h.memory_percent)}%`],["Suhu / disk kosong",`${fmt(h.temperature_c)} C / ${fmt(h.disk_free_percent)}%`],["Throttle / under-voltage",`${h.throttled??'unknown'} / ${h.undervoltage??'unknown'}`],["Uptime",h.uptime_s==null?'--':`${Math.floor(h.uptime_s/60)} menit`],["Jam sistem",h.clock_state,h.clock_state]]);
  rows('configrows',[["Node / profil",`${s.node_id||'--'} / ${c.profile||'--'}`],["Source / MQTT",`${c.source_configured?'OK':'SETUP'} / ${c.mqtt_configured?'CONFIGURED':'OFF'}`],["RF revision / proof",`${c.sdr_revision??'--'} / ${c.proof||'--'}`],["Akses / helper",`${authenticated?'ADMIN':'READ ONLY'} / ${s.capabilities?.helper_available?'SIAP':'OFF'}`]]);
- $('admin').textContent=authenticated?'Logout':'Login';
+ $('admin').textContent=authenticated?'Logout':'Login';$('adminchip').hidden=!authenticated;
  $('configreason').textContent='Kontrol lokal memerlukan approval root satu kali; aksi tetap meminta PIN Admin dan konfirmasi layar.';
  const prefs={theme:'dark',accent:'teal',font:'system',...(c.preferences||{})};
  document.body.classList.toggle('light',prefs.theme==='light');
@@ -232,8 +249,16 @@ async function keepAdminSessionAlive(){
 setInterval(keepAdminSessionAlive,ADMIN_SESSION_CHECK_MS);
 setInterval(()=>{const stale=Date.now()-lastProgress>5000;$('stale').hidden=!stale;if(stale)$('stalereason').textContent=Date.now()-lastApi>5000?'API lokal tidak merespons.':'API hidup, snapshot tidak bergerak.';const sec=snapshot.config?.preferences?.blank_after_seconds||0;if(sec>0&&Date.now()-lastTouch>sec*1000&&!snapshot.active_alerts?.some(x=>x.severity==='error'))$('blank').hidden=false;},250);
 for(const button of document.querySelectorAll('nav button'))button.addEventListener('click',()=>{for(const e of document.querySelectorAll('.page'))e.classList.toggle('active',e.id===button.dataset.tab);for(const e of document.querySelectorAll('nav button')){const active=e===button;e.classList.toggle('selected',active);if(active)e.setAttribute('aria-current','page');else e.removeAttribute('aria-current');}});
- $('linkpage').onclick=()=>{linkData=!linkData;$('linkpage').textContent=linkData?'Koneksi \u203a':'Rincian \u203a';render(snapshot);};
-$('syspage').onclick=()=>{hostPage=!hostPage;$('syspage').textContent=hostPage?'DAQ \u203a':'Host \u203a';$('systitle').textContent=hostPage?'RASPBERRY / HOST':'RDF / DAQ';render(snapshot);};
+function segmented(id,onChange){
+ const host=$(id);
+ host.addEventListener('click',event=>{
+  const button=event.target.closest('button[data-view]');if(!button||button.classList.contains('on'))return;
+  for(const item of host.querySelectorAll('button[data-view]')){const on=item===button;item.classList.toggle('on',on);item.setAttribute('aria-pressed',String(on));}
+  onChange(button.dataset.view==='1');
+ });
+}
+segmented('linkpage',value=>{linkData=value;render(snapshot);});
+segmented('syspage',value=>{hostPage=value;$('systitle').textContent=hostPage?'RASPBERRY / HOST':'RDF / DAQ';render(snapshot);});
 function modal(title){if(mqttKeyboardDismiss){mqttKeyboardDismiss(false);mqttKeyboardDismiss=null;}const dialog=$('modal').querySelector('.dialog');dialog.querySelector('.dialoghead').append($('closemodal'));dialog.classList.remove('keyboard-open');$('modalbody').classList.remove('keyboard-open');modalReturnFocus=document.activeElement;pinKeyHandler=null;$('modaltitle').textContent=title;$('modalbody').replaceChildren();$('modalmsg').textContent='';$('modal').hidden=false;return $('modalbody');}
 function dismissModal(){if(mqttKeyboardDismiss)mqttKeyboardDismiss(false);$('modal').hidden=true;pinKeyHandler=null;const target=modalReturnFocus;modalReturnFocus=null;if(target&&typeof target.focus==='function')target.focus();}
 $('closemodal').onclick=dismissModal;

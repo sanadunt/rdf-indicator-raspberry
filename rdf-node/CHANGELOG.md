@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Refresh the 480x320 Edge panel for small touchscreens. Utama gets a relative-DoA dial (0 at the
+  top, clockwise, matching the Ground plot) that moves only for gate-valid detections; raw or
+  UNVERIFIED angles stay numeric with the needle hidden. Status values gain colour dots, Link and
+  Sistem use segmented view toggles, the Data topic table becomes a tappable 11-12 px list instead
+  of 9 px columns, the nav uses SVG icons, and the Config hint no longer hides behind the nav.
+  Hover styles apply only on hover-capable pointers so taps do not leave sticky highlights.
+
 - Remove remote grants and per-action root approvals from supported Ground writes. Ground retains
   command validation, journal, fixed-target checks, and UI confirmations; Edge does not authenticate
   MQTT publisher identity, so broker credentials and command-topic ACLs remain the trust boundary.
