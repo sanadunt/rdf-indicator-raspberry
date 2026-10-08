@@ -321,7 +321,25 @@ class HelperTests(unittest.TestCase):
     def test_lifecycle_disabled(self):
         with self.assertRaises(ValueError):self.ctrl.dispatch({'op':'processing.set','desired':'STOPPED','origin':'local-admin'},os.getuid())
     def test_reboot_disabled(self):
-        with self.assertRaises(ValueError):self.ctrl.dispatch({'op':'system.reboot.prepare','id':'x','origin':'local-admin'},os.getuid())
+        with self.assertRaisesRegex(ValueError,'REBOOT_DISABLED'):
+            self.ctrl.dispatch({'op':'system.reboot.prepare','id':'x','origin':'local-admin'},os.getuid())
+    def test_local_reboot_still_requires_maintenance(self):
+        self.p['allow_reboot']=True
+        with mock.patch.object(self.ctrl,'maintenance',return_value=False):
+            with self.assertRaisesRegex(ValueError,'MAINTENANCE_REQUIRED'):
+                self.ctrl.dispatch({'op':'system.reboot.prepare','id':'x','origin':'local-admin'},os.getuid())
+    def test_ground_reboot_needs_no_root_grants_or_lease(self):
+        with mock.patch.object(self.ctrl,'_run') as run:
+            prepared=self.ctrl.dispatch({'op':'system.reboot.prepare','id':'remote-reboot','origin':'ground-controller'},os.getuid())
+            result=self.ctrl.dispatch({'op':'system.reboot.execute','id':'remote-reboot','challenge':prepared['challenge'],'origin':'ground-controller'},os.getuid())
+        self.assertEqual((result['scheduled'],result['action']),(True,'reboot'))
+        run.assert_called_once()
+    def test_ground_shutdown_needs_no_root_grants_or_lease(self):
+        with mock.patch.object(self.ctrl,'_run') as run:
+            prepared=self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'remote-shutdown','origin':'ground-controller'},os.getuid())
+            result=self.ctrl.dispatch({'op':'system.shutdown.execute','id':'remote-shutdown','challenge':prepared['challenge'],'origin':'ground-controller'},os.getuid())
+        self.assertEqual((result['scheduled'],result['action']),(True,'shutdown'))
+        run.assert_called_once()
     def test_shutdown_disabled(self):
         with self.assertRaisesRegex(ValueError,'SHUTDOWN_DISABLED'):
             self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'x','origin':'local-admin'},os.getuid())
@@ -329,24 +347,51 @@ class HelperTests(unittest.TestCase):
         self.p['allow_shutdown']=True
         with self.assertRaisesRegex(ValueError,'MAINTENANCE_REQUIRED'):
             self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'x','origin':'local-admin'},os.getuid())
-
-    def test_remote_lifecycle_requires_root_policy_not_lease(self):
-        self.p.update(allow_remote_control=True,allow_lifecycle=True,lifecycle_audited=True)
-        request={'op':'processing.set','desired':'STOPPED','origin':'ground-controller'}
-        with mock.patch.object(self.ctrl,'maintenance',return_value=False) as maintenance, \
-                mock.patch.object(self.ctrl,'_run') as run:
-            result=self.ctrl.dispatch(request,os.getuid())
-        self.assertEqual(result['requested'],'STOPPED')
-        maintenance.assert_not_called()
-        run.assert_called_once_with(['/usr/bin/systemctl','--no-block','stop','test-sdr.service'])
-
+    def test_ground_config_patch_uses_fixed_target_without_root_permission(self):
+        import hashlib
+        path=self.path/'settings.json';raw=compact(settings());path.write_bytes(raw)
+        self.p.update(settings_path=str(path),single_writer_confirmed=True,allow_config=False)
+        request={'op':'config.patch','origin':'ground-controller','changes':{'gain_db':20.7},
+                 'expected_digest':hashlib.sha256(raw).hexdigest()}
+        result=self.ctrl.dispatch(request,os.getuid())
+        self.assertTrue(result['persisted'])
+        self.assertEqual(json.loads(path.read_bytes())['uniform_gain'],20.7)
+    def test_local_config_patch_still_needs_root_permission(self):
+        import hashlib
+        path=self.path/'settings.json';raw=compact(settings());path.write_bytes(raw)
+        self.p.update(settings_path=str(path),single_writer_confirmed=True,allow_config=False)
+        request={'op':'config.patch','origin':'local-admin','changes':{'gain_db':20.7},
+                 'expected_digest':hashlib.sha256(raw).hexdigest()}
+        with self.assertRaisesRegex(ValueError,'CONFIG_ADAPTER_NOT_APPROVED'):
+            self.ctrl.dispatch(request,os.getuid())
     def test_local_lifecycle_still_requires_maintenance_when_remote_enabled(self):
         self.p.update(allow_remote_control=True,allow_lifecycle=True,lifecycle_audited=True)
         request={'op':'processing.set','desired':'STOPPED','origin':'local-admin'}
         with mock.patch.object(self.ctrl,'maintenance',return_value=False):
             with self.assertRaisesRegex(ValueError,'MAINTENANCE_REQUIRED'):
                 self.ctrl.dispatch(request,os.getuid())
-
+    def test_ground_lifecycle_uses_audited_fixed_target_without_root_permission(self):
+        self.p.update(allow_remote_control=False,allow_lifecycle=False,lifecycle_audited=True)
+        request={'op':'processing.set','desired':'STOPPED','origin':'ground-controller'}
+        with mock.patch.object(self.ctrl,'maintenance',return_value=False) as maintenance, \
+                mock.patch.object(self.ctrl,'_run') as run:
+            result=self.ctrl.dispatch(request,os.getuid())
+        self.assertEqual(json.loads((self.ctrl.state/'intent.json').read_bytes())['origin'],'ground-controller')
+        self.assertEqual(result['requested'],'STOPPED')
+        maintenance.assert_not_called()
+        run.assert_called_once_with(['/usr/bin/systemctl','--no-block','stop','test-sdr.service'])
+    def test_ground_lifecycle_intent_recovers_without_local_approval(self):
+        self.p.update(allow_lifecycle=False,lifecycle_audited=True)
+        (self.ctrl.state/'intent.json').write_bytes(compact({'desired':'STOPPED','origin':'ground-controller'}))
+        with mock.patch.object(self.ctrl,'_run') as run:
+            self.ctrl.reconcile_intent()
+        run.assert_called_once_with(['/usr/bin/systemctl','--no-block','stop','test-sdr.service'])
+    def test_local_lifecycle_intent_stays_gated_without_local_approval(self):
+        self.p.update(allow_lifecycle=False,lifecycle_audited=True)
+        (self.ctrl.state/'intent.json').write_bytes(compact({'desired':'STOPPED','origin':'local-admin'}))
+        with mock.patch.object(self.ctrl,'_run') as run:
+            self.ctrl.reconcile_intent()
+        run.assert_not_called()
     def test_ppp_restart_rejects_invalid_rpc_shape(self):
         self.p.update(allow_ppp_restart=True,allow_remote_control=True)
         requests=([],{'op':'wrong','origin':'ground-controller'},{'op':'ppp.restart'},
@@ -358,9 +403,7 @@ class HelperTests(unittest.TestCase):
                     self.ctrl.dispatch(request,os.getuid())
         status.assert_not_called()
         restart.assert_not_called()
-
     def test_ppp_restart_requires_active_idle_unit(self):
-        self.p.update(allow_ppp_restart=True,allow_remote_control=True)
         request={'op':'ppp.restart','origin':'ground-controller'}
         for result,error in (
                 (mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=not-found','ActiveState=inactive','Job=0'))),
@@ -377,20 +420,20 @@ class HelperTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,error):
                     self.ctrl.dispatch(request,os.getuid())
             restart.assert_not_called()
-
-    def test_ppp_restart_separates_local_lease_from_remote_approval(self):
-        self.p.update(allow_ppp_restart=True,allow_remote_control=False)
-        remote={'op':'ppp.restart','origin':'ground-controller'}
-        with mock.patch('rdf_node.helper.subprocess.run') as show, \
+    def test_ground_ppp_restart_needs_no_root_permission_but_checks_unit(self):
+        request={'op':'ppp.restart','origin':'ground-controller'}
+        status=mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=0')))
+        with mock.patch('rdf_node.helper.subprocess.run',return_value=status) as show, \
                 mock.patch.object(self.ctrl,'_run') as restart:
-            with self.assertRaisesRegex(ValueError,'REMOTE_CONTROL_NOT_APPROVED'):
-                self.ctrl.dispatch(remote,os.getuid())
-            with mock.patch.object(self.ctrl,'maintenance',return_value=False):
-                with self.assertRaisesRegex(ValueError,'MAINTENANCE_REQUIRED'):
-                    self.ctrl.dispatch({'op':'ppp.restart','origin':'local-admin'},os.getuid())
-            show.assert_not_called()
-            restart.assert_not_called()
-
+            result=self.ctrl.dispatch(request,os.getuid())
+        self.assertEqual(result,{'requested':True,'service':'t900-ppp.service'})
+        show.assert_called_once()
+        restart.assert_called_once_with(['/usr/bin/systemctl','--no-block','restart','t900-ppp.service'])
+    def test_local_ppp_restart_still_needs_approval_and_lease(self):
+        self.p['allow_ppp_restart']=True
+        with mock.patch.object(self.ctrl,'maintenance',return_value=False):
+            with self.assertRaisesRegex(ValueError,'MAINTENANCE_REQUIRED'):
+                self.ctrl.dispatch({'op':'ppp.restart','origin':'local-admin'},os.getuid())
     def test_ppp_restart_action_failure_is_outcome_unknown(self):
         self.p.update(allow_ppp_restart=True,allow_remote_control=True)
         request={'op':'ppp.restart','origin':'ground-controller'}
@@ -606,15 +649,14 @@ class HelperTests(unittest.TestCase):
                 self.ctrl.dispatch({'op':'system.shutdown.execute','id':'shutdown','challenge':prepared['challenge'],'origin':'local-admin'},os.getuid())
 
 class ControlApprovalTests(unittest.TestCase):
-    def test_remote_grant_and_revoke_survive_policy_reload(self):
+    def test_root_approvals_only_configure_local_operation_gates(self):
         from types import SimpleNamespace
         from rdf_node import cli
 
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);config=root/'config.yaml';policy_path=root/'helper.yaml'
-            cfg=load_config();cfg['runtime_mode']='controlled';cfg['control']['reboot_enabled']=True
-            config.write_text(cli.yaml.safe_dump(cfg,sort_keys=False))
-            policy_path.write_text(cli.yaml.safe_dump({'allow_reboot':True},sort_keys=False))
+            config.write_text(cli.yaml.safe_dump(load_config(),sort_keys=False))
+            policy_path.write_text(cli.yaml.safe_dump({'allow_remote_control':False},sort_keys=False))
             real_path=Path
 
             def mapped_path(value):
@@ -622,30 +664,32 @@ class ControlApprovalTests(unittest.TestCase):
                 return real_path(value)
 
             args=SimpleNamespace(action='approve',config=str(config),settings=False,lifecycle=False,
-                                 reboot=False,shutdown=False,remote=True,ppp_restart=False)
+                                 reboot=True,shutdown=True,ppp_restart=False)
             with mock.patch.object(cli,'require_root'),mock.patch.object(cli,'chown_config'), \
                     mock.patch.object(cli,'Path',side_effect=mapped_path), \
-                    mock.patch.object(cli.subprocess,'run'),mock.patch('builtins.input',return_value='APPROVE'):
+                    mock.patch.object(cli.subprocess,'run'), \
+                    mock.patch('builtins.input',side_effect=('APPROVE','REBOOT','SHUTDOWN')):
                 cli.controls(args)
 
             saved=cli.yaml.safe_load(policy_path.read_text())
-            runtime=Controller({**DEFAULT_POLICY,**saved,'state_dir':str(root/'helper-state'),'allowed_user':None})
-            self.assertTrue(runtime.state_info().get('allow_remote_control'))
-            self.assertTrue(load_config(config)['control']['remote_commands_enabled'])
+            approved=load_config(config)
             self.assertTrue(saved['allow_reboot'])
+            self.assertTrue(saved['allow_shutdown'])
+            self.assertFalse(saved['allow_remote_control'])
+            self.assertTrue(approved['control']['reboot_enabled'])
+            self.assertTrue(approved['control']['shutdown_enabled'])
+            self.assertFalse(approved['control']['remote_commands_enabled'])
+    def test_remote_grant_removed_but_local_reboot_approval_remains(self):
+        import sys
+        from rdf_node import cli
 
-            args.remote=False
-            with mock.patch.object(cli,'require_root'),mock.patch.object(cli,'chown_config'), \
-                    mock.patch.object(cli,'Path',side_effect=mapped_path), \
-                    mock.patch.object(cli.subprocess,'run'),mock.patch('builtins.input',return_value='APPROVE'):
-                cli.controls(args)
-
-            saved=cli.yaml.safe_load(policy_path.read_text())
-            runtime=Controller({**DEFAULT_POLICY,**saved,'state_dir':str(root/'helper-state'),'allowed_user':None})
-            self.assertFalse(runtime.state_info().get('allow_remote_control'))
-            self.assertFalse(load_config(config)['control']['remote_commands_enabled'])
-            self.assertTrue(saved['allow_reboot'])
-            self.assertTrue(load_config(config)['control']['reboot_enabled'])
+        with mock.patch.object(sys,'argv',['rdf-node','controls','approve','--remote']):
+            with self.assertRaises(SystemExit):
+                cli.main()
+        with mock.patch.object(cli,'controls') as parsed, \
+                mock.patch.object(sys,'argv',['rdf-node','controls','approve','--reboot']):
+            cli.main()
+        self.assertTrue(parsed.call_args.args[0].reboot)
 
     def test_ppp_restart_requires_root_unit_approval(self):
         import sys
@@ -663,12 +707,12 @@ class ControlApprovalTests(unittest.TestCase):
 
             with mock.patch.object(cli,'controls') as parsed, \
                     mock.patch.object(sys,'argv',['rdf-node','controls','approve','--config',str(config),
-                                                  '--remote','--ppp-restart']):
+                                                  '--ppp-restart']):
                 cli.main()
             self.assertTrue(parsed.call_args.args[0].ppp_restart)
 
             args=SimpleNamespace(action='approve',config=str(config),settings=False,lifecycle=False,
-                                 reboot=False,shutdown=False,remote=True,ppp_restart=True)
+                                 reboot=False,shutdown=False,ppp_restart=True)
             status=mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=0')))
             with mock.patch.object(cli,'require_root'),mock.patch.object(cli,'chown_config'), \
                     mock.patch.object(cli,'Path',side_effect=mapped_path), \
@@ -679,7 +723,7 @@ class ControlApprovalTests(unittest.TestCase):
             saved=cli.yaml.safe_load(policy_path.read_text())
             approved=load_config(config)
             self.assertTrue(saved['allow_ppp_restart'])
-            self.assertTrue(saved['allow_remote_control'])
+            self.assertFalse(saved['allow_remote_control'])
             self.assertTrue(approved['control']['ppp_restart_enabled'])
             self.assertEqual(systemctl.call_args_list[0].args[0],
                              ['/usr/bin/systemctl','show','--no-pager',

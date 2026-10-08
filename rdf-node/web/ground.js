@@ -8,7 +8,44 @@ function readShutdownUncertainty(){try{return localStorage.getItem('rdf-node-gro
 shutdownUncertain=readShutdownUncertainty();
 function setShutdownUncertainty(value){shutdownUncertain=value;try{if(value)localStorage.setItem('rdf-node-ground-shutdown-uncertain','1');else localStorage.removeItem('rdf-node-ground-shutdown-uncertain');}catch{}}
 function rememberShutdownState(op){if(op?.op==='system.shutdown.execute'&&!shutdownFailureStages.has(op.stage))setShutdownUncertainty(true);}
-function updateShutdownButton(){$('shutdown').disabled=shutdownPending||!apiSnapshotAvailable||!shutdownHistoryChecked||!(snapshot.capabilities?.shutdown&&snapshot.capabilities?.remote_commands);}
+const mutationAvailability=document.createElement('p');
+mutationAvailability.id='ground-mutation-availability';
+mutationAvailability.setAttribute('role','status');
+mutationAvailability.setAttribute('aria-live','polite');
+document.querySelector('.actions').insertAdjacentElement('afterend',mutationAvailability);
+function mutationBlockReason(capability){
+ if(!csrf)return 'Login Ground diperlukan untuk mengirim perintah.';
+ if(!apiSnapshotAvailable)return 'Snapshot Ground belum tersedia; perintah tidak dikirim.';
+ if(snapshot.capabilities?.remote_commands!==true)return 'Jalur perintah Ground tidak tersedia pada mode ini.';
+ if(snapshot.health_fresh!==true)return 'Perintah memerlukan health node yang fresh.';
+ if(snapshot.link?.mqtt_control?.ready!==true)return 'MQTT Control belum tersambung.';
+ if(!Number.isSafeInteger(snapshot.config?.sdr_revision))return 'Revision config node belum tersedia.';
+ if(snapshot.capabilities?.[capability]!==true)return capability==='remote_reboot'||capability==='remote_shutdown'?'Helper Edge belum tersedia untuk aksi host.':'Target lifecycle SDR belum disiapkan atau diaudit di Edge.';
+ return '';
+}
+function updateActionButtons(){
+ const controls=[['start','remote_processing'],['stop','remote_processing'],['restart','remote_restart'],['reboot','remote_reboot']];
+ const reasons=new Set();
+ for(const [id,capability] of controls){
+  const button=$(id),reason=mutationBlockReason(capability);
+  button.disabled=!!reason;
+  button.title=reason;
+  button.setAttribute('aria-describedby',mutationAvailability.id);
+  if(reason)reasons.add(reason);
+ }
+ const shutdownReason=mutationBlockReason('remote_shutdown');
+ if(shutdownPending)reasons.add('Perintah shutdown masih berjalan atau hasilnya belum pasti.');
+ else if(shutdownReason)reasons.add(shutdownReason);
+ else if(!shutdownHistoryChecked)reasons.add('Memeriksa riwayat shutdown sebelum mengaktifkan tombol.');
+ mutationAvailability.textContent=reasons.size?[...reasons].join(' '):'Aksi lifecycle/host di atas siap. Edge tidak mengautentikasi publisher MQTT; batasi ACL broker.';
+}
+function updateShutdownButton(){
+ const reason=mutationBlockReason('remote_shutdown');
+ $('shutdown').disabled=shutdownPending||!shutdownHistoryChecked||!!reason;
+ $('shutdown').title=shutdownPending?'Perintah shutdown masih berjalan.':reason||(!shutdownHistoryChecked?'Memeriksa riwayat shutdown.':'');
+ $('shutdown').setAttribute('aria-describedby',mutationAvailability.id);
+ updateActionButtons();
+}
 const pppUnresolvedStages=new Set(['SUBMITTING','REQUESTED','ACCEPTED','APPLYING','PPP_RESTART_REQUESTED','OUTCOME_UNKNOWN']);
 const pppIdPattern=/^[A-Za-z0-9._:-]{1,96}$/;
 function readPppRecords(){
@@ -108,14 +145,14 @@ function pppReadiness(){
   return Number.isSafeInteger(healthMs)&&healthMs>required;
  });
  const serverFreshAfter=!pppServerGate.required||(Number.isSafeInteger(healthMs)&&healthMs>pppServerGate.freshAfter);
- const authorized=snapshot.capabilities?.remote_commands===true&&snapshot.capabilities?.ppp_restart===true;
+ const authorized=snapshot.capabilities?.remote_commands===true&&snapshot.capabilities?.remote_ppp_restart===true;
  const fresh=snapshot.health_fresh===true&&snapshot.link?.mqtt_control?.ready===true;
  const ready=!!csrf&&apiSnapshotAvailable&&pppHistoryAvailable&&authorized&&fresh&&freshAfter&&serverFreshAfter;
  let reason='Restart siap. Tindakan baru setelah hasil lama belum pasti memerlukan konfirmasi tambahan.';
  if(!csrf)reason='Login Ground diperlukan untuk meminta restart.';
  else if(!apiSnapshotAvailable)reason='Snapshot Ground tidak tersedia; request tidak dikirim.';
  else if(!pppHistoryAvailable)reason='Riwayat operasi Ground belum dapat diperiksa; request tidak dikirim.';
- else if(!authorized)reason='Izin remote control dan PPP restart belum aktif di node.';
+ else if(!authorized)reason='Remote PPP tidak tersedia karena helper node belum aktif.';
  else if(!fresh)reason='Restart perlu health fresh dan MQTT Control tersambung.';
  else if(unresolved.length&&!freshAfter)reason='Hasil PPP sebelumnya belum terkonfirmasi. Tunggu health node yang lebih baru sebelum konfirmasi tambahan.';
  else if(pppServerGate.required&&!serverFreshAfter)reason='Ground meminta health fresh yang lebih baru sebelum konfirmasi tambahan.';
@@ -261,7 +298,7 @@ function updateSettingsButton(){
  const button=$('settings-apply');
  if(!button)return;
  const ready=!!csrf&&apiSnapshotAvailable&&settingsAwaitingRevision===null&&snapshot.capabilities?.remote_commands===true&&
-  snapshot.capabilities?.config_patch===true&&snapshot.health_fresh===true&&
+  snapshot.capabilities?.remote_config_patch===true&&snapshot.health_fresh===true&&
   snapshot.link?.mqtt_control?.ready===true&&Number.isSafeInteger(snapshot.config?.sdr_revision);
  button.disabled=settingsPending||!ready;
  button.textContent=settingsPending?'Applying settings...':'Apply safe settings';
@@ -270,7 +307,7 @@ function updateSettingsButton(){
  if(settingsPending)reason='Mengirim atau memeriksa hasil settings. Jangan klik ulang.';
  else if(!csrf)reason='Login Ground diperlukan untuk mengirim settings.';
  else if(!apiSnapshotAvailable)reason='Snapshot Ground tidak tersedia; settings tidak dikirim.';
- else if(snapshot.capabilities?.remote_commands!==true||snapshot.capabilities?.config_patch!==true)reason='Izin remote control atau config patch belum aktif di node.';
+ else if(snapshot.capabilities?.remote_commands!==true||snapshot.capabilities?.remote_config_patch!==true)reason='Target settings belum disiapkan atau single-writer belum dikonfirmasi di Raspberry.';
  else if(snapshot.health_fresh!==true||snapshot.link?.mqtt_control?.ready!==true)reason='Settings memerlukan health fresh dan MQTT Control tersambung.';
  else if(!Number.isSafeInteger(snapshot.config?.sdr_revision))reason='Revision config node belum dilaporkan; settings tidak dikirim.';
  else if(settingsAwaitingRevision!==null)reason='Edge sudah menyimpan settings tetapi belum melaporkan revision baru; tunggu report sebelum mengirim perubahan berikutnya.';
@@ -430,13 +467,14 @@ $('settings-form').addEventListener('input',event=>{
 });
 $('settings-form').addEventListener('submit',event=>{event.preventDefault();void applySafeSettings();});
 updateSettingsButton();
-const pinInput=$('pin');const loginButton=$('login');loginButton.disabled=true;
+updateShutdownButton();
+const pinInput=$('pin');const loginButton=$('login');loginButton.disabled=true;$('authstate').textContent='Ground writes tanpa approval root. Edge tidak mengautentikasi publisher MQTT; batasi ACL command.';
 pinInput.addEventListener('input',()=>{pinInput.value=pinInput.value.replace(/[^0-9]/g,'').slice(0,6);loginButton.disabled=pinInput.value.length!==6;});
-loginButton.onclick=async()=>{try{const r=await post('/api/v2/login',{pin:pinInput.value});csrf=r.csrf;pinInput.value='';loginButton.disabled=true;$('authstate').textContent='ADMIN - operasi tetap memerlukan izin node.';updatePppButton();updateSettingsButton();void refreshPppHistory(true);}catch(e){pinInput.value='';loginButton.disabled=true;$('authstate').textContent=e.message;}};
+loginButton.onclick=async()=>{try{const r=await post('/api/v2/login',{pin:pinInput.value});csrf=r.csrf;pinInput.value='';loginButton.disabled=true;$('authstate').textContent='GROUND LOGIN AKTIF - Edge tidak mengautentikasi publisher MQTT; batasi ACL command.';updatePppButton();updateSettingsButton();updateShutdownButton();void refreshPppHistory(true);}catch(e){pinInput.value='';loginButton.disabled=true;$('authstate').textContent=e.message;}};
 $('refresh').onclick=()=>command('config.get');$('start').onclick=()=>command('processing.set',{desired:'RUNNING'});$('stop').onclick=()=>{if(confirm('Hentikan stack RDF? Telemetry tetap hidup.'))command('processing.set',{desired:'STOPPED'});};
-$('restart').onclick=()=>{if(confirm('Restart stack RDF yang sudah di-approve?'))command('service.restart');};
+ $('restart').onclick=()=>{if(confirm('Restart stack SDR sekarang?'))command('service.restart');};
  $('reboot').onclick=async()=>{
-  if(!confirm('Prepare reboot Raspberry? Memerlukan approval dan lease maintenance lokal.'))return;
+  if(!confirm('Prepare reboot Raspberry? Node akan offline selama boot.'))return;
   try{
    const prepared=await post('/api/v2/commands',{op:'system.reboot.prepare',base_rev:snapshot.config?.sdr_revision??null});
    if(!prepared.id)throw Error(prepared.error||'Prepare ditolak');
@@ -458,7 +496,7 @@ $('restart').onclick=()=>{if(confirm('Restart stack RDF yang sudah di-approve?')
   try{await checkShutdownHistory(true);}catch(e){$('operation').textContent='Status shutdown tidak tersedia; permintaan tidak dikirim.';return;}
   if(shutdownUncertain&&!confirm('Hasil shutdown sebelumnya belum pasti. Periksa status Raspberry secara lokal. Jika perlu melepas intent yang tidak aktif, jalankan sudo rdf-node controls shutdown-reconcile pada Pi; helper menolak bila unit masih aktif. Lanjutkan?'))return;
   setShutdownUncertainty(false);
-  if(!confirm('Prepare shutdown Raspberry? Memerlukan approval dan lease maintenance lokal.'))return;
+  if(!confirm('Prepare shutdown Raspberry? Node akan offline; konfirmasi final tetap diperlukan.'))return;
   shutdownPending=true;updateShutdownButton();
   let executeAttempted=false,executeAccepted=false,executeId=null;
   try{
@@ -510,6 +548,7 @@ async function poll(manual=false){
   apiSnapshotAvailable=true;
   renderSettings(snapshot.config);
   updateSettingsButton();
+updateActionButtons();
   if(snapshot.last_operation){$('operation').textContent=JSON.stringify(snapshot.last_operation,null,2);rememberShutdownState(snapshot.last_operation);}
   if(snapshot.last_operation?.op==='config.patch'&&(!settingsPending||snapshot.last_operation.id===settingsOperationId))renderSettingsOperation(snapshot.last_operation);
   if(snapshot.last_operation?.op==='ppp.restart')rememberPppOperation(snapshot.last_operation);
@@ -553,4 +592,4 @@ $('retry').onclick=()=>{
  if(pollPending){pollAgain=true;return;}
  void poll(true);
 };
-get('/api/v2/session').then(r=>{csrf=r.csrf;updatePppButton();updateSettingsButton();if(csrf)void refreshPppHistory(true);}).catch(()=>{});poll();
+get('/api/v2/session').then(r=>{csrf=r.csrf;updatePppButton();updateSettingsButton();updateShutdownButton();if(csrf)void refreshPppHistory(true);}).catch(()=>{});poll();

@@ -123,8 +123,13 @@ Kurva hanya dinyatakan LIVE sesudah seluruh gate di atas lolos.
 
 Ground mengirim `cmd/config/get` hanya melalui aksi eksplisit `Refresh config`. Edge tidak meminta
 atau mengirim settings saat startup, reconnect, atau perubahan revision. Request memerlukan MQTT
-Ground READY dan session `sid`/`boot` terkini, tetapi tidak memerlukan health fresh. Semua operasi
-lain tetap mengikuti health, identity, clock, revision, capability, dan approval gates.
+Ground READY dan session `sid`/`boot` terkini, tetapi tidak memerlukan health fresh.
+
+Mutation selain read-only `config.get` tetap melewati pemeriksaan session, boot, expiry, clock,
+revision, health/evidence, dan target helper fixed bila relevan. Ground tidak memerlukan remote
+grant atau approval root per aksi. Field `remote_*` melaporkan kesiapan target, bukan otorisasi
+publisher; broker ACL dan credential membatasi siapa yang boleh publish command. Edge tidak
+mengikat publisher MQTT ke sesi HTTP Ground.
 
 Edge merespons lewat `settings/reported` dengan QoS 1, non-retained, expiry 30 s:
 

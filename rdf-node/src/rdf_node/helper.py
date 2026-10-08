@@ -219,14 +219,21 @@ class Controller:
                     allow_lifecycle=self.policy['allow_lifecycle'] and self.policy['lifecycle_audited'],
                     allow_reboot=self.policy['allow_reboot'],allow_shutdown=self.policy['allow_shutdown'],
                     allow_ppp_restart=self.policy['allow_ppp_restart'],
-                    allow_remote_control=self.policy['allow_remote_control'])
+                    allow_remote_control=self.policy['allow_remote_control'],
+                    settings_target_available=bool(self.policy['settings_path'] and self.policy['single_writer_confirmed']),
+                    lifecycle_target_available=bool(self.policy['engine_service'] and self.policy['lifecycle_audited']))
     def reconcile_intent(self):
-        if not (self.policy['allow_lifecycle'] and self.policy['lifecycle_audited'] and self.policy['engine_service']):
+        if not (self.policy['lifecycle_audited'] and self.policy['engine_service']):
             return
         try:
-            desired=strict_json((self.state/'intent.json').read_bytes()).get('desired')
+            intent=strict_json((self.state/'intent.json').read_bytes())
         except (OSError,ValueError):
             return
+        if not isinstance(intent,dict): return
+        desired=intent.get('desired')
+        origin=intent.get('origin','local-admin')
+        if origin not in ('ground-controller','local-admin'): return
+        if origin!='ground-controller' and not self.policy['allow_lifecycle']: return
         if desired not in ('RUNNING','STOPPED'): return
         marker=self.state/'engine.stopped'
         if desired=='STOPPED': atomic_write(marker,b'operator stop\n')
@@ -237,7 +244,7 @@ class Controller:
         if not isinstance(req,dict) or not isinstance(req.get('op'),str): raise HelperError('INVALID_RPC')
         op=req['op']
         keys={'status':{'op'},'maintenance.open':{'op','seconds'},'maintenance.close':{'op'},
-              'config.patch':{'op','changes','expected_digest'},'processing.set':{'op','desired','origin'},
+              'config.patch':{'op','origin','changes','expected_digest'},'processing.set':{'op','desired','origin'},
               'service.restart':{'op','origin'},'ppp.restart':{'op','origin'},
               'system.reboot.prepare':{'op','id','origin'},
               'system.reboot.execute':{'op','id','challenge','origin'},
@@ -246,13 +253,11 @@ class Controller:
               'system.shutdown.reconcile':{'op'}}
         if op not in keys: raise HelperError('UNSUPPORTED_RPC')
         if set(req)-keys[op]: raise HelperError('INVALID_RPC_ARGUMENT')
-        if op in ('processing.set','service.restart','ppp.restart','system.reboot.prepare','system.reboot.execute',
+        if op in ('config.patch','processing.set','service.restart','ppp.restart','system.reboot.prepare','system.reboot.execute',
                   'system.shutdown.prepare','system.shutdown.execute'):
             origin=req.get('origin')
             if origin not in ('ground-controller','local-admin'):
                 raise HelperError('INVALID_RPC_ARGUMENT')
-            if origin=='ground-controller' and not self.policy['allow_remote_control']:
-                raise HelperError('REMOTE_CONTROL_NOT_APPROVED')
         if op=='status': return self.state_info()
         if op.startswith('maintenance.'):
             if uid!=0: raise HelperError('MAINTENANCE_REQUIRES_LOCAL_SUDO')
@@ -264,7 +269,8 @@ class Controller:
                 if uid!=0: raise HelperError('SHUTDOWN_RECONCILE_REQUIRES_ROOT')
                 return self._reconcile_shutdown()
             if op=='ppp.restart':
-                if not self.policy['allow_ppp_restart']: raise HelperError('PPP_RESTART_NOT_APPROVED')
+                if origin!='ground-controller' and not self.policy['allow_ppp_restart']:
+                    raise HelperError('PPP_RESTART_NOT_APPROVED')
                 if origin!='ground-controller' and not self.maintenance(): raise HelperError('MAINTENANCE_REQUIRED')
                 require_ppp_service_ready()
                 try:
@@ -274,7 +280,9 @@ class Controller:
                 return {'requested':True,'service':'t900-ppp.service'}
 
             if op=='config.patch':
-                if not self.policy['allow_config'] or not self.policy['single_writer_confirmed'] or not self.policy['settings_path']:
+                if not self.policy['settings_path'] or not self.policy['single_writer_confirmed']:
+                    raise HelperError('CONFIG_TARGET_NOT_READY' if origin=='ground-controller' else 'CONFIG_ADAPTER_NOT_APPROVED')
+                if origin!='ground-controller' and not self.policy['allow_config']:
                     raise HelperError('CONFIG_ADAPTER_NOT_APPROVED')
                 # Never place raw settings backups in the HTTP-exposed _share.
                 fd,name=secure_parent(self.policy['settings_path'])
@@ -285,12 +293,15 @@ class Controller:
                 atomic_write(self.state/'settings-backup.json',previous,0o600)
                 return patch_file(self.policy['settings_path'],req.get('changes'),req.get('expected_digest'),self.policy)
             if op in ('processing.set','service.restart'):
-                if not self.policy['allow_lifecycle'] or not self.policy['lifecycle_audited'] or not self.policy['engine_service']:
+                if not self.policy['engine_service'] or not self.policy['lifecycle_audited']:
+                    raise HelperError('LIFECYCLE_TARGET_NOT_READY')
+                if origin!='ground-controller' and not self.policy['allow_lifecycle']:
                     raise HelperError('LIFECYCLE_NOT_APPROVED')
-                if origin!='ground-controller' and not self.maintenance(): raise HelperError('MAINTENANCE_REQUIRED')
+                if origin!='ground-controller' and not self.maintenance():
+                    raise HelperError('MAINTENANCE_REQUIRED')
                 desired=req.get('desired') if op=='processing.set' else 'RUNNING'
                 if desired not in ('RUNNING','STOPPED'): raise HelperError('INVALID_DESIRED_STATE')
-                atomic_write(self.state/'intent.json',compact({'desired':desired,'boot':self.boot}))
+                atomic_write(self.state/'intent.json',compact({'desired':desired,'boot':self.boot,'origin':origin}))
                 marker=self.state/'engine.stopped'
                 if desired=='STOPPED': atomic_write(marker,b'operator stop\n')
                 else:
@@ -302,9 +313,10 @@ class Controller:
             if op.startswith(('system.reboot.','system.shutdown.')):
                 shutdown=op.startswith('system.shutdown.')
                 action='shutdown' if shutdown else 'reboot'
-                if not self.policy['allow_shutdown' if shutdown else 'allow_reboot']:
+                if origin!='ground-controller' and not self.policy['allow_shutdown' if shutdown else 'allow_reboot']:
                     raise HelperError('SHUTDOWN_DISABLED' if shutdown else 'REBOOT_DISABLED')
-                if origin!='ground-controller' and not self.maintenance(): raise HelperError('MAINTENANCE_REQUIRED')
+                if origin!='ground-controller' and not self.maintenance():
+                    raise HelperError('MAINTENANCE_REQUIRED')
                 id=req.get('id')
                 if not isinstance(id,str) or not 1<=len(id)<=80:
                     raise HelperError('INVALID_SHUTDOWN_ID' if shutdown else 'INVALID_REBOOT_ID')

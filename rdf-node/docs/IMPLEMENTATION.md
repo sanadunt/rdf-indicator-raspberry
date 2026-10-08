@@ -16,7 +16,7 @@ Ground MQTT consumer
 
 Ground command received through the configured broker/link
    -> CommandManager -> SQLite journal -> single worker
-   -> restricted Unix helper -> fixed approved settings/unit action
+   -> restricted Unix helper -> fixed settings path/audited unit action
    -> verify evidence -> result/report
 ```
 
@@ -40,21 +40,29 @@ dioperasikan dengan keyboard. Save mengganti kedua client tanpa restart service 
 sequence/cache session lama; Bulk lanjut setelah kedua koneksi MQTT siap dan
 `resume_stable_seconds` berlalu. Telemetry tidak bergantung pada konfirmasi Ground.
 
-### Kontrol Ground dengan approval root
+### Direct Ground commands and trust boundary
 
-Write Ground mati secara default pada `remote_commands_enabled` Edge dan
-`allow_remote_control` helper. Approval CLI mengaktifkan keduanya; capability tiap operasi
-tetap terpisah. Edge menetapkan actor `ground-controller` saat menerima command dan
-membawanya melalui worker serial; payload tidak dapat memilih actor. Helper melewati lease
-maintenance lokal hanya untuk actor tersebut saat remote grant root aktif. Lifecycle,
-reboot, dan shutdown dari panel Edge lokal tetap memerlukan lease yang terikat boot.
-Approval remote tidak membuka atau memperpanjang lease.
+Supported Ground writes no longer depend on `remote_commands_enabled` in Edge config,
+`allow_remote_control` in helper policy, or per-operation root approval flags. Legacy config keys
+remain accepted for compatibility but do not gate actor `ground-controller`. Edge serializes the
+request through CommandManager and the durable journal; helper still validates fixed targets and
+operation-specific evidence.
 
-PIN+CSRF Ground melindungi API HTTP lokal, bukan identitas publisher MQTT. Broker dan jaringan
-menjadi batas kepercayaan command. Jika broker mengizinkan anonymous publish ke topic command,
-setiap publisher yang menjangkaunya dapat memakai operasi Ground yang aktif. Plaintext
-mengekspos credential dan payload. Konfigurasi ini hanya digunakan pada link privat tepercaya.
-Aplikasi tidak mengklaim autentikasi publisher atau enkripsi ketika TLS dimatikan.
+Settings require a configured fixed path and single-writer confirmation. Lifecycle requires a
+configured, audited SDR unit and stop-intent guard. Its durable intent stores actor origin: Ground
+intents reconcile against the audited target without local approval, while local or legacy intents
+still require local `allow_lifecycle`. PPP is restricted to `t900-ppp.service` with a per-request
+loaded/active/no-job check. Reboot and shutdown retain Prepare/Execute, one-use challenge, durable
+intent, and result reconciliation. Ground UI confirmation remains; the MQTT command itself is not
+bound to a Ground HTTP session.
+
+Ground PIN+CSRF protects the local HTTP API, not MQTT publisher identity. Edge assigns the
+`ground-controller` actor to accepted MQTT commands and does not authenticate which publisher
+sent them. Broker credentials/ACLs and network isolation are the command trust boundary; any
+publisher authorized to the command topics can request all operations whose targets are available.
+A private PPP/T900 link is not publisher authentication. TLS protects transport and verifies the
+broker; broker authorization still requires per-client credentials and topic ACLs. Edge local
+controls retain their separate policy and maintenance lease.
 
 Runtime menggunakan `/usr/bin/python3`, bukan Conda `base` atau environment SDR.
 Local HTTP server stdlib memiliki client/body caps, Host/Origin checks, cookie admin,
@@ -72,19 +80,20 @@ SDR, reboot, atau shutdown otomatis sebagai respons error.
 ### Restart T900 PPP
 
 `ppp.restart` hanya menargetkan fixed unit `t900-ppp.service`; RDF Node tidak memasang,
-mengubah konfigurasi, atau memasukkannya ke ownership lifecycle SDR. Approval root dan setiap
-invokasi helper memeriksa `LoadState=loaded`, `ActiveState=active`, dan `Job=0` di bawah lock
-helper. `PPP_RESTART_REQUESTED` berarti systemd menerima request. Ground melaporkan `APPLIED`
-hanya setelah health fresh yang lebih baru pada session sama; status itu tidak membuktikan
-pemulihan PPP/MQTT di level unit. Request tidak bisa dikirim setelah seluruh MQTT Control putus,
-dan hasil unknown tidak diulang otomatis.
+mengubah konfigurasi, atau memasukkannya ke ownership lifecycle SDR. Ground tidak memerlukan
+remote grant atau root approval per request. Setiap invokasi helper memeriksa
+`LoadState=loaded`, `ActiveState=active`, dan `Job=0` di bawah lock helper. `PPP_RESTART_REQUESTED`
+berarti systemd menerima request. Ground melaporkan `APPLIED` hanya setelah health fresh yang
+lebih baru pada session sama; status itu tidak membuktikan pemulihan PPP/MQTT di level unit.
+Request tidak bisa dikirim setelah seluruh MQTT Control putus, dan hasil unknown tidak diulang
+otomatis.
 
 ### Shutdown OS
 
-`system.shutdown.prepare/execute` adalah capability terpisah, default mati pada config dan
-helper. Helper menjalankan aksi systemd fixed hanya setelah gate capability dan challenge;
-request dari panel Edge juga perlu maintenance lease, sedangkan request Ground perlu kedua
-remote grant root.
+`system.shutdown.prepare/execute` dari Ground tidak memerlukan root approval flag atau maintenance
+lease. Challenge, durable journal, dan final UI confirmation tetap berlaku. Edge tidak mengikat
+MQTT command ke login Ground: publisher lain dengan izin topic broker dapat mengirim shutdown
+tanpa melalui konfirmasi browser.
 Helper menyimpan intent shutdown durable dan hanya menjadwalkan aksi systemd tetap. Intent
 current-boot menolak prepare/execute berikutnya sehingga tidak ada jadwal poweroff ganda;
 pemeriksaan helper setelah boot baru menghapus intent boot terdahulu. Hasil schedule tetap

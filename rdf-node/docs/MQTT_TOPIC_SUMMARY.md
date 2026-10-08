@@ -59,13 +59,13 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | `ack/config` | Edge -> Ground | Control | 1 | Tidak | Saat progress/hasil command `config.*`; expiry 30 s | ACK command konfigurasi. |
 | `ack/operation` | Edge -> Ground | Control | 1 | Tidak | Saat progress/hasil command selain `config.*`; expiry 30 s | ACK command operation. |
 | `cmd/config/get` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Meminta respons native settings; perlu MQTT READY dan session aktif, bukan health fresh. |
-| `cmd/config/patch` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Intent perubahan field safe yang diizinkan. |
-| `cmd/processing/set` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Intent `RUNNING` atau `STOPPED` untuk SDR stack yang di-approve. |
-| `cmd/service/restart` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Restart SDR stack yang di-approve. Bukan restart PPP atau bridge. |
-| `cmd/service/ppp/restart` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Minta restart fixed `t900-ppp.service`; memerlukan remote grant dan approval PPP terpisah. |
-| `cmd/system/reboot/prepare` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Meminta challenge reboot sekali pakai. |
+| `cmd/config/patch` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Safe-field patch memakai target settings fixed/single-writer; tanpa approval root per command. |
+| `cmd/processing/set` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Intent `RUNNING` atau `STOPPED` untuk target SDR fixed yang sudah diaudit; tanpa approval root per command. |
+| `cmd/service/restart` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Restart target SDR audited; tanpa approval root per command. Bukan restart PPP atau bridge. |
+| `cmd/service/ppp/restart` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Restart fixed `t900-ppp.service`; tanpa grant/approval root, tetapi helper memeriksa loaded/active/no-job setiap request. |
+| `cmd/system/reboot/prepare` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Meminta challenge reboot sekali pakai; tidak memerlukan remote grant/approval root. |
 | `cmd/system/reboot/execute` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Eksekusi reboot dengan `prepare_id` dan `challenge` yang masih valid. |
-| `cmd/system/shutdown/prepare` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Meminta challenge shutdown sekali pakai; approval terpisah. |
+| `cmd/system/shutdown/prepare` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Meminta challenge shutdown sekali pakai; tidak memerlukan approval root. |
 | `cmd/system/shutdown/execute` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Menjadwalkan poweroff dengan `prepare_id` dan challenge yang masih valid. |
 | `cmd/operation/get` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Query hasil operation berdasarkan ID. |
 | `cmd/stream/set` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Ganti profile telemetry. |
@@ -300,12 +300,16 @@ Detail tidak menggantikan gate health utama. Ground saat ini menyimpan detail te
 ### `capabilities`
 
 ```json
-{"v":2,"sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","version":"1.0.0","mode":"read_only","codecs":["json"],"angle":"theta_mirror","native_axis":1,"count":360,"profiles":["control","balanced","graph_u8"],"scope":"SDR_STACK","helper_available":true,"maintenance":false,"remote_commands":false,"config_patch":false,"processing":false,"restart":false,"reboot":false,"shutdown":false,"ppp_restart":false}
+{"v":2,"sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","t":1790668800123,"version":"1.0.0","mode":"read_only","codecs":["json"],"angle":"theta_mirror","native_axis":1,"count":360,"profiles":["control","balanced","graph_u8"],"scope":"SDR_STACK","helper_available":true,"maintenance":false,"remote_commands":true,"config_patch":false,"processing":false,"restart":false,"reboot":false,"shutdown":false,"ppp_restart":false,"remote_config_patch":false,"remote_processing":false,"remote_restart":false,"remote_reboot":true,"remote_shutdown":true,"remote_ppp_restart":true}
 ```
 
-Boolean capability (`remote_commands`, `config_patch`, `processing`, `restart`, `reboot`, `shutdown`,
-`ppp_restart`) adalah izin/runtime availability yang dilaporkan node, bukan otorisasi broker.
-Untuk operasi remote Ground, cek juga `remote_commands`; PPP restart memerlukan `ppp_restart`.
+Boolean tanpa prefix (`config_patch`, `processing`, `restart`, `reboot`, `shutdown`,
+`ppp_restart`) melaporkan gate panel Edge lokal. `remote_*` melaporkan jalur/target Ground:
+settings memerlukan path fixed dan single-writer confirmation; processing/restart memerlukan
+unit SDR audited; reboot/shutdown/PPP memerlukan helper. `remote_ppp_restart` tidak membuktikan
+unit siap—helper melakukan preflight setiap request. `remote_commands` berarti jalur Ground
+tersedia di luar DEMO, bukan otorisasi publisher. `mode=read_only` berlaku pada aksi lokal Edge.
+Tidak ada capability yang menggantikan session/health checks atau ACL broker.
 `codecs` saat ini hanya `json`. Profile yang didukung:
 
 | Profile | DoA | Angular |
@@ -478,19 +482,22 @@ dari `state.cfg`; contoh ini fixture dan jangan dikirim mentah.
 | `op` | Nama operation. Topic command wajib cocok dengan mapping di bawah. |
 | operation field | Salah satu `changes`, `desired`, `profile`, `target_id`, `prepare_id`, `challenge`, sesuai operation. Unknown field ditolak. |
 Ground HTTP API juga menerima `id` klien opsional dan meneruskannya tanpa perubahan ke envelope MQTT; Ground UI memakainya untuk memulihkan hasil shutdown berdasarkan ID yang sama bila respons HTTP execute hilang.
+Login dan CSRF pada Ground HTTP API melindungi request browser, bukan publisher MQTT. Edge tidak
+mengautentikasi publisher atau membuktikan command berasal dari sesi UI Ground; publisher lain
+yang diizinkan ACL topic dapat mengirim command langsung.
 
 
 | Topic suffix | `op` | Field tambahan (contoh) |
 |---|---|---|
 | `cmd/config/get` | `config.get` | Tidak ada. Read-only; meminta teks native settings melalui `settings/reported`. |
 | `cmd/config/patch` | `config.patch` | `{"changes":{"center_frequency_hz":433920000,"vfo0_frequency_hz":433920000}}`; subset field safe dan tidak kosong. |
-| `cmd/processing/set` | `processing.set` | `{"desired":"STOPPED"}` atau `{"desired":"RUNNING"}`. |
-| `cmd/service/restart` | `service.restart` | Tidak ada. Hanya unit SDR stack yang di-approve. |
-| `cmd/service/ppp/restart` | `ppp.restart` | Tidak ada. Membutuhkan `ppp_restart` dan `remote_commands`; Ground perlu mengelola konfirmasi operator bila hasil request sebelumnya belum diketahui. |
-| `cmd/system/reboot/prepare` | `system.reboot.prepare` | Tidak ada. ACK mengembalikan `prepare_id`, `challenge`, `valid_seconds` (30). |
-| `cmd/system/reboot/execute` | `system.reboot.execute` | `{"prepare_id":"<prepare-id>","challenge":"<one-time-challenge>"}` dari ACK prepare. Challenge sekali pakai; jangan log atau simpan sebagai credential permanen. |
-| `cmd/system/shutdown/prepare` | `system.shutdown.prepare` | Tidak ada. ACK mengembalikan `prepare_id`, `challenge`, `valid_seconds` (30). |
-| `cmd/system/shutdown/execute` | `system.shutdown.execute` | `{"prepare_id":"<prepare-id>","challenge":"<one-time-challenge>"}` dari ACK prepare. Memerlukan helper `allow_shutdown`, config `shutdown_enabled`, maintenance; Ground juga memerlukan policy remote command. |
+| `cmd/processing/set` | `processing.set` | `{"desired":"STOPPED"}` atau `{"desired":"RUNNING"}`. Hanya target SDR audited; tanpa approval root per command. |
+| `cmd/service/restart` | `service.restart` | Tidak ada. Hanya target SDR audited; tanpa approval root per command. |
+| `cmd/service/ppp/restart` | `ppp.restart` | Tidak ada. Ground tanpa root grant/approval; helper memeriksa fixed unit loaded/active/no-job pada setiap request. Konfirmasi ulang diperlukan setelah hasil unknown. |
+| `cmd/system/reboot/prepare` | `system.reboot.prepare` | Tidak ada. Ground tidak memerlukan remote grant atau approval reboot root. ACK mengembalikan `prepare_id`, `challenge`, `valid_seconds` (30). |
+| `cmd/system/reboot/execute` | `system.reboot.execute` | `{"prepare_id":"<prepare-id>","challenge":"<one-time-challenge>"}` dari ACK prepare. Challenge sekali pakai, jangan log atau simpan sebagai credential permanen. |
+| `cmd/system/shutdown/prepare` | `system.shutdown.prepare` | Tidak ada. Ground tidak memerlukan approval root; ACK mengembalikan `prepare_id`, `challenge`, `valid_seconds` (30). |
+| `cmd/system/shutdown/execute` | `system.shutdown.execute` | `{"prepare_id":"<prepare-id>","challenge":"<one-time-challenge>"}` dari ACK prepare. Ground tidak memerlukan `allow_shutdown`, `shutdown_enabled`, remote grant, atau lease; Edge lokal tetap mengikuti gate dan lease. |
 | `cmd/operation/get` | `operation.get` | `{"target_id":"<operation-id>"}`; query jurnal, hasil dapat `null` bila ID tidak ditemukan. |
 | `cmd/stream/set` | `stream.set` | `{"profile":"balanced"}`; profile valid: `control`, `balanced`, atau `graph_u8`. |
 

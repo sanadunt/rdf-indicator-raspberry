@@ -76,38 +76,42 @@ Rollback mengubah current ke previous dan try-restart service baru, bukan PPP/SD
 Ia tidak merollback database, settings RF, credential atau perubahan hardware. Untuk data
 schema yang berubah pada versi mendatang, backup dan migration policy tetap diperlukan.
 
-## Akses remote Ground
+## Ground writes and broker trust boundary
 
-Kontrol remote mati secara default. Berikan hanya operasi yang sudah ditinjau. Contoh
-khusus untuk PPP restart:
+Semua command write Ground yang didukung berjalan tanpa remote grant dan tanpa approval root
+per aksi. Ground UI tetap memakai PIN login+CSRF; autentikasi itu hanya melindungi HTTP API.
+Edge tidak mengautentikasi publisher MQTT atau mengikat command ke sesi UI. Publisher mana pun
+yang diizinkan ACL broker ke topic command dapat menjalankan operasi remote dengan target siap.
 
-```bash
-sudo rdf-node controls approve --remote --ppp-restart
-```
+Private PPP/T900 bukan autentikasi publisher. Gunakan TLS, credential broker unik, dan ACL
+deny-by-default yang memberi akses publish command hanya kepada Ground tepercaya; jangan
+mengaktifkan anonymous publish. TLS memverifikasi broker dan mengenkripsi transport, tetapi
+otorisasi publisher tetap dilakukan oleh broker.
 
-CLI meminta `APPROVE` dan `T900 PPP RESTART`; sebelum prompt kedua, CLI memastikan
-`t900-ppp.service` loaded, active, dan tidak memiliki job pending. Tambahkan `--settings`,
-`--lifecycle`, `--reboot`, atau `--shutdown` hanya bila diperlukan. Capability tersebut tetap
-memiliki approval masing-masing. `--remote` menyimpan grant di config dan helper, lalu
-merestart `rdf-control-helper.service` dan `rdf-edge.service`. Perintah ini tidak membuka lease.
+Flag CLI `--remote` telah dihapus; `--reboot` tetap mengatur gate reboot lokal Edge dan lease maintenance
+tetap wajib. Key lama `remote_commands_enabled` dan `allow_remote_control` tetap diterima untuk kompatibilitas,
+`controls approve` mengatur gate aksi lokal Edge; menjalankan tanpa flag **tidak mencabut** Ground.
+Untuk menutup jalur write, cabut ACL publish pada subtree `cmd/#` di broker atau nonaktifkan
+MQTT Control. Mematikan MQTT Control juga memutus telemetry/control channel.
 
-Cabut semua izin write Ground secara lokal:
+Target Ground yang perlu disiapkan satu kali:
 
-```bash
-sudo rdf-node controls approve
-```
+- `sudo rdf-node controls approve --settings` menetapkan path settings fixed dan single-writer
+  confirmation. Ground patch tetap dibatasi allowlist dan compare-digest.
+- `sudo rdf-node controls approve --lifecycle` mengaudit target SDR dan watchdog serta memasang
+  stop-intent guard. Ground Start/Stop/Restart hanya memakai target ini.
+- PPP selalu fixed `t900-ppp.service`; helper memeriksa loaded, active, dan tidak ada job pending
+  pada setiap request.
+- Reboot/shutdown tetap memakai Prepare/Execute, challenge sekali pakai, durable journal/intent,
+  dan konfirmasi UI. Edge tidak mengikat konfirmasi browser ke publisher MQTT.
 
-Ketik `APPROVE`. Tanpa `--remote`, CLI menghapus `remote_commands_enabled` dan
-`allow_remote_control`, lalu merestart helper dan Edge. Approval tiap operasi tetap tersedia
-untuk policy lokal. Ground lifecycle/reboot/shutdown melewati lease lokal hanya saat kedua
-remote grant dan capability operasi aktif; aksi lokal dari Edge tetap memerlukan lease 30..900
-detik. Policy lokal settings dan stream tidak berubah.
+Prerequisite target settings/lifecycle bukan approval root per Ground command. `controls approve --reboot`,
+`--shutdown`, dan `--ppp-restart` tetap mengatur gate panel Edge lokal. Lifecycle, PPP restart,
+shutdown, dan reboot lokal memerlukan maintenance lease; settings lokal memerlukan approval
+single-writer. Ground tidak memakai approval atau lease root lokal.
 
-Aplikasi tidak mengautentikasi identitas publisher MQTT; akses command bergantung pada ACL broker
-dan isolasi jaringan. Jika broker mengizinkan publish anonymous ke topic command, publisher yang
-menjangkaunya dapat memakai operasi remote aktif. Plaintext mengekspos credential dan payload.
-Gunakan hanya pada link privat, terisolasi, dan tepercaya. Jika jalur MQTT Control putus
-sepenuhnya, Ground tidak dapat mengirim PPP restart.
+Ground membutuhkan MQTT Control ready dan session/health node fresh untuk mutasi. Jika MQTT
+Control putus sepenuhnya, Ground tidak dapat mengirim PPP restart atau command lain.
 
 ## Uninstall
 
@@ -159,9 +163,9 @@ Untuk acceptance T900 dengan pengawasan, periksa dahulu unit fixed ini secara re
 systemctl show t900-ppp.service -p LoadState -p ActiveState -p Job
 ```
 
-Pastikan `LoadState=loaded`, `ActiveState=active`, dan `Job=0`. Setelah approval root, kirim
-satu request Ground dalam maintenance window terencana. Catat `PPP_RESTART_REQUESTED`, jeda dan
-pemulihan PPP serta MQTT Control, dan waktu sampai health fresh pada sesi yang sama. Health itu
-membolehkan Ground melaporkan `APPLIED`, tetapi tidak membuktikan state unit PPP. Jika MQTT
-tidak kembali, pemulihan memerlukan jalur lokal/management independen. Jangan mengulang hasil
-unknown secara otomatis.
+Pastikan `LoadState=loaded`, `ActiveState=active`, dan `Job=0`. Request Ground tidak memerlukan
+approval root per aksi; lakukan hanya dalam test window terawasi. Catat `PPP_RESTART_REQUESTED`,
+jeda/pemulihan PPP dan MQTT Control, serta waktu sampai health fresh pada sesi yang sama.
+Health baru memungkinkan Ground melaporkan `APPLIED`, tetapi tidak membuktikan state unit PPP.
+Jika MQTT tidak kembali, pemulihan memerlukan jalur lokal/management independen. Jangan mengulang
+hasil unknown secara otomatis.

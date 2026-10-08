@@ -128,14 +128,36 @@ class ApplicationTests(unittest.TestCase):
         r=self.request();r['sid']='00000000';self.assertEqual(self.a.commands.submit(r,'local-admin')['stage'],'REJECTED')
     def test_expired_command_rejected(self):
         r=self.request();r['expires_ms']=now_ms()-1;self.assertEqual(self.a.commands.submit(r,'local-admin')['stage'],'REJECTED')
-    def test_remote_write_disabled(self):self.assertEqual(self.a.commands.submit(self.request('stream.set',profile='control'),'ground-controller')['result']['error'],'REMOTE_COMMANDS_DISABLED')
+    def test_ground_write_works_without_remote_grants(self):
+        self.assertTrue(self.a.capabilities()['remote_commands'])
+        self.a.commands.start();self.addCleanup(self.a.commands.stop)
+        request=self.request('stream.set',profile='control')
+        accepted=self.a.commands.submit(request,'ground-controller')
+        self.a.commands.queue.join()
+        self.assertEqual(accepted['stage'],'ACCEPTED')
+        self.assertEqual(self.a.journal.lookup(request['id'])['stage'],'APPLIED')
+        self.assertEqual(self.a.profile,'control')
     def test_clock_untrusted_blocks_local_write(self):
         self.a.monitor.data['clock_trusted']=False;self.assertEqual(self.a.commands.submit(self.request('stream.set',profile='control'),'local-admin')['result']['error'],'CLOCK_UNTRUSTED')
     def test_config_revision_conflict(self):
         r=self.request('stream.set',profile='control');r['base_rev']=42;self.assertEqual(self.a.commands.submit(r,'local-admin')['result']['error'],'CONFIG_REVISION_CONFLICT')
     def test_no_hardware_write_in_demo(self):
         self.a.demo=True;self.assertEqual(self.a.commands.submit(self.request('stream.set',profile='control'),'local-admin')['result']['error'],'DEMO_NO_HARDWARE_CONTROL')
-    def test_disabled_reboot_rejected(self):self.assertEqual(self.a.commands.submit(self.request('system.reboot.prepare'),'local-admin')['result']['error'],'CAPABILITY_DISABLED')
+    def test_local_reboot_requires_edge_capability_approval(self):
+        result=self.a.commands.submit(self.request('system.reboot.prepare'),'local-admin')
+        self.assertEqual(result['stage'],'REJECTED')
+        self.assertEqual(result['result']['error'],'CAPABILITY_DISABLED')
+    def test_local_reboot_accepts_explicit_edge_capability(self):
+        self.a.cfg['runtime_mode']='controlled';self.a.cfg['control']['reboot_enabled']=True
+        result=self.a.commands.submit(self.request('system.reboot.prepare'),'local-admin')
+        self.assertEqual(result['stage'],'ACCEPTED',result)
+    def test_ground_reboot_bypasses_remote_and_capability_approval_flags(self):
+        self.a.cfg['runtime_mode']='read_only'
+        self.a.cfg['control'].update(remote_commands_enabled=False,reboot_enabled=False)
+        self.a.helper_status={'allow_remote_control':False,'allow_reboot':False}
+        self.assertTrue(self.a.capabilities()['remote_reboot'])
+        result=self.a.commands.submit(self.request('system.reboot.prepare'),'ground-controller')
+        self.assertEqual(result['stage'],'ACCEPTED',result)
     def test_disabled_shutdown_rejected(self):self.assertEqual(self.a.commands.submit(self.request('system.shutdown.prepare'),'local-admin')['result']['error'],'CAPABILITY_DISABLED')
     def test_shutdown_capability_requires_config_and_helper_approval(self):
         self.a.cfg['runtime_mode']='controlled';self.a.cfg['control']['shutdown_enabled']=True
@@ -143,9 +165,13 @@ class ApplicationTests(unittest.TestCase):
         self.assertFalse(self.a.capabilities()['shutdown'])
         self.a.helper_status={'allow_shutdown':True}
         self.assertTrue(self.a.capabilities()['shutdown'])
-    def test_ground_shutdown_requires_remote_commands_enabled(self):
-        self.a.cfg['runtime_mode']='controlled';self.a.cfg['control']['shutdown_enabled']=True
-        self.assertEqual(self.a.commands.submit(self.request('system.shutdown.prepare'),'ground-controller')['result']['error'],'REMOTE_COMMANDS_DISABLED')
+    def test_ground_shutdown_bypasses_remote_and_capability_approval_flags(self):
+        self.a.cfg['runtime_mode']='read_only'
+        self.a.cfg['control'].update(remote_commands_enabled=False,shutdown_enabled=False)
+        self.a.helper_status={'allow_remote_control':False,'allow_shutdown':False}
+        self.assertTrue(self.a.capabilities()['remote_shutdown'])
+        result=self.a.commands.submit(self.request('system.shutdown.prepare'),'ground-controller')
+        self.assertEqual(result['stage'],'ACCEPTED',result)
     def test_shutdown_is_scheduled_only_after_durable_marker(self):
         request=self.request('system.shutdown.execute',prepare_id='prepared',challenge='fixture')
         self.a.journal.accept(request,'local-admin')
@@ -706,16 +732,15 @@ class CommandTests(unittest.TestCase):
                     issued_ms=now_ms(),expires_ms=now_ms()+15000,base_rev=self.a.source.revision,
                     op=op,**extras)
 
-    def test_ground_actor_is_internal_and_reaches_helper(self):
+    def test_ground_actor_is_internal_and_reaches_helper_without_root_approval(self):
         from rdf_node.helper import Controller,DEFAULT_POLICY
-        self.a.cfg['runtime_mode']='controlled'
-        self.a.cfg['control'].update(remote_commands_enabled=True,reboot_enabled=True)
-        self.a.helper_status={'allow_remote_control':True,'allow_reboot':True}
-        helper=Controller(dict(DEFAULT_POLICY,state_dir=str(self.path/'remote-helper'),allowed_user=None,
-                               allow_remote_control=True,allow_reboot=True))
+        self.a.cfg['runtime_mode']='read_only'
+        self.a.helper_status={'allow_remote_control':False,'allow_reboot':False}
+        helper=Controller(dict(DEFAULT_POLICY,state_dir=str(self.path/'remote-helper'),allowed_user=None))
         self.a.commands.start();self.addCleanup(self.a.commands.stop)
-        with mock.patch.object(self.a.commands,'_helper',
-                               side_effect=lambda request:helper.dispatch(request,os.getuid())):
+        with mock.patch.object(helper,'_run'), \
+                mock.patch.object(self.a.commands,'_helper',
+                                  side_effect=lambda request:helper.dispatch(request,os.getuid())):
             request=self.request('system.reboot.prepare')
             accepted=self.a.commands.submit(request,'ground-controller')
             self.a.commands.queue.join()
@@ -723,26 +748,44 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(accepted['stage'],'ACCEPTED')
         self.assertEqual(operation['stage'],'APPLIED')
         self.assertEqual(helper.challenges[request['id']][2],'reboot')
-
     def test_remote_payload_cannot_choose_origin(self):
         request=self.request('stream.set',profile='balanced',origin='ground-controller')
         result=self.a.commands.submit(request,'ground-controller')
         self.assertEqual(result['result']['error'],'UNKNOWN_COMMAND_FIELD')
 
-    def test_remote_stream_requires_edge_and_helper_grants(self):
-        self.a.cfg['control']['remote_commands_enabled']=True
-        self.a.helper_status={'allow_remote_control':False}
-        self.assertFalse(self.a.capabilities()['remote_commands'])
-        denied=self.a.commands.submit(self.request('stream.set',profile='balanced'),'ground-controller')
-        self.assertEqual(denied['result']['error'],'REMOTE_COMMANDS_DISABLED')
+    def test_ground_remote_capabilities_do_not_enable_local_panel_actions(self):
+        self.a.helper_status={'allow_config':False,'allow_lifecycle':False,'allow_reboot':False,
+                              'allow_shutdown':False,'allow_ppp_restart':False,
+                              'allow_remote_control':False,'settings_target_available':True,
+                              'lifecycle_target_available':True}
+        caps=self.a.capabilities()
+        self.assertTrue(caps['remote_commands'])
+        self.assertTrue(caps['remote_config_patch'])
+        self.assertTrue(caps['remote_processing'])
+        self.assertTrue(caps['remote_restart'])
+        self.assertTrue(caps['remote_reboot'])
+        self.assertTrue(caps['remote_shutdown'])
+        self.assertTrue(caps['remote_ppp_restart'])
+        self.assertFalse(caps['config_patch'])
+        self.assertFalse(caps['processing'])
+        self.assertFalse(caps['restart'])
+        self.assertFalse(caps['shutdown'])
+    def test_ground_settings_write_bypasses_root_capability_flag(self):
+        self.a.cfg['runtime_mode']='read_only'
+        self.a.cfg['control']['config_patch_enabled']=False
+        result=self.a.commands.submit(self.request('config.patch',changes={'gain_db':20.7}),'ground-controller')
+        self.assertEqual(result['stage'],'ACCEPTED',result)
 
-        self.a.helper_status={'allow_remote_control':True}
+    def test_ground_lifecycle_write_bypasses_root_capability_flags(self):
+        self.a.cfg['runtime_mode']='read_only'
+        self.a.cfg['control'].update(processing_enabled=False,restart_enabled=False)
+        result=self.a.commands.submit(self.request('processing.set',desired='STOPPED'),'ground-controller')
+        self.assertEqual(result['stage'],'ACCEPTED',result)
+
+    def test_ground_stream_write_works_without_remote_grants(self):
+        self.a.cfg['runtime_mode']='read_only'
         self.a.cfg['control']['remote_commands_enabled']=False
-        self.assertFalse(self.a.capabilities()['remote_commands'])
-        denied=self.a.commands.submit(self.request('stream.set',profile='balanced'),'ground-controller')
-        self.assertEqual(denied['result']['error'],'REMOTE_COMMANDS_DISABLED')
-
-        self.a.cfg['control']['remote_commands_enabled']=True
+        self.a.helper_status={'allow_remote_control':False}
         self.assertTrue(self.a.capabilities()['remote_commands'])
         self.a.commands.start();self.addCleanup(self.a.commands.stop)
         request=self.request('stream.set',profile='balanced')
@@ -752,27 +795,11 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(self.a.journal.lookup(request['id'])['stage'],'APPLIED')
         self.assertEqual(self.a.profile,'balanced')
 
-    def test_ppp_restart_requires_remote_and_action_capabilities(self):
-        self.a.cfg['runtime_mode']='controlled'
-        self.a.cfg['control'].update(remote_commands_enabled=True,ppp_restart_enabled=True)
-        self.a.helper_status={'allow_remote_control':False,'allow_ppp_restart':True}
-        self.assertFalse(self.a.capabilities()['ppp_restart'])
-        denied=self.a.commands.submit(self.request('ppp.restart'),'ground-controller')
-        self.assertEqual(denied['result']['error'],'REMOTE_COMMANDS_DISABLED')
-
-        self.a.helper_status={'allow_remote_control':True,'allow_ppp_restart':False}
-        self.assertFalse(self.a.capabilities()['ppp_restart'])
-        denied=self.a.commands.submit(self.request('ppp.restart'),'ground-controller')
-        self.assertEqual(denied['result']['error'],'CAPABILITY_DISABLED')
-
-        self.a.helper_status={'allow_remote_control':True,'allow_ppp_restart':True}
-        self.a.cfg['control']['ppp_restart_enabled']=False
-        self.assertFalse(self.a.capabilities()['ppp_restart'])
-        denied=self.a.commands.submit(self.request('ppp.restart'),'ground-controller')
-        self.assertEqual(denied['result']['error'],'CAPABILITY_DISABLED')
-
-        self.a.cfg['control']['ppp_restart_enabled']=True
-        self.assertTrue(self.a.capabilities()['ppp_restart'])
+    def test_ground_ppp_restart_works_without_root_grants(self):
+        self.a.cfg['runtime_mode']='read_only'
+        self.a.cfg['control'].update(remote_commands_enabled=False,ppp_restart_enabled=False)
+        self.a.helper_status={'allow_remote_control':False,'allow_ppp_restart':False}
+        self.assertTrue(self.a.capabilities()['remote_ppp_restart'])
         self.a.commands.start();self.addCleanup(self.a.commands.stop)
         request=self.request('ppp.restart');observed=[]
         def helper(payload):
@@ -786,7 +813,6 @@ class CommandTests(unittest.TestCase):
         operation=self.a.journal.lookup(request['id'])
         self.assertEqual(operation['stage'],'PPP_RESTART_REQUESTED')
         self.assertTrue(operation['result']['accepted_by_systemd'])
-
     def test_ppp_restart_helper_timeout_stays_unknown(self):
         self.a.cfg['runtime_mode']='controlled'
         self.a.cfg['control'].update(remote_commands_enabled=True,ppp_restart_enabled=True)
@@ -902,6 +928,18 @@ class ApiTests(unittest.TestCase):
     def test_host_dns_rebinding_rejected(self):self.assertEqual(self.http('GET','/',headers={'Host':'attacker.invalid'})[0],403)
     def test_cors_write_rejected(self):self.assertEqual(self.http('POST','/api/v2/login',{'pin':self.pin},headers={'Origin':'https://attacker.invalid'})[0],403)
     def test_no_auth_write_rejected(self):self.assertEqual(self.http('POST','/api/v2/display/preferences',{'theme':'light'})[0],403)
+    def test_local_reboot_requires_admin_and_edge_approval(self):
+        request={'v':2,'id':'local-reboot','sid':self.a.sid,'boot':self.a.boot,
+                 'issued_ms':now_ms(),'expires_ms':now_ms()+15000,
+                 'base_rev':self.a.source.revision,'op':'system.reboot.prepare'}
+        self.assertEqual(self.http('POST','/api/v2/commands',request)[0],403)
+        self.login()
+        code,_,response=self.http('POST','/api/v2/commands',request)
+        self.assertEqual((code,json.loads(response)['result']['error']),(400,'CAPABILITY_DISABLED'))
+        self.a.cfg['runtime_mode']='controlled';self.a.cfg['control']['reboot_enabled']=True
+        request['id']='local-reboot-approved'
+        code,_,response=self.http('POST','/api/v2/commands',request)
+        self.assertEqual((code,json.loads(response)['stage']),(202,'ACCEPTED'))
     def test_wrong_pin_rejected(self):self.assertEqual(self.http('POST','/api/v2/login',{'pin':'000000'})[0],401)
     def test_login_requires_exact_ascii_pin_and_new_field(self):
         for body in ({'pin':'12345'},{'pin':'1234567'},{'pin':'１２３４５６'},{'password':self.pin}):

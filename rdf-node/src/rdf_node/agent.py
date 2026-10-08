@@ -295,12 +295,22 @@ class Agent:
                 'mqtt_configured':self.cfg['mqtt']['enabled'],'preferences':self.journal.get('display',self.cfg['display'])}
     def capabilities(self):
         c=self.cfg['control']
+        remote=not self.demo
+        helper_available=bool(self.helper_status)
+        settings_target=self.helper_status.get('settings_target_available') is True
+        lifecycle_target=self.helper_status.get('lifecycle_target_available') is True
         return {'v':2,'sid':self.sid,'boot':self.boot,'instance':self.instance,'version':__version__,
                 'mode':'DEMO' if self.demo else self.cfg['runtime_mode'],'codecs':['json'],
                 'angle':self.cfg['source']['angle_mode'],'native_axis':1,'count':360,
-                'profiles':list(PROFILES),'scope':'SDR_STACK','helper_available':bool(self.helper_status),
+                'profiles':list(PROFILES),'scope':'SDR_STACK','helper_available':helper_available,
                 'maintenance':self.helper_status.get('maintenance',False),
-                'remote_commands':c['remote_commands_enabled'] and self.helper_status.get('allow_remote_control',False),
+                'remote_commands':remote,
+                'remote_config_patch':remote and settings_target,
+                'remote_processing':remote and lifecycle_target,
+                'remote_restart':remote and lifecycle_target,
+                'remote_reboot':remote and helper_available,
+                'remote_shutdown':remote and helper_available,
+                'remote_ppp_restart':remote and helper_available,
                 'config_patch':c['config_patch_enabled'] and self.helper_status.get('allow_config',False),
                 'processing':c['processing_enabled'] and self.helper_status.get('allow_lifecycle',False),
                 'restart':c['restart_enabled'] and self.helper_status.get('allow_lifecycle',False),

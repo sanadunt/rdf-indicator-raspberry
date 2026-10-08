@@ -167,14 +167,12 @@ def controls(args):
                 raise SystemExit('PPP restart belum approved.')
             policy['allow_ppp_restart']=True
             cfg['control']['ppp_restart_enabled']=True
-        policy['allow_remote_control']=args.remote
         cfg['runtime_mode']='controlled'
-        cfg['control']['remote_commands_enabled']=args.remote
         atomic_write(path,yaml.safe_dump(policy,sort_keys=False).encode(),0o600)
         save_config(Path(args.config),cfg); chown_config(args.config)
         subprocess.run(['systemctl','daemon-reload'],check=True)
         subprocess.run(['systemctl','restart','rdf-control-helper.service','rdf-edge.service'],check=True)
-        print('Approval tersimpan. Lease maintenance tetap terpisah dan wajib untuk kontrol lifecycle lokal.')
+        print('Approval tersimpan. Ground remote commands tidak memerlukan remote grant atau approval per aksi; kontrol lokal Edge tetap mengikuti policy root dan lease.')
     elif args.action=='shutdown-reconcile':
         from .helper import call_helper
         print('Helper hanya menghapus intent setelah systemd melaporkan unit timer/service shutdown tidak aktif.')
@@ -250,7 +248,7 @@ def main():
         if name=='import-bundle': s.add_argument('directory')
         if name=='controls':
             s.add_argument('action',choices=['approve','maintenance-open','maintenance-close','shutdown-reconcile']);s.add_argument('--settings',action='store_true')
-            s.add_argument('--lifecycle',action='store_true');s.add_argument('--reboot',action='store_true');s.add_argument('--shutdown',action='store_true');s.add_argument('--remote',action='store_true');s.add_argument('--ppp-restart',action='store_true')
+            s.add_argument('--lifecycle',action='store_true');s.add_argument('--reboot',action='store_true');s.add_argument('--shutdown',action='store_true');s.add_argument('--ppp-restart',action='store_true')
             s.add_argument('--seconds',type=int,default=300)
     s=sub.add_parser('demo');s.add_argument('--port',type=int,default=8790);s.add_argument('--state-dir')
     s=sub.add_parser('helper');s.add_argument('--policy',default='/etc/rdf-node/helper.yaml')

@@ -88,13 +88,20 @@ class CommandManager:
             if op=='stream.set':
                 if request.get('profile') not in PROFILES: raise ValueError('UNSUPPORTED_PROFILE')
             else:
-                flag={'config.patch':'config_patch_enabled','processing.set':'processing_enabled',
-                      'service.restart':'restart_enabled','ppp.restart':'ppp_restart_enabled',
-                      'system.reboot.prepare':'reboot_enabled','system.reboot.execute':'reboot_enabled',
-                      'system.shutdown.prepare':'shutdown_enabled','system.shutdown.execute':'shutdown_enabled'}[op]
-                if self.cfg['runtime_mode']!='controlled' or not self.cfg['control'][flag]: raise ValueError('CAPABILITY_DISABLED')
-                if op=='ppp.restart' and not a.helper_status.get('allow_ppp_restart',False):
-                    raise ValueError('CAPABILITY_DISABLED')
+                if actor!='ground-controller':
+                    flag={'config.patch':'config_patch_enabled','processing.set':'processing_enabled',
+                          'service.restart':'restart_enabled','ppp.restart':'ppp_restart_enabled',
+                          'system.reboot.prepare':'reboot_enabled','system.reboot.execute':'reboot_enabled',
+                          'system.shutdown.prepare':'shutdown_enabled','system.shutdown.execute':'shutdown_enabled'}[op]
+                    if self.cfg['runtime_mode']!='controlled' or not self.cfg['control'][flag]: raise ValueError('CAPABILITY_DISABLED')
+                    if op=='ppp.restart' and not a.helper_status.get('allow_ppp_restart',False):
+                        raise ValueError('CAPABILITY_DISABLED')
+                    if op=='processing.set' and request.get('desired') not in ('RUNNING','STOPPED'): raise ValueError('INVALID_DESIRED_STATE')
+                    if op=='config.patch':
+                        from .helper import FIELD_MAP
+                        changes=request.get('changes')
+                        if not isinstance(changes,dict) or not changes or set(changes)-set(FIELD_MAP): raise ValueError('INVALID_PATCH')
+                        for v in changes.values(): finite(v,-200,5e9)
                 if op=='processing.set' and request.get('desired') not in ('RUNNING','STOPPED'): raise ValueError('INVALID_DESIRED_STATE')
                 if op=='config.patch':
                     from .helper import FIELD_MAP
@@ -157,7 +164,7 @@ class CommandManager:
             expected=a.source.raw_digest
             if not expected: raise ValueError('SETTINGS_UNAVAILABLE')
             before=now_ms()
-            result=self._helper({'op':op,'changes':r['changes'],'expected_digest':expected})
+            result=self._helper({'op':op,'origin':actor,'changes':r['changes'],'expected_digest':expected})
             self._stage(r,'VERIFYING',{'persisted':True})
             deadline=time.monotonic()+self.cfg['control']['verify_seconds']
             # File readback is NOT proof that runtime adopted arbitrary parameters.

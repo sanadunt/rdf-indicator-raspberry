@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Remove remote grants and per-action root approvals from supported Ground writes. Ground retains
+  command validation, journal, fixed-target checks, and UI confirmations; Edge does not authenticate
+  MQTT publisher identity, so broker credentials and command-topic ACLs remain the trust boundary.
+  lease. The Edge panel keeps local reboot disabled until approval and lease are active. Lifecycle
+  intent recovery preserves actor origin and audited-target checks.
+
 - Replace Ground receipt/config sync with an explicit `config.get` settings export. Edge sends
   exact native UTF-8 settings text on `settings/reported` only after a request, with verified
   TLS, QoS 1, no retention, 30 s expiry, and an 8 KiB compact-envelope limit. Ground does not
@@ -10,16 +16,15 @@
 
 - Accept settings exports only from Ground's MQTT command path; remove the Edge-local Refresh config action, which had no response consumer.
 
-- Add root-approved Ground controls, the five-field safe-settings form, and fixed
-  `t900-ppp.service` restart. Ground separates persistence from runtime proof and systemd
-  acceptance from later fresh health. Edge does not authenticate publisher identity; anonymous
-  topic access depends on broker ACL/network isolation, and plaintext exposes credentials/payloads.
+- Add direct Ground controls, a five-field safe-settings form, and fixed `t900-ppp.service`
+  restart. Ground separates persistence from runtime proof and systemd acceptance from later fresh
+  health; PPP helper readiness is checked on each request.
 
 - Publish Bulk Angular without a Ground application confirmation. The retired
   `telemetry.require_ground_receipt_for_bulk` key is no longer accepted; remove it from existing
   config because strict validation rejects unknown fields.
 
-- Default setup to `rdfsdr.service` for SDR lifecycle controls when the unit is registered; Raspberry reboot and shutdown remain separately approved host actions.
+- Default lifecycle setup to `rdfsdr.service` when registered and require an audited fixed target for Ground SDR controls; Ground reboot/shutdown retain explicit UI confirmation and durable challenges.
 
 - Publish diagnostic `doa.xml` every 3 s when available, independent of normal DoA validity.
   Ground keeps it `UNVERIFIED`, separate from live DoA and commands.
