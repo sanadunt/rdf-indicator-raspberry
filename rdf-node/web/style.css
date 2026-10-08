@@ -117,10 +117,11 @@ header{height:28px;padding:0 8px 0 10px;display:flex;align-items:center;justify-
 .rows b.good::before,.rows b.warn::before,.rows b.bad::before{content:'';flex:0 0 7px;width:7px;height:7px;border-radius:50%;background:currentColor}
 #config .pagetitle{height:40px}
 .configrows .row{height:29px}
-.configbuttons{display:grid;grid-template-columns:repeat(3,1fr);height:44px;gap:8px;margin:6px 0 4px}
-.configbuttons button{display:flex;align-items:center;justify-content:center;gap:7px;font-size:13.5px;font-weight:600}
+.configbuttons{display:grid;grid-template-columns:repeat(4,1fr);height:46px;gap:6px;margin:6px 0 3px}
+.configbuttons button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0 4px;font-size:11.5px;font-weight:600;white-space:nowrap}
 .configbuttons svg,nav svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
-.configbuttons svg{width:18px;height:18px;color:var(--accent)}
+.configbuttons svg{width:17px;height:17px;color:var(--accent)}
+#blankbtn svg{color:var(--dim)}
 .hint{font-size:11px;color:var(--dim);margin:3px 0;line-height:14px;overflow-wrap:anywhere;max-height:42px;overflow:hidden}
 #configreason{max-height:28px}
 
@@ -209,6 +210,8 @@ nav button[data-alert="bad"]::before{background:var(--bad)}
 
 /* MQTT settings + on-screen keyboard */
 .mqtt-settings-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:3px 8px;margin:5px 0}
+.mqtt-group{grid-column:1/-1;display:flex;align-items:center;gap:6px;margin:6px 0 1px;font-size:10.5px;letter-spacing:.6px;text-transform:uppercase;color:var(--dim)}
+.mqtt-group .ico{width:14px;height:14px;color:var(--accent)}
 .mqtt-settings-field{display:grid;gap:2px;min-width:0;color:var(--dim);font-size:10px}
 .dialog .mqtt-settings-fields input,.dialog .mqtt-settings-fields select{height:38px;margin:1px 0;padding:5px 8px;font-size:13px;border-color:var(--faint)}
 .dialog.keyboard-open{max-height:100%;padding:4px}
@@ -254,7 +257,59 @@ nav button[data-alert="bad"]::before{background:var(--bad)}
 .focus-alert:empty{display:none}
 .focus-exit{margin-top:6px;font-size:9.5px;color:var(--faint);text-transform:none;letter-spacing:.2px}
 
-#blank{position:absolute;inset:0;background:#000;z-index:20;display:flex;align-items:center;justify-content:center;color:#67717d;font-size:12px}
+/* Icons created by app.js */
+.ico{width:16px;height:16px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.ico.bad{color:var(--bad)}
+.row label{display:flex;align-items:center;gap:7px}
+.row label .ico{width:15px;height:15px;color:var(--faint)}
+.smallbtn{display:inline-flex;align-items:center;justify-content:center;gap:6px}.smallbtn .ico{width:15px;height:15px}
+#modaltitle{display:flex;align-items:center;gap:8px}#modaltitle .ico{width:19px;height:19px;color:var(--accent)}#modaltitle .ico.bad{color:var(--bad)}
+#closemodal{display:inline-flex;align-items:center;justify-content:center}
+.dialog .actions button{display:inline-flex;align-items:center;justify-content:center;gap:7px}
+.dialog .actions .ico{width:17px;height:17px}
+.dialog .actions .secondary{flex:0 1 110px;color:var(--dim);background:transparent}
+.dialog .actions .primary{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.dialog-section{margin:2px 0 8px}
+.dialog-section h4{display:flex;align-items:center;gap:6px;margin:4px 0;font-size:10.5px;letter-spacing:.7px;text-transform:uppercase;color:var(--dim)}
+.dialog-section h4 .ico{width:14px;height:14px}
+.dialog .actions.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:0}
+.dialog .actions.grid2 button{height:42px;justify-content:flex-start;padding:0 12px}
+.dialog-section .hint{margin-top:5px}
+/* Profile options */
+.option-list{display:flex;flex-direction:column;gap:6px;margin-top:4px}
+.option{display:flex;flex-direction:column;align-items:flex-start;gap:2px;min-height:50px;padding:7px 12px;text-align:left}
+.option.on{border-color:var(--accent);background:var(--accent-soft)}
+.option-head{display:flex;align-items:center;gap:7px;font-size:13.5px;font-weight:700}
+.option-head .ico{color:var(--accent)}
+.option-head em{font-style:normal;font-size:9.5px;letter-spacing:.6px;padding:1px 6px;border-radius:8px;color:var(--accent);border:1px solid var(--accent)}
+.option small{font-size:11px;line-height:14px;text-transform:none;letter-spacing:0;font-weight:500}
+/* Display preferences */
+.pref-group{margin:1px 0 6px}
+.pref-caption{display:flex;align-items:center;gap:6px;margin-bottom:2px;font-size:10px;font-weight:700;letter-spacing:.6px;text-transform:uppercase;color:var(--dim);white-space:nowrap;overflow:hidden}
+.pref-caption .ico{width:14px;height:14px}
+.chips{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:5px}
+.chip{height:35px;display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:0 6px;font-size:12.5px;font-weight:600;color:var(--dim)}
+.chip.on{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+.chip .ico{width:15px;height:15px}
+.swatch{width:12px;height:12px;border-radius:50%;flex-shrink:0}.swatch-teal{background:#74d9e4}.swatch-blue{background:#85b8ff}.swatch-amber{background:#ffd078}
+.font-serif{font-family:Georgia,"Times New Roman",serif}.font-mono{font-family:ui-monospace,"DejaVu Sans Mono",monospace}.font-system{font-family:system-ui,sans-serif}
+/* Frequency keypad */
+.freq-layout{display:grid;grid-template-columns:minmax(0,1fr) 186px;gap:10px;align-items:start;margin-top:2px}
+.freq-side{display:flex;flex-direction:column;gap:4px;min-width:0}
+.freq-readout{display:flex;align-items:baseline;gap:5px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface);min-width:0}
+.freq-readout strong{font-size:28px;line-height:32px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.freq-readout strong.dim{color:var(--dim)}
+.freq-readout span{font-size:12px;color:var(--dim);font-weight:600}
+.freq-side .actions{flex-direction:column;margin-top:2px}
+.freq-side .actions button,.dialog .freq-side .actions .secondary{flex:0 0 42px;height:42px;width:100%}
+.freq-pad{display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(4,44px);gap:5px}
+.freq-pad button{height:44px;font-size:18px;font-weight:600;font-variant-numeric:tabular-nums}
+.freq-pad .ico{width:20px;height:20px;margin:auto}
+
+#blank{position:absolute;inset:0;background:#000;z-index:20;display:flex;align-items:center;justify-content:center;cursor:pointer}
+.blank-hint{display:flex;align-items:center;gap:8px;color:#4b5563;font-size:12px;animation:blank-hint 4s ease-in forwards}
+.blank-hint svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+@keyframes blank-hint{0%,60%{opacity:1}100%{opacity:0}}
 
 /* Narrow fallback (the kiosk itself is 480 wide) */
 @media(max-width:420px){

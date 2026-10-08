@@ -10,7 +10,38 @@ const pppProbeNames={UNKNOWN:'BELUM DICEK',NO_INTERFACE:'TANPA INTERFACE',REPLY:
 function label(id,text,code){const el=$(id);if(!el)return;el.textContent=text;el.classList.remove('good','warn','bad','neutral');el.classList.add(good.includes(code)?'good':bad.includes(code)?'bad':code?'warn':'neutral');}
 function fmt(v,dec=1){return typeof v==='number'&&Number.isFinite(v)?v.toFixed(dec):'--';}
 function age(ms){return typeof ms==='number'?`${fmt(ms/1000)} dtk`:'--';}
-function row(label,value,code){const r=document.createElement('div');r.className='row';const l=document.createElement('label');l.textContent=label;const v=document.createElement('b');v.textContent=String(value??'--');if(code)v.className=good.includes(code)?'good':bad.includes(code)?'bad':'warn';r.append(l,v);return r;}
+// Stroke icons on a 24-unit grid, drawn as single paths so they inherit currentColor.
+const ICONS={
+ lock:'M7 11V7a5 5 0 0 1 10 0v4M5 11h14v10H5z',unlock:'M7 11V7a5 5 0 0 1 9.6-2M5 11h14v10H5z',
+ play:'M7 4v16l13-8z',stop:'M6 6h12v12H6z',restart:'M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5',power:'M12 3v8M6.3 7.5a8 8 0 1 0 11.4 0',
+ wave:'M2 12c2.5-7 4.5-7 7 0s4.5 7 7 0 3-4.5 6-4.5',moon:'M20 14.5A8.5 8.5 0 1 1 9.5 4 6.5 6.5 0 0 0 20 14.5z',
+ sun:'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4',
+ eye:'M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12zM12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6z',warn:'M12 3 2 20h20zM12 10v4M12 17v.5',
+ plug:'M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0zM12 17v5',chain:'M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1',
+ radar:'M12 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 4.9a10 10 0 0 0 0 14.2M19.1 4.9a10 10 0 0 1 0 14.2',
+ cloud:'M7 19h10a4.5 4.5 0 0 0 .6-9A6 6 0 0 0 6 11.5 3.8 3.8 0 0 0 7 19z',updown:'M7 20V4M4 7l3-3 3 3M17 4v16M14 17l3 3 3-3',
+ activity:'M3 12h4l3-7 4 14 3-7h4',pause:'M8 5v14M16 5v14',layers:'M12 3 2 8l10 5 10-5zM2 13l10 5 10-5',
+ xcircle:'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9 9l6 6M15 9l-6 6',cpu:'M6 6h12v12H6zM9.5 9.5h5v5h-5zM9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4',
+ sync:'M4 12a8 8 0 0 1 13.7-5.7L20 8M20 4v4h-4M20 12a8 8 0 0 1-13.7 5.7L4 16M4 20v-4h4',film:'M4 5h16v14H4zM8 5v14M16 5v14',
+ clock:'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM12 7v5l3 2',thermo:'M14 14.8V5a2 2 0 0 0-4 0v9.8a4 4 0 1 0 4 0z',bolt:'M13 2 4 14h7l-1 8 9-12h-7z',
+ gauge:'M4 18a8 8 0 1 1 16 0M12 18l4-5',pin:'M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11zM12 7.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z',
+ folder:'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',shield:'M12 3 4 6v6c0 5 3.4 8.4 8 9 4.6-.6 8-4 8-9V6z',
+ hash:'M5 9h14M5 15h14M10 3 8 21M16 3l-2 18',screenoff:'M3 5h18v12H3zM8 21h8M12 17v4M2 2l20 20',type:'M4 7V4h16v3M9 20h6M12 4v16',
+ drop:'M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z',check:'M5 12l5 5 9-10',sliders:'M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M16 4v4M10 10v4M18 16v4',
+ backspace:'M9 5h11v14H9l-6-7zM12 9l5 6M17 9l-5 6'
+};
+function icon(name,extra=''){
+ const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');svg.setAttribute('focusable','false');
+ svg.setAttribute('class',`ico${extra?` ${extra}`:''}`);const path=document.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('d',ICONS[name]||'');svg.append(path);return svg;
+}
+// Rewrites a button only when its label changes, so a periodic render never swaps the node a
+// finger is currently pressing.
+function setButtonLabel(button,label,iconName){
+ if(!button||button.dataset.label===label)return;
+ button.dataset.label=label;const span=document.createElement('span');span.textContent=label;
+ button.replaceChildren(...(iconName?[icon(iconName)]:[]),span);
+}
+function row(label,value,code,iconName){const r=document.createElement('div');r.className='row';const l=document.createElement('label');if(iconName)l.append(icon(iconName));l.append(label);const v=document.createElement('b');v.textContent=String(value??'--');if(code)v.className=good.includes(code)?'good':bad.includes(code)?'bad':'warn';r.append(l,v);return r;}
 function rows(id,values){const e=$(id);e.replaceChildren(...values.map(v=>row(...v)));}
 const mqttTopics=[
  ['KELUAR / RASPBERRY -> GROUND',[
@@ -202,7 +233,7 @@ function renderData(s){
  const l=s.link||{};
  const control=l.mqtt_control||{},bulk=l.mqtt_bulk||{};
  label('mqttclients',`${control.state||'DISABLED'} / ${bulk.state||'DISABLED'}`,mqttPairState(l));
- if($('mqttsettings'))$('mqttsettings').textContent=authenticated?'Atur':'Login';
+ setButtonLabel($('mqttsettings'),authenticated?'Atur':'Login',authenticated?'sliders':'lock');
  const node=s.node_id||'--',prefix=`${s.mode==='DEMO'?'sdr/demo/v2':'sdr/v2'}/${node}/`;
  if(prefix!==renderedTopicPrefix){renderedTopicPrefix=prefix;$('topicprefix').textContent=prefix;renderTopicList();}
  updateTopicStatuses(l.mqtt_topic_delivery||{});
@@ -275,14 +306,14 @@ function render(s){
  $('focusage').textContent=$('age').textContent;$('focusfreq').textContent=$('freq').textContent;
  label('focusppp',`PPP ${l.ppp||'--'}`,l.ppp);label('focusmqtt',`MQTT ${l.mqtt_control?.state||'DISABLED'}`,l.mqtt_control?.state);label('focusdaq',`DAQ ${q.state==='HEALTHY'?'SINKRON':q.state||'UNKNOWN'}`,q.state);
  $('focusalert').textContent=a?a.text:'';$('focusalert').className=`focus-alert ${a?(a.severity==='error'?'bad':'warn'):''}`;
- if(!linkData){rows('linkrows',[["T900 USB",l.usb,l.usb],["PPP / interface",`${l.ppp||'--'} / ${l.interface||'--'}`,l.ppp],[`Ping ${l.ppp_peer||'peer'}`,pppProbeNames[l.ppp_probe]||'BELUM DICEK',l.ppp_probe],["MQTT CTRL / BULK",`${l.mqtt_control?.state||'--'} / ${l.mqtt_bulk?.state||'--'}`,mqttPairState(l)],["TX / RX (PPP/IP)",`${fmt(l.tx_kbit_s,2)} / ${fmt(l.rx_kbit_s,2)} kbit/s`]]);}
- else rows('linkrows',[["Profil diminta",l.profile],["Grafik pause",l.bulk_pause||'STREAMING'],["Queue CTRL / BULK",`${l.mqtt_control?.depth||0} / ${l.mqtt_bulk?.depth||0}`],["Parse / angular drop",`${d.parse_errors||0} / ${l.angular_aborted||0}`]]);
+ if(!linkData){rows('linkrows',[["T900 USB",l.usb,l.usb,'plug'],["PPP / interface",`${l.ppp||'--'} / ${l.interface||'--'}`,l.ppp,'chain'],[`Ping ${l.ppp_peer||'peer'}`,pppProbeNames[l.ppp_probe]||'BELUM DICEK',l.ppp_probe,'radar'],["MQTT CTRL / BULK",`${l.mqtt_control?.state||'--'} / ${l.mqtt_bulk?.state||'--'}`,mqttPairState(l),'cloud'],["TX / RX (PPP/IP)",`${fmt(l.tx_kbit_s,2)} / ${fmt(l.rx_kbit_s,2)} kbit/s`,'','updown']]);}
+ else rows('linkrows',[["Profil diminta",l.profile,'','activity'],["Grafik pause",l.bulk_pause||'STREAMING','','pause'],["Queue CTRL / BULK",`${l.mqtt_control?.depth||0} / ${l.mqtt_bulk?.depth||0}`,'','layers'],["Parse / angular drop",`${d.parse_errors||0} / ${l.angular_aborted||0}`,'','xcircle']]);
  const syn=q.sync||{},syncFlags=[syn.frame,syn.sample_delay,syn.iq];
  const syncCode=syncFlags.every(flag=>flag===true)?'SYNCED':syncFlags.includes(false)?'DEGRADED':'UNKNOWN';
- if(!hostPage) rows('sysrows',[["Engine / desired",`${p.observed||'--'} / ${p.desired||'BELUM DIAMBIL'}`,p.observed==='RUNNING'?'HEALTHY':p.observed],["Frame / Delay / IQ",`${syn.frame??'?'} / ${syn.sample_delay??'?'} / ${syn.iq??'?'}`,syncCode],["Frame / progress",`${q.frame_index??'--'} / ${q.frame_progressing?'MAJU':'BELUM'}`,q.frame_progressing?'HEALTHY':'UNKNOWN'],["Drop total / delta",`${q.dropped_frames??'--'} / ${q.drop_delta??'--'}`],["DAQ umur / USB SDR",`${age(q.source_age_ms)} / ${h.usb_count??'--'} terdeteksi`]]);
- else rows('sysrows',[["CPU / RAM",`${fmt(h.cpu_percent)}% / ${fmt(h.memory_percent)}%`],["Suhu / disk kosong",`${fmt(h.temperature_c)} C / ${fmt(h.disk_free_percent)}%`],["Throttle / under-voltage",`${h.throttled??'unknown'} / ${h.undervoltage??'unknown'}`],["Uptime",h.uptime_s==null?'--':`${Math.floor(h.uptime_s/60)} menit`],["Jam sistem",h.clock_state,h.clock_state]]);
- rows('configrows',[["Node / profil",`${s.node_id||'--'} / ${c.profile||'--'}`],["Source / MQTT",`${c.source_configured?'OK':'SETUP'} / ${c.mqtt_configured?'CONFIGURED':'OFF'}`],["RF revision / proof",`${c.sdr_revision??'--'} / ${c.proof||'--'}`],["Akses / helper",`${authenticated?'ADMIN':'READ ONLY'} / ${s.capabilities?.helper_available?'SIAP':'OFF'}`]]);
- $('admin').textContent=authenticated?'Logout':'Login';$('adminchip').hidden=!authenticated;
+ if(!hostPage) rows('sysrows',[["Engine / desired",`${p.observed||'--'} / ${p.desired||'BELUM DIAMBIL'}`,p.observed==='RUNNING'?'HEALTHY':p.observed,'cpu'],["Frame / Delay / IQ",`${syn.frame??'?'} / ${syn.sample_delay??'?'} / ${syn.iq??'?'}`,syncCode,'sync'],["Frame / progress",`${q.frame_index??'--'} / ${q.frame_progressing?'MAJU':'BELUM'}`,q.frame_progressing?'HEALTHY':'UNKNOWN','film'],["Drop total / delta",`${q.dropped_frames??'--'} / ${q.drop_delta??'--'}`,'','xcircle'],["DAQ umur / USB SDR",`${age(q.source_age_ms)} / ${h.usb_count??'--'} terdeteksi`,'','clock']]);
+ else rows('sysrows',[["CPU / RAM",`${fmt(h.cpu_percent)}% / ${fmt(h.memory_percent)}%`,'','gauge'],["Suhu / disk kosong",`${fmt(h.temperature_c)} C / ${fmt(h.disk_free_percent)}%`,'','thermo'],["Throttle / under-voltage",`${h.throttled??'unknown'} / ${h.undervoltage??'unknown'}`,'','bolt'],["Uptime",h.uptime_s==null?'--':`${Math.floor(h.uptime_s/60)} menit`,'','power'],["Jam sistem",h.clock_state,h.clock_state,'clock']]);
+ rows('configrows',[["Node / profil",`${s.node_id||'--'} / ${c.profile||'--'}`,'','pin'],["Source / MQTT",`${c.source_configured?'OK':'SETUP'} / ${c.mqtt_configured?'CONFIGURED':'OFF'}`,'','folder'],["RF revision / proof",`${c.sdr_revision??'--'} / ${c.proof||'--'}`,'','hash'],["Akses / helper",`${authenticated?'ADMIN':'READ ONLY'} / ${s.capabilities?.helper_available?'SIAP':'OFF'}`,'','shield']]);
+ setButtonLabel($('admin'),authenticated?'Logout':'Login',authenticated?'unlock':'lock');$('adminchip').hidden=!authenticated;
  $('configreason').textContent='Kontrol lokal memerlukan approval root satu kali; aksi tetap meminta PIN Admin dan konfirmasi layar.';
  const prefs={theme:'dark',accent:'teal',font:'system',...(c.preferences||{})};
  document.body.classList.toggle('light',prefs.theme==='light');document.body.classList.toggle('night',prefs.theme==='night');
@@ -363,7 +394,13 @@ async function keepAdminSessionAlive(){
  finally{adminSessionRefreshPending=false;}
 }
 setInterval(keepAdminSessionAlive,ADMIN_SESSION_CHECK_MS);
-setInterval(()=>{const stale=Date.now()-lastProgress>5000;$('stale').hidden=!stale;if(stale)$('stalereason').textContent=Date.now()-lastApi>5000?'API lokal tidak merespons.':'API hidup, snapshot tidak bergerak.';const sec=snapshot.config?.preferences?.blank_after_seconds||0;if(sec>0&&Date.now()-lastTouch>sec*1000&&!snapshot.active_alerts?.some(x=>x.severity==='error'))$('blank').hidden=false;},250);
+// Black screen: an overlay only (the backlight stays under OS control). Any tap wakes it and
+// that tap is swallowed; a new error alert that appears while black wakes it automatically.
+let blankErrors=new Set();
+function errorAlertCodes(){return new Set((snapshot.active_alerts||[]).filter(alert=>alert.severity==='error').map(alert=>alert.code||alert.text));}
+function enterBlank(){blankErrors=errorAlertCodes();$('blank').hidden=false;}
+function wakeScreen(){if($('blank').hidden)return false;$('blank').hidden=true;lastTouch=Date.now();void refreshSpectrum(snapshot);return true;}
+setInterval(()=>{const stale=Date.now()-lastProgress>5000;$('stale').hidden=!stale;if(stale)$('stalereason').textContent=Date.now()-lastApi>5000?'API lokal tidak merespons.':'API hidup, snapshot tidak bergerak.';const sec=snapshot.config?.preferences?.blank_after_seconds||0,errors=errorAlertCodes();if($('blank').hidden){if(sec>0&&Date.now()-lastTouch>sec*1000&&!errors.size)enterBlank();}else if([...errors].some(code=>!blankErrors.has(code)))wakeScreen();},250);
 const tabOrder=Array.from(document.querySelectorAll('nav button'),button=>button.dataset.tab);
 function selectTab(tab,direction=0){
  for(const page of document.querySelectorAll('.page')){
@@ -401,7 +438,7 @@ function segmented(id,onChange){
 }
 segmented('linkpage',value=>{linkData=value;render(snapshot);});
 segmented('syspage',value=>{hostPage=value;$('systitle').textContent=hostPage?'RASPBERRY / HOST':'RDF / DAQ';render(snapshot);});
-function modal(title){if(mqttKeyboardDismiss){mqttKeyboardDismiss(false);mqttKeyboardDismiss=null;}const dialog=$('modal').querySelector('.dialog');dialog.querySelector('.dialoghead').append($('closemodal'));dialog.classList.remove('keyboard-open');$('modalbody').classList.remove('keyboard-open');modalReturnFocus=document.activeElement;pinKeyHandler=null;$('modaltitle').textContent=title;$('modalbody').replaceChildren();$('modalmsg').textContent='';$('modal').hidden=false;return $('modalbody');}
+function modal(title,iconName='',tone=''){if(mqttKeyboardDismiss){mqttKeyboardDismiss(false);mqttKeyboardDismiss=null;}const dialog=$('modal').querySelector('.dialog');dialog.querySelector('.dialoghead').append($('closemodal'));dialog.classList.remove('keyboard-open');$('modalbody').classList.remove('keyboard-open');modalReturnFocus=document.activeElement;pinKeyHandler=null;$('modaltitle').replaceChildren(...(iconName?[icon(iconName,tone)]:[]),title);$('modalbody').replaceChildren();$('modalmsg').textContent='';$('modal').hidden=false;return $('modalbody');}
 function dismissModal(){if(mqttKeyboardDismiss)mqttKeyboardDismiss(false);$('modal').hidden=true;pinKeyHandler=null;const target=modalReturnFocus;modalReturnFocus=null;if(target&&typeof target.focus==='function')target.focus();}
 $('closemodal').onclick=dismissModal;
 function modalKeydown(event){
@@ -419,11 +456,18 @@ function modalKeydown(event){
 }
 document.addEventListener('keydown',modalKeydown);
 function text(parent,s){const p=document.createElement('p');p.textContent=s;parent.append(p);return p;}
-function action(parent,label,fn,danger=false){let wrap=parent.querySelector('.actions');if(!wrap){wrap=document.createElement('div');wrap.className='actions';parent.append(wrap);}let b=document.createElement('button');b.textContent=label;if(danger)b.className='danger';b.onclick=async()=>{b.disabled=true;try{await fn();}catch(e){if(e.message==='AUTHENTICATION_AND_CSRF_REQUIRED'){authenticated=false;csrf=null;lastAdminSessionRefresh=0;render(snapshot);login();}else $('modalmsg').textContent=e.message;}finally{b.disabled=false;}};wrap.append(b);return b;}
+function action(parent,label,fn,danger=false,iconName=''){let wrap=parent.querySelector('.actions');if(!wrap){wrap=document.createElement('div');wrap.className='actions';parent.append(wrap);}let b=document.createElement('button');b.type='button';if(iconName)b.append(icon(iconName));const caption=document.createElement('span');caption.textContent=label;b.append(caption);if(danger)b.className='danger';b.onclick=async()=>{b.disabled=true;try{await fn();}catch(e){if(e.message==='AUTHENTICATION_AND_CSRF_REQUIRED'){authenticated=false;csrf=null;lastAdminSessionRefresh=0;render(snapshot);login();}else $('modalmsg').textContent=e.message;}finally{b.disabled=false;}};wrap.append(b);return b;}
+function cancelAction(parent){const button=action(parent,'Batal',()=>dismissModal(),false,'');button.classList.add('secondary');return button;}
+function section(parent,title,iconName,klass=''){
+ const wrap=document.createElement('section');wrap.className='dialog-section';
+ const heading=document.createElement('h4');if(iconName)heading.append(icon(iconName));heading.append(title);
+ const actions=document.createElement('div');actions.className=`actions ${klass}`.trim();
+ wrap.append(heading,actions);parent.append(wrap);return wrap;
+}
 function needLogin(){if(authenticated)return false;login();return true;}
 function login(){
  let pin='',pending=false;
- const box=modal('PIN admin lokal');text(box,'Masukkan 6 angka menggunakan keypad.');
+ const box=modal('PIN admin lokal','lock');text(box,'Masukkan 6 angka menggunakan keypad.');
  const layout=document.createElement('div');layout.className='pin-layout';
  const pad=document.createElement('div');pad.className='pin-pad';pad.setAttribute('role','group');pad.setAttribute('aria-label','Keypad PIN');
  const readout=document.createElement('div');readout.className='pin-readout';readout.setAttribute('role','img');
@@ -478,12 +522,14 @@ function mqttField(grid,title,value,type='text',placeholder='',maxLength=253){
 }
 async function openMqttSettings(){
  if(needLogin())return;
- const box=modal('Pengaturan MQTT');text(box,'Memuat pengaturan MQTT...');let settings;
+ const box=modal('Pengaturan MQTT','cloud');text(box,'Memuat pengaturan MQTT...');let settings;
  try{settings=await get('/api/v2/mqtt/settings');}
  catch(e){if(e.message==='HTTP 401'){authenticated=false;csrf=null;lastAdminSessionRefresh=0;render(snapshot);login();return;}box.replaceChildren();text(box,`Pengaturan tidak termuat: ${e.message}. Tutup lalu coba lagi.`);return;}
  box.replaceChildren();
  if(!settings.editable){text(box,'Pengaturan MQTT tidak tersedia pada mode demo.');return;}
  const grid=document.createElement('div');grid.className='mqtt-settings-fields';
+ const groupHeading=(title,iconName)=>{const heading=document.createElement('h4');heading.className='mqtt-group';heading.append(icon(iconName),title);grid.append(heading);};
+ groupHeading('Koneksi broker','cloud');
  const statusField=document.createElement('label');statusField.className='mqtt-settings-field';
  const statusCaption=document.createElement('span');statusCaption.textContent='Status MQTT';
  const enabled=document.createElement('select');enabled.setAttribute('aria-label','Status MQTT');
@@ -508,6 +554,7 @@ async function openMqttSettings(){
  const clientId=mqttField(grid,'Client ID dasar',settings.client_id,'text','rdf-node',48);
  const websocketPath=mqttField(grid,'Path WebSocket',settings.websocket_path||'/mqtt','text','/mqtt',256);
  const websocketPathField=websocketPath.closest('label');
+ groupHeading('Akun CTRL / BULK (kosongkan bila tidak diubah)','lock');
  const controlUser=mqttField(grid,'User CTRL','','text','',128);controlUser.autocomplete='off';
  const controlPassword=mqttField(grid,'Pass CTRL','','password','',512);controlPassword.autocomplete='new-password';
  const bulkUser=mqttField(grid,'User BULK','','text','',128);bulkUser.autocomplete='off';
@@ -516,7 +563,7 @@ async function openMqttSettings(){
  function updateTransportVisibility(){websocketPathField.hidden=transport.value!=='websocket';}
  transport.addEventListener('change',updateTransportVisibility);
  updateTransportVisibility();
- action(box,'Simpan',async()=>{
+ const saveButton=action(box,'Simpan',async()=>{
   const saved=await post('/api/v2/mqtt/settings',{
    enabled:enabled.value==='on',host:host.value,port:Number(port.value),client_id:clientId.value,
    transport:transport.value,tls:tls.value==='on',websocket_path:websocketPath.value,
@@ -526,7 +573,8 @@ async function openMqttSettings(){
   controlUser.value='';controlPassword.value='';bulkUser.value='';bulkPassword.value='';
   $('modalmsg').textContent=saved.apply_pending?'Tersimpan; koneksi MQTT diperbarui. Tunggu telemetry dan source evidence yang baru.':'Tersimpan.';
   renderData(snapshot);
- });
+ },false,'check');
+ saveButton.classList.add('primary');
  const entries=[
   {key:'host',name:'IP / host',input:host,field:host.closest('label')},
   {key:'port',name:'Port',input:port,field:port.closest('label')},
@@ -677,64 +725,135 @@ async function command(op,extras={}){
  try{const result=await post('/api/v2/commands',r);if(op==='system.shutdown.execute')result.requestId=r.id;$('modalmsg').textContent=`${result.stage}: ${result.id||''}`;return result;}
  catch(error){if(op!=='system.shutdown.execute')throw error;const failure=new Error(error.message);failure.operationId=r.id;failure.status=error.status;throw failure;}
 }
-$('profilebtn').onclick=()=>{if(needLogin())return;const box=modal('Profil telemetry');text(box,'Grafik dipause saat command berlangsung, source invalid, atau jalur Bulk belum siap.');action(box,'CONTROL',()=>command('stream.set',{profile:'control'}));action(box,'BALANCED',()=>command('stream.set',{profile:'balanced'}));action(box,'GRAPH',()=>command('stream.set',{profile:'graph_u8'}));};
+const profileChoices=[
+ ['control','CONTROL','pause','Grafik 360° ditahan; hanya DoA, health, dan kontrol. Paling hemat link.'],
+ ['balanced','BALANCED','activity','Grafik 360° minimal tiap 4 dtk, diperpanjang sesuai budget link.'],
+ ['graph_u8','GRAPH','wave','Grafik 360° minimal tiap 2 dtk; paling banyak memakai link.']
+];
+$('profilebtn').onclick=()=>{
+ if(needLogin())return;
+ const box=modal('Profil telemetry','activity'),current=snapshot.config?.profile;
+ text(box,'Grafik tetap dipause saat command berlangsung, source invalid, atau jalur Bulk belum siap.').className='hint';
+ const list=document.createElement('div');list.className='option-list';box.append(list);
+ for(const [value,name,iconName,description] of profileChoices){
+  const button=document.createElement('button');button.type='button';button.className=`option${value===current?' on':''}`;
+  const head=document.createElement('span');head.className='option-head';head.append(icon(iconName),name);
+  if(value===current){const badge=document.createElement('em');badge.textContent='AKTIF';head.append(badge);}
+  const note=document.createElement('small');note.textContent=description;button.append(head,note);
+  if(value===current)button.setAttribute('aria-current','true');
+  button.onclick=async()=>{button.disabled=true;try{await command('stream.set',{profile:value});}catch(e){$('modalmsg').textContent=e.message;}finally{button.disabled=false;}};
+  list.append(button);
+ }
+};
+const preferenceGroups=[
+ ['theme','Mode','sun',[['dark','Gelap','moon'],['light','Terang','sun'],['night','Malam','eye']]],
+ ['accent','Warna aksen','drop',[['teal','Teal'],['blue','Biru'],['amber','Amber']]],
+ ['font','Jenis huruf','type',[['system','Sistem'],['serif','Serif'],['mono','Mono']]],
+ ['blank_after_seconds','Layar hitam otomatis · tidak saat alarm error','screenoff',[['0','Mati'],['60','1 mnt'],['300','5 mnt'],['900','15 mnt']]]
+];
+// Each choice saves immediately; the server still validates and returns the stored set.
 function preferences(){
  if(needLogin())return;
- const box=modal('Tampilan');text(box,'Disimpan pada perangkat. Layar tidak dipadamkan selama ada alarm error.');
+ const box=modal('Tampilan','sun');
  const current={theme:'dark',accent:'teal',font:'system',blank_after_seconds:0,...(snapshot.config?.preferences||{})};
- const grid=document.createElement('div');grid.className='preference-grid';const selects={};
- const fields=[
-  ['theme','Mode',[['dark','Gelap'],['light','Terang'],['night','Malam (merah)']]],
-  ['accent','Warna aksen',[['teal','Teal'],['blue','Biru'],['amber','Amber']]],
-  ['font','Jenis huruf',[['system','Sistem'],['serif','Serif'],['mono','Monospace']]],
-  ['blank_after_seconds','Layar padam',[['0','Tidak pernah'],['60','1 menit'],['300','5 menit'],['900','15 menit']]]
- ];
- for(const [key,label,choices] of fields){
-  const field=document.createElement('label');field.className='preference-field';
-  const caption=document.createElement('span');caption.textContent=label;
-  const select=document.createElement('select');select.setAttribute('aria-label',label);
-  for(const [value,title] of choices){const option=document.createElement('option');option.value=value;option.textContent=title;select.append(option);}
-  const value=String(current[key]);
-  if(!choices.some(([choice])=>choice===value)){const option=document.createElement('option');option.value=value;option.textContent=`${value} dtk`;select.append(option);}
-  select.value=value;field.append(caption,select);grid.append(field);selects[key]=select;
+ for(const [key,label,iconName,choices] of preferenceGroups){
+  const group=document.createElement('div');group.className='pref-group';group.setAttribute('role','group');group.setAttribute('aria-label',label);
+  const caption=document.createElement('span');caption.className='pref-caption';caption.append(icon(iconName),label);
+  const chips=document.createElement('div');chips.className='chips';
+  const options=[...choices];const value=String(current[key]);
+  if(!options.some(([choice])=>choice===value))options.push([value,`${value} dtk`]);
+  for(const [choice,title,choiceIcon] of options){
+   const chip=document.createElement('button');chip.type='button';chip.className='chip';chip.dataset.value=choice;
+   if(choiceIcon)chip.append(icon(choiceIcon));
+   if(key==='accent'){const swatch=document.createElement('i');swatch.className=`swatch swatch-${choice}`;chip.append(swatch);}
+   const name=document.createElement('span');name.textContent=title;if(key==='font')name.className=`font-${choice}`;chip.append(name);
+   const on=choice===value;chip.classList.toggle('on',on);chip.setAttribute('aria-pressed',String(on));
+   chip.onclick=async()=>{
+    if(chip.classList.contains('on'))return;
+    for(const item of chips.children)item.disabled=true;
+    try{
+     const saved=await post('/api/v2/display/preferences',{[key]:key==='blank_after_seconds'?Number(choice):choice});
+     snapshot.config={...(snapshot.config||{}),preferences:saved};render(snapshot);
+     for(const item of chips.children){const active=item===chip;item.classList.toggle('on',active);item.setAttribute('aria-pressed',String(active));}
+     $('modalmsg').textContent=`${label.split(' · ')[0]}: ${title} tersimpan.`;
+    }catch(e){if(e.message==='AUTHENTICATION_AND_CSRF_REQUIRED'){authenticated=false;csrf=null;render(snapshot);login();return;}$('modalmsg').textContent=e.message;}
+    finally{for(const item of chips.children)item.disabled=false;}
+   };
+   chips.append(chip);
+  }
+  group.append(caption,chips);box.append(group);
  }
- box.append(grid);
- action(box,'Simpan tampilan',async()=>{
-  const body={};for(const [key,select] of Object.entries(selects))body[key]=key==='blank_after_seconds'?Number(select.value):select.value;
-  const saved=await post('/api/v2/display/preferences',body);
-  snapshot.config={...(snapshot.config||{}),preferences:saved};render(snapshot);$('modalmsg').textContent='Tampilan disimpan pada perangkat.';
- });
- grid.querySelector('select')?.focus();
+ box.querySelector('.chip')?.focus();
 }
 $('themebtn').onclick=preferences;
-$('controlbtn').onclick=()=>{if(needLogin())return;const box=modal('Kontrol RDF');const caps=snapshot.capabilities||{};
- action(box,'Start SDR service',()=>command('processing.set',{desired:'RUNNING'})).disabled=!caps.processing;
- action(box,'Stop SDR service',()=>confirmOperation('STOP SDR SERVICE','processing.set',{desired:'STOPPED'}),true).disabled=!caps.processing;
- action(box,'Restart SDR service',()=>confirmOperation('RESTART SDR SERVICE','service.restart',{}),true).disabled=!caps.restart;
- const row=document.createElement('div');box.append(row);
- action(row,'Frekuensi',()=>frequency()).disabled=!caps.config_patch;
-  const reboot=action(row,'Reboot Raspberry',()=>prepareReboot(),true);
+$('controlbtn').onclick=()=>{if(needLogin())return;const box=modal('Kontrol RDF','power');const caps=snapshot.capabilities||{};
+ const sdr=section(box,'Stack SDR','cpu','grid2');
+ action(sdr,'Start',()=>command('processing.set',{desired:'RUNNING'}),false,'play').disabled=!caps.processing;
+ action(sdr,'Stop',()=>confirmOperation('Stop SDR service','processing.set',{desired:'STOPPED'}),true,'stop').disabled=!caps.processing;
+ action(sdr,'Restart',()=>confirmOperation('Restart SDR service','service.restart',{}),true,'restart').disabled=!caps.restart;
+ action(sdr,'Frekuensi',()=>frequency(),false,'wave').disabled=!caps.config_patch;
+ const host=section(box,'Raspberry','power','grid2');
+  const reboot=action(host,'Reboot',()=>prepareReboot(),true,'sync');
   reboot.disabled=!caps.reboot;
-  const rebootReason=!caps.helper_available?'Helper kontrol belum tersedia.':
-   !caps.reboot?'Reboot lokal memerlukan mode controlled dan approval root (--reboot).':'';
-  if(rebootReason){const note=text(row,rebootReason);note.className='hint';}
-  const shutdown=action(row,'Shutdown Raspberry',()=>prepareShutdown(),true);
+  const shutdown=action(host,'Shutdown',()=>prepareShutdown(),true,'power');
   shutdown.disabled=!caps.shutdown||!shutdownHistoryChecked;
   shutdown.title=!shutdownHistoryChecked?'Riwayat operasi belum tersedia.':shutdownUncertain?'Periksa Raspberry secara lokal sebelum mengulangi shutdown.':'';
+  const rebootReason=!caps.helper_available?'Helper kontrol belum tersedia.':
+   !caps.reboot?'Reboot lokal memerlukan mode controlled dan approval root (--reboot).':'';
+  if(rebootReason){const note=text(host,rebootReason);note.className='hint';}
 };
-function confirmOperation(label,op,extra){const box=modal(label);text(box,'Aksi ini mengganggu pemrosesan RDF. Bridge tetap hidup kecuali reboot OS. Pastikan kondisi operasi aman sebelum melanjutkan.');action(box,'Konfirmasi',()=>command(op,extra),true);}
-function frequency(){const box=modal('Frekuensi center + VFO0');text(box,'MHz; range dan gain mengikuti policy perangkat. File tersimpan belum berarti runtime terverifikasi.');const input=document.createElement('input');input.type='number';input.step='0.001';input.value=snapshot.detection?.frequency_hz?snapshot.detection.frequency_hz/1e6:'';box.append(input);action(box,'Apply',()=>{const hz=Math.round(Number(input.value)*1e6);if(!Number.isFinite(hz)||hz<=0)throw new Error('Frekuensi tidak valid');return command('config.patch',{changes:{center_frequency_hz:hz,vfo0_frequency_hz:hz}});});}
-async function prepareReboot(){const box=modal('Reboot Raspberry');text(box,'Node akan offline. Admin harus unlock; approval root --reboot disimpan satu kali. Konfirmasi akhir tetap diperlukan. Health berhenti selama boot.');action(box,'Prepare',async()=>{const r=await command('system.reboot.prepare');$('modalmsg').textContent='Menunggu challenge...';let op=null;for(let i=0;i<20;i++){await new Promise(r=>setTimeout(r,300));const list=await get('/api/v2/operations/latest');op=list.find(x=>x.id===r.id);if(op&&['FAILED','APPLIED','REJECTED'].includes(op.stage))break;}
+function confirmOperation(label,op,extra){const box=modal(label,'warn','bad');text(box,'Aksi ini mengganggu pemrosesan RDF. Bridge tetap hidup kecuali reboot OS. Pastikan kondisi operasi aman sebelum melanjutkan.');cancelAction(box);action(box,'Konfirmasi',()=>command(op,extra),true,'check');}
+// The kiosk has no physical keyboard, so frequency entry uses an on-screen keypad. Range and
+// policy checks stay on the Edge; this only builds a well-formed MHz number.
+function frequency(){
+ const box=modal('Frekuensi center + VFO0','wave');
+ const start=snapshot.detection?.frequency_hz?(snapshot.detection.frequency_hz/1e6).toFixed(3):'';
+ let value=start,fresh=true;
+ const layout=document.createElement('div');layout.className='freq-layout';
+ const side=document.createElement('div');side.className='freq-side';
+ const readout=document.createElement('div');readout.className='freq-readout';readout.setAttribute('role','status');readout.setAttribute('aria-live','polite');
+ const number=document.createElement('strong'),unit=document.createElement('span');unit.textContent='MHz';readout.append(number,unit);
+ const note=document.createElement('p');note.className='hint';note.textContent='Center dan VFO0 diset sama. File tersimpan belum berarti runtime terverifikasi.';
+ side.append(readout,note);
+ const pad=document.createElement('div');pad.className='freq-pad';pad.setAttribute('role','group');pad.setAttribute('aria-label','Keypad frekuensi');
+ function refresh(){number.textContent=value||'--';number.classList.toggle('dim',fresh);apply.disabled=!/^\d{1,4}(\.\d{1,6})?$/.test(value)||Number(value)<=0;}
+ function press(key){
+  if(fresh&&key!=='back'){value='';fresh=false;}
+  if(key==='back'){fresh=false;value=value.slice(0,-1);}
+  else if(key==='clear')value='';
+  else if(key==='.'){if(!value.includes('.'))value=(value||'0')+'.';}
+  else if(value.replace('.','').length<10&&!(value.includes('.')&&value.split('.')[1].length>=6))value=value==='0'?key:value+key;
+  refresh();
+ }
+ for(const key of ['1','2','3','4','5','6','7','8','9','.','0','back']){
+  const button=document.createElement('button');button.type='button';
+  if(key==='back'){button.append(icon('backspace'));button.setAttribute('aria-label','Hapus angka terakhir');}else button.textContent=key;
+  button.onclick=()=>press(key);pad.append(button);
+ }
+ layout.append(side,pad);box.append(layout);
+ const clear=action(side,'Kosong',()=>press('clear'),false,'xcircle');clear.classList.add('secondary');
+ const apply=action(side,'Terapkan',()=>{const hz=Math.round(Number(value)*1e6);if(!Number.isFinite(hz)||hz<=0)throw new Error('Frekuensi tidak valid');return command('config.patch',{changes:{center_frequency_hz:hz,vfo0_frequency_hz:hz}});},false,'check');
+ apply.classList.add('primary');
+ pinKeyHandler=event=>{
+  if(/^[0-9.]$/.test(event.key)){event.preventDefault();press(event.key);}
+  else if(event.key==='Backspace'){event.preventDefault();press('back');}
+  else if(event.key==='Delete'){event.preventDefault();press('clear');}
+  else if(event.key==='Enter'&&!apply.disabled){event.preventDefault();apply.click();}
+ };
+ refresh();pad.querySelector('button')?.focus();
+}
+async function prepareReboot(){const box=modal('Reboot Raspberry','sync','bad');text(box,'Node akan offline. Admin harus unlock; approval root --reboot disimpan satu kali. Konfirmasi akhir tetap diperlukan. Health berhenti selama boot.');cancelAction(box);action(box,'Siapkan reboot',async()=>{const r=await command('system.reboot.prepare');$('modalmsg').textContent='Menunggu challenge...';let op=null;for(let i=0;i<20;i++){await new Promise(r=>setTimeout(r,300));const list=await get('/api/v2/operations/latest');op=list.find(x=>x.id===r.id);if(op&&['FAILED','APPLIED','REJECTED'].includes(op.stage))break;}
  // Challenges are deliberately not returned by public history. A local reboot is
  // issued through authenticated command result access (private endpoint below).
  const result=await post('/api/v2/operation/result',{id:r.id});
  if(result.stage!=='APPLIED'||!result.result?.challenge)throw new Error(result.result?.error||'Challenge belum tersedia');
- const cbox=modal('Konfirmasi reboot OS');text(cbox,'Konfirmasi dalam 30 detik. Reboot mulai setelah hasil dijurnal.');action(cbox,'REBOOT SEKARANG',()=>command('system.reboot.execute',{prepare_id:r.id,challenge:result.result.challenge}),true);
- });}
+ const cbox=modal('Konfirmasi reboot OS','warn','bad');text(cbox,'Konfirmasi dalam 30 detik. Reboot mulai setelah hasil dijurnal.');cancelAction(cbox);action(cbox,'REBOOT SEKARANG',()=>command('system.reboot.execute',{prepare_id:r.id,challenge:result.result.challenge}),true,'sync');
+ },true,'sync');}
 async function prepareShutdown(){
- const box=modal('Shutdown Raspberry');
+ const box=modal('Shutdown Raspberry','power','bad');
  text(box,'Raspberry akan dimatikan sepenuhnya; akses lokal diperlukan untuk menyalakannya lagi. Fitur memerlukan Admin PIN dan approval root --shutdown yang disimpan satu kali.');
- action(box,'Prepare',async()=>{
+ cancelAction(box);
+ action(box,'Siapkan shutdown',async()=>{
   if(readShutdownUncertainty())setShutdownUncertainty(true);
   try{await checkShutdownHistory(true);}catch{$('modalmsg').textContent='Status shutdown tidak tersedia; permintaan tidak dikirim.';return;}
   if(shutdownUncertain&&!confirm('Hasil shutdown sebelumnya belum pasti. Periksa status Raspberry lokal. Jika intent tidak aktif, jalankan sudo rdf-node controls shutdown-reconcile pada Pi; helper menolak bila unit masih aktif. Lanjutkan?'))return;
@@ -747,8 +866,9 @@ async function prepareShutdown(){
   if(result?.stage!=='APPLIED'||!result.result?.challenge){$('modalmsg').textContent=result?.result?.error||'Challenge shutdown belum tersedia setelah menunggu helper.';return;}
   try{await checkShutdownHistory(true);}catch{$('modalmsg').textContent='Status shutdown berubah/tidak tersedia; execute tidak dikirim.';return;}
   if(shutdownUncertain&&!confirm('Ada shutdown terdahulu yang belum pasti. Periksa Raspberry lokal dan rekonsiliasi intent hanya bila unit systemd tidak aktif. Lanjutkan?'))return;
-  const cbox=modal('Konfirmasi shutdown OS');
+  const cbox=modal('Konfirmasi shutdown OS','warn','bad');
   text(cbox,'Pi akan mati dalam 5 detik setelah jadwal diterima. Tidak ada bukti OS sudah berhenti; nyalakan kembali secara lokal.');
+  cancelAction(cbox);
   action(cbox,'SHUTDOWN PI SEKARANG',async()=>{
    const executeId=`local-${Date.now()}-${crypto.randomUUID().slice(0,8)}`;
    setShutdownUncertainty(true);
@@ -758,8 +878,10 @@ async function prepareShutdown(){
    if(sent.id!==executeId){await showShutdownOutcome(null,'OUTCOME_UNKNOWN','ID operasi tidak cocok');return;}
    const outcome=await shutdownOutcome(executeId);
    await showShutdownOutcome(outcome,outcome?'OUTCOME_UNKNOWN':'ACK_TIMEOUT');
-  },true);
- });
+  },true,'power');
+ },true,'power');
 }
-document.addEventListener('pointerdown',()=>{lastTouch=Date.now();$('blank').hidden=true;});document.addEventListener('keydown',()=>{lastTouch=Date.now();$('blank').hidden=true;});
+document.addEventListener('pointerdown',()=>{lastTouch=Date.now();if(wakeScreen()){swallowClick=true;setTimeout(()=>{swallowClick=false;},400);}},true);
+document.addEventListener('keydown',event=>{lastTouch=Date.now();if(wakeScreen())event.stopImmediatePropagation();},true);
+$('blankbtn').onclick=()=>enterBlank();
 get('/api/v2/session').then(s=>{if(authenticated)return;authenticated=s.authenticated;csrf=s.csrf;lastAdminSessionRefresh=Date.now();render(snapshot);}).catch(()=>{});poll();

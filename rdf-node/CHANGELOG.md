@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Edge panel black screen: `Config > Layar hitam` blanks immediately; the automatic timeout is a
+  tap-to-choose setting (off, 1, 5, 15 min). The overlay is pure black with a hint that fades out,
+  the waking tap is swallowed so it cannot press a control underneath, and a new error alert wakes
+  the screen. Tidied dialogs: icons throughout, Profil options with descriptions and the active
+  profile marked, Kontrol grouped into Stack SDR and Raspberry, Batal on every destructive
+  confirmation, Tampilan as tap-to-save chips, grouped MQTT settings, and an on-screen numeric
+  keypad for frequency entry (the kiosk has no physical keyboard). Link, Sistem, and Config rows
+  gain icons.
+
 - Edge panel: fading trail of recent gate-valid bearings on the dial (cleared on any invalid
   sample or new session); colour-grouped stage chip for the last operation with a short toast on
   terminal stages (stage codes stay verbatim, so `PERSISTED_UNVERIFIED` remains amber); warn/bad
