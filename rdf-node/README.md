@@ -314,32 +314,26 @@ Untuk menyiapkan target lifecycle dan gate panel lokal, jalankan dari terminal R
 
 ```bash
 sudo rdf-node setup --engine-unit rdfsdr.service
-sudo rdf-node controls approve --lifecycle --shutdown
+sudo rdf-node controls approve --lifecycle --ppp-restart --reboot --shutdown
 ```
 
-Approval meminta `APPROVE`, `AUDITED`, dan `SHUTDOWN`; `--lifecycle` menyiapkan target Ground
-yang fixed/audited, sementara `--shutdown` mengatur gate panel Edge lokal. Ground tidak memakai
-approval root per command; target setup tetap diperlukan untuk settings/lifecycle.
+Approval meminta `APPROVE`, `AUDITED`, `T900 PPP RESTART`, `REBOOT`, dan `SHUTDOWN`; PPP
+melakukan preflight unit. `--lifecycle` menyiapkan target Ground yang fixed/audited, sementara flag
+lain mengatur gate panel Edge lokal. Ground tidak memakai approval root per command.
 
-Untuk Start/Stop/Restart stack, PPP restart, reboot, atau shutdown dari panel Edge lokal, buka lease
-maintenance dari sesi Raspberry tepercaya:
+Approval root tersimpan di helper policy/config dan berlaku lintas reboot. `--lifecycle`,
+`--ppp-restart`, `--reboot`, dan `--shutdown` mengaktifkan aksi Edge terkait; setelah provisioning,
+aksi ini tidak memerlukan timed lease atau `sudo` per aksi. Settings memakai approval
+single-writer `--settings` yang terpisah.
 
-```bash
-sudo rdf-node controls maintenance-open --seconds 300
-```
-
-Lease maintenance berlaku 30..900 detik untuk Start/Stop/Restart, PPP restart, reboot, dan
-shutdown lokal Edge. Gate reboot lokal diaktifkan dengan
-`sudo rdf-node controls approve --reboot`. Ground tidak memakai gate approval atau lease root lokal.
-
-Panel Config -> Login -> Kontrol menggunakan manager yang sama dengan Ground.
-Start/Stop/Restart mengelola seluruh unit `link.engine_service` yang disetujui (`rdfsdr.service`
-untuk konfigurasi ini), bukan `rdf-edge.service` atau unit PPP.
-Reboot lokal Edge memerlukan sesi Admin aktif, `controls approve --reboot`, dan maintenance lease.
-Prepare/Execute, challenge satu kali 30 detik, dan jurnal durable tetap berlaku. Reboot Ground tidak
-memerlukan approval root atau lease lokal, tetapi tetap memakai challenge dan konfirmasi UI.
-Shutdown lokal tetap memerlukan lease dan approval; Ground memakai konfirmasi UI dan challenge
-tanpa approval root.
+Panel Config -> Login -> Kontrol memerlukan sesi Admin dengan PIN. Start/Stop/Restart mengelola
+unit `link.engine_service` yang fixed dan audited (`rdfsdr.service` untuk konfigurasi ini), bukan
+`rdf-edge.service` atau unit PPP.
+Reboot lokal memerlukan approval `--reboot`, challenge satu kali 30 detik, jurnal durable, dan
+konfirmasi akhir pada layar. Ground reboot memakai jalur terpisah dan tidak memerlukan approval
+root lokal.
+Shutdown lokal memerlukan approval `--shutdown`, challenge, dan konfirmasi layar. Ground shutdown
+tidak memakai approval root lokal.
 Sebelum menjadwalkan, helper menyimpan intent durable dan menolak semua prepare/execute shutdown
 berikutnya pada boot yang sama, termasuk dari sesi UI lain. Helper menjadwalkan
 `/usr/bin/systemctl poweroff` melalui unit transient tetap dalam 5 detik; `SHUTDOWN_SCHEDULED`
@@ -394,8 +388,7 @@ Tidak ada perintah reboot atau shutdown nyata dari test suite. Jalankan tanpa su
 | Ground tidak melihat telemetry | Periksa receiver, subscription ACL, session dan health; MQTT CONNECTED di Edge bukan bukti receiver memproses data |
 | Ping peer PPP | Tab Link: satu ping ICMP tiap sekitar 5 detik dipaksa melalui interface PPP; tanpa balasan bukan bukti link mati. |
 | Grafik tidak mulai | Tab Link: gate source/angle, backlog/stabilisasi, CONTROL profile |
-| CAPABILITY DISABLED | Panel Edge lokal: periksa gate tindakan. Ground: periksa helper target fixed/audited, health/session, dan kesiapan MQTT Control. |
-| MAINTENANCE REQUIRED | Untuk Start/Stop/Restart, PPP restart, shutdown, atau reboot lokal Edge, buka lease terbatas waktu; Ground tidak memakai lease lokal |
+| CAPABILITY DISABLED | Panel Edge lokal: pastikan mode controlled dan approval root satu kali untuk aksi; Ground: periksa helper target fixed/audited, health/session, dan kesiapan MQTT Control. |
 | PPP restart tidak tersedia | Cek capability, health fresh, MQTT Control, dan status unit fixed pada Raspberry |
 | PERSISTED_UNVERIFIED | Settings tersimpan; runtime evidence belum lengkap, bukan masalah ACK MQTT |
 | Browser tidak muncul | Jalankan `rdf-kiosk-session` dari desktop grafis; launcher memakai `--disable-gpu`. Pastikan `rdf-edge.service` aktif pada `127.0.0.1:8790`. |
@@ -417,7 +410,7 @@ Jangan membagikan full settings, credential bundle, file hash/password atau log 
 | `/etc/rdf-node/config.yaml` | Config bridge Raspberry |
 | `/etc/rdf-node/helper.yaml` | Approval/helper policy root-only |
 | `/var/lib/rdf-node` | Jurnal dan preferensi bridge |
-| `/var/lib/rdf-node-control` | Stop intent, lease, backup settings root-only |
+| `/var/lib/rdf-node-control` | Stop/shutdown intent dan backup settings root-only |
 | `/etc/rdf-ground/config.yaml` | Config receiver Ubuntu |
 | `/etc/rdf-ground-mqtt` | TLS/ACL broker terpisah |
 

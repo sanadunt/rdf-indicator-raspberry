@@ -152,11 +152,6 @@ class Controller:
         u=policy.get('engine_service')
         if u and (not re.fullmatch(r'[A-Za-z0-9_.@-]+\.service',u) or u in ('rdf-edge.service','t900-ppp.service','ssh.service')):
             raise HelperError('UNSAFE_ENGINE_UNIT')
-    def maintenance(self):
-        try:
-            j=strict_json((self.state/'maintenance.json').read_bytes())
-            return j.get('boot')==self.boot and time.monotonic()<j.get('until',0)
-        except (ValueError,OSError): return False
     def _remove_state_file(self,path):
         try: path.unlink()
         except FileNotFoundError: return False
@@ -214,7 +209,7 @@ class Controller:
         desired=None
         try: desired=strict_json((self.state/'intent.json').read_bytes()).get('desired')
         except (OSError,ValueError): pass
-        return dict(maintenance=self.maintenance(),desired=desired,
+        return dict(desired=desired,
                     allow_config=self.policy['allow_config'] and self.policy['single_writer_confirmed'],
                     allow_lifecycle=self.policy['allow_lifecycle'] and self.policy['lifecycle_audited'],
                     allow_reboot=self.policy['allow_reboot'],allow_shutdown=self.policy['allow_shutdown'],
@@ -243,7 +238,7 @@ class Controller:
         if uid not in (0,self.uid): raise HelperError('PEER_UID_DENIED')
         if not isinstance(req,dict) or not isinstance(req.get('op'),str): raise HelperError('INVALID_RPC')
         op=req['op']
-        keys={'status':{'op'},'maintenance.open':{'op','seconds'},'maintenance.close':{'op'},
+        keys={'status':{'op'},
               'config.patch':{'op','origin','changes','expected_digest'},'processing.set':{'op','desired','origin'},
               'service.restart':{'op','origin'},'ppp.restart':{'op','origin'},
               'system.reboot.prepare':{'op','id','origin'},
@@ -259,11 +254,6 @@ class Controller:
             if origin not in ('ground-controller','local-admin'):
                 raise HelperError('INVALID_RPC_ARGUMENT')
         if op=='status': return self.state_info()
-        if op.startswith('maintenance.'):
-            if uid!=0: raise HelperError('MAINTENANCE_REQUIRES_LOCAL_SUDO')
-            sec=integer(req.get('seconds',300),30,900) if op.endswith('open') else 0
-            atomic_write(self.state/'maintenance.json',compact({'boot':self.boot,'until':time.monotonic()+sec}))
-            return {'maintenance':sec>0,'seconds':sec}
         with self.lock:
             if op=='system.shutdown.reconcile':
                 if uid!=0: raise HelperError('SHUTDOWN_RECONCILE_REQUIRES_ROOT')
@@ -271,7 +261,6 @@ class Controller:
             if op=='ppp.restart':
                 if origin!='ground-controller' and not self.policy['allow_ppp_restart']:
                     raise HelperError('PPP_RESTART_NOT_APPROVED')
-                if origin!='ground-controller' and not self.maintenance(): raise HelperError('MAINTENANCE_REQUIRED')
                 require_ppp_service_ready()
                 try:
                     self._run(['/usr/bin/systemctl','--no-block','restart','t900-ppp.service'])
@@ -297,8 +286,6 @@ class Controller:
                     raise HelperError('LIFECYCLE_TARGET_NOT_READY')
                 if origin!='ground-controller' and not self.policy['allow_lifecycle']:
                     raise HelperError('LIFECYCLE_NOT_APPROVED')
-                if origin!='ground-controller' and not self.maintenance():
-                    raise HelperError('MAINTENANCE_REQUIRED')
                 desired=req.get('desired') if op=='processing.set' else 'RUNNING'
                 if desired not in ('RUNNING','STOPPED'): raise HelperError('INVALID_DESIRED_STATE')
                 atomic_write(self.state/'intent.json',compact({'desired':desired,'boot':self.boot,'origin':origin}))
@@ -315,8 +302,6 @@ class Controller:
                 action='shutdown' if shutdown else 'reboot'
                 if origin!='ground-controller' and not self.policy['allow_shutdown' if shutdown else 'allow_reboot']:
                     raise HelperError('SHUTDOWN_DISABLED' if shutdown else 'REBOOT_DISABLED')
-                if origin!='ground-controller' and not self.maintenance():
-                    raise HelperError('MAINTENANCE_REQUIRED')
                 id=req.get('id')
                 if not isinstance(id,str) or not 1<=len(id)<=80:
                     raise HelperError('INVALID_SHUTDOWN_ID' if shutdown else 'INVALID_REBOOT_ID')

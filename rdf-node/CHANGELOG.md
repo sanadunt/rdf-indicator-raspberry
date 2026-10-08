@@ -5,8 +5,9 @@
 - Remove remote grants and per-action root approvals from supported Ground writes. Ground retains
   command validation, journal, fixed-target checks, and UI confirmations; Edge does not authenticate
   MQTT publisher identity, so broker credentials and command-topic ACLs remain the trust boundary.
-  lease. The Edge panel keeps local reboot disabled until approval and lease are active. Lifecycle
-  intent recovery preserves actor origin and audited-target checks.
+  Local Edge lifecycle, PPP, reboot, and shutdown actions use persistent one-time root approvals,
+  not a timed maintenance lease. The panel retains Admin PIN, capability, and final-action
+  confirmation gates. Lifecycle intent recovery preserves actor origin and audited-target checks.
 
 - Replace Ground receipt/config sync with an explicit `config.get` settings export. Edge sends
   exact native UTF-8 settings text on `settings/reported` only after a request, with verified

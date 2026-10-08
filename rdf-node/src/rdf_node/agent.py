@@ -303,7 +303,6 @@ class Agent:
                 'mode':'DEMO' if self.demo else self.cfg['runtime_mode'],'codecs':['json'],
                 'angle':self.cfg['source']['angle_mode'],'native_axis':1,'count':360,
                 'profiles':list(PROFILES),'scope':'SDR_STACK','helper_available':helper_available,
-                'maintenance':self.helper_status.get('maintenance',False),
                 'remote_commands':remote,
                 'remote_config_patch':remote and settings_target,
                 'remote_processing':remote and lifecycle_target,
@@ -316,8 +315,7 @@ class Agent:
                 'restart':c['restart_enabled'] and self.helper_status.get('allow_lifecycle',False),
                 'reboot':c['reboot_enabled'] and self.helper_status.get('allow_reboot',False),
                 'shutdown':c['shutdown_enabled'] and self.helper_status.get('allow_shutdown',False),
-                'ppp_restart':self.cfg['runtime_mode']=='controlled' and c['remote_commands_enabled'] and
-                    self.helper_status.get('allow_remote_control',False) and c['ppp_restart_enabled'] and
+                'ppp_restart':self.cfg['runtime_mode']=='controlled' and c['ppp_restart_enabled'] and
                     self.helper_status.get('allow_ppp_restart',False)}
     def _topic_delivery_update(self,suffix,state,qos,error=None):
         timestamp=now_ms()

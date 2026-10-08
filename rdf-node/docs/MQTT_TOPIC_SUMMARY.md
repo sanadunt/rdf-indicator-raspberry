@@ -300,7 +300,7 @@ Detail tidak menggantikan gate health utama. Ground saat ini menyimpan detail te
 ### `capabilities`
 
 ```json
-{"v":2,"sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","t":1790668800123,"version":"1.0.0","mode":"read_only","codecs":["json"],"angle":"theta_mirror","native_axis":1,"count":360,"profiles":["control","balanced","graph_u8"],"scope":"SDR_STACK","helper_available":true,"maintenance":false,"remote_commands":true,"config_patch":false,"processing":false,"restart":false,"reboot":false,"shutdown":false,"ppp_restart":false,"remote_config_patch":false,"remote_processing":false,"remote_restart":false,"remote_reboot":true,"remote_shutdown":true,"remote_ppp_restart":true}
+{"v":2,"sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","t":1790668800123,"version":"1.0.0","mode":"read_only","codecs":["json"],"angle":"theta_mirror","native_axis":1,"count":360,"profiles":["control","balanced","graph_u8"],"scope":"SDR_STACK","helper_available":true,"remote_commands":true,"config_patch":false,"processing":false,"restart":false,"reboot":false,"shutdown":false,"ppp_restart":false,"remote_config_patch":false,"remote_processing":false,"remote_restart":false,"remote_reboot":true,"remote_shutdown":true,"remote_ppp_restart":true}
 ```
 
 Boolean tanpa prefix (`config_patch`, `processing`, `restart`, `reboot`, `shutdown`,
@@ -309,6 +309,7 @@ settings memerlukan path fixed dan single-writer confirmation; processing/restar
 unit SDR audited; reboot/shutdown/PPP memerlukan helper. `remote_ppp_restart` tidak membuktikan
 unit siap—helper melakukan preflight setiap request. `remote_commands` berarti jalur Ground
 tersedia di luar DEMO, bukan otorisasi publisher. `mode=read_only` berlaku pada aksi lokal Edge.
+Approval root Edge bersifat per aksi, persisten lintas reboot, dan tidak memakai lease waktu.
 Tidak ada capability yang menggantikan session/health checks atau ACL broker.
 `codecs` saat ini hanya `json`. Profile yang didukung:
 
@@ -497,7 +498,7 @@ yang diizinkan ACL topic dapat mengirim command langsung.
 | `cmd/system/reboot/prepare` | `system.reboot.prepare` | Tidak ada. Ground tidak memerlukan remote grant atau approval reboot root. ACK mengembalikan `prepare_id`, `challenge`, `valid_seconds` (30). |
 | `cmd/system/reboot/execute` | `system.reboot.execute` | `{"prepare_id":"<prepare-id>","challenge":"<one-time-challenge>"}` dari ACK prepare. Challenge sekali pakai, jangan log atau simpan sebagai credential permanen. |
 | `cmd/system/shutdown/prepare` | `system.shutdown.prepare` | Tidak ada. Ground tidak memerlukan approval root; ACK mengembalikan `prepare_id`, `challenge`, `valid_seconds` (30). |
-| `cmd/system/shutdown/execute` | `system.shutdown.execute` | `{"prepare_id":"<prepare-id>","challenge":"<one-time-challenge>"}` dari ACK prepare. Ground tidak memerlukan `allow_shutdown`, `shutdown_enabled`, remote grant, atau lease; Edge lokal tetap mengikuti gate dan lease. |
+| `cmd/system/shutdown/execute` | `system.shutdown.execute` | `{"prepare_id":"<prepare-id>","challenge":"<one-time-challenge>"}` dari ACK prepare. Ground tidak memerlukan `allow_shutdown`, `shutdown_enabled`, atau remote grant; Edge lokal tetap memerlukan approval root persisten `--shutdown` dan sesi Admin. |
 | `cmd/operation/get` | `operation.get` | `{"target_id":"<operation-id>"}`; query jurnal, hasil dapat `null` bila ID tidak ditemukan. |
 | `cmd/stream/set` | `stream.set` | `{"profile":"balanced"}`; profile valid: `control`, `balanced`, atau `graph_u8`. |
 

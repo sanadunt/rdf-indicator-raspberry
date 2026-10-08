@@ -155,15 +155,15 @@ def controls(args):
             policy.update(allow_lifecycle=True,lifecycle_audited=True,engine_service=unit)
             cfg['control'].update(processing_enabled=True,restart_enabled=True)
         if args.reboot:
-            if input('Izinkan fitur reboot terproteksi (tetap memerlukan lease sudo)? ketik REBOOT: ').strip()!='REBOOT': raise SystemExit('Tidak diubah.')
+            if input('Izinkan reboot dari panel Edge setelah approval satu kali ini? ketik REBOOT: ').strip()!='REBOOT': raise SystemExit('Tidak diubah.')
             policy['allow_reboot']=True; cfg['control']['reboot_enabled']=True
         if args.shutdown:
-            if input('Izinkan fitur shutdown terproteksi (tetap memerlukan lease sudo)? ketik SHUTDOWN: ').strip()!='SHUTDOWN': raise SystemExit('Tidak diubah.')
+            if input('Izinkan shutdown dari panel Edge setelah approval satu kali ini? ketik SHUTDOWN: ').strip()!='SHUTDOWN': raise SystemExit('Tidak diubah.')
             policy['allow_shutdown']=True; cfg['control']['shutdown_enabled']=True
         if args.ppp_restart:
             try: require_ppp_service_ready()
             except HelperError as error: raise SystemExit(str(error)) from error
-            if input('Ketik T900 PPP RESTART untuk mengizinkan restart PPP dari Ground: ').strip()!='T900 PPP RESTART':
+            if input('Ketik T900 PPP RESTART untuk mengizinkan restart PPP lokal dari panel Edge: ').strip()!='T900 PPP RESTART':
                 raise SystemExit('PPP restart belum approved.')
             policy['allow_ppp_restart']=True
             cfg['control']['ppp_restart_enabled']=True
@@ -172,17 +172,13 @@ def controls(args):
         save_config(Path(args.config),cfg); chown_config(args.config)
         subprocess.run(['systemctl','daemon-reload'],check=True)
         subprocess.run(['systemctl','restart','rdf-control-helper.service','rdf-edge.service'],check=True)
-        print('Approval tersimpan. Ground remote commands tidak memerlukan remote grant atau approval per aksi; kontrol lokal Edge tetap mengikuti policy root dan lease.')
+        print('Approval tersimpan. Ground remote commands tidak memerlukan remote grant atau approval per aksi; kontrol lokal Edge memakai approval root persisten, PIN Admin, dan konfirmasi layar.')
     elif args.action=='shutdown-reconcile':
         from .helper import call_helper
         print('Helper hanya menghapus intent setelah systemd melaporkan unit timer/service shutdown tidak aktif.')
         if input('Ketik SHUTDOWN RECONCILED setelah memeriksa status Pi lokal: ').strip()!='SHUTDOWN RECONCILED':
             raise SystemExit('Tidak diubah.')
         result=call_helper(cfg['control']['helper_socket'],{'op':'system.shutdown.reconcile'})
-        print(json.dumps(result))
-    elif args.action in ('maintenance-open','maintenance-close'):
-        from .helper import call_helper
-        result=call_helper(cfg['control']['helper_socket'],{'op':'maintenance.open','seconds':args.seconds} if args.action.endswith('open') else {'op':'maintenance.close'})
         print(json.dumps(result))
 
 def generate_demo(directory:Path,stop):
@@ -247,9 +243,8 @@ def main():
         if name=='set-pin': s.add_argument('--pin-file')
         if name=='import-bundle': s.add_argument('directory')
         if name=='controls':
-            s.add_argument('action',choices=['approve','maintenance-open','maintenance-close','shutdown-reconcile']);s.add_argument('--settings',action='store_true')
+            s.add_argument('action',choices=['approve','shutdown-reconcile']);s.add_argument('--settings',action='store_true')
             s.add_argument('--lifecycle',action='store_true');s.add_argument('--reboot',action='store_true');s.add_argument('--shutdown',action='store_true');s.add_argument('--ppp-restart',action='store_true')
-            s.add_argument('--seconds',type=int,default=300)
     s=sub.add_parser('demo');s.add_argument('--port',type=int,default=8790);s.add_argument('--state-dir')
     s=sub.add_parser('helper');s.add_argument('--policy',default='/etc/rdf-node/helper.yaml')
     sub.add_parser('selftest')

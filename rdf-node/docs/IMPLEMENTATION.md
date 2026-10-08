@@ -62,7 +62,7 @@ sent them. Broker credentials/ACLs and network isolation are the command trust b
 publisher authorized to the command topics can request all operations whose targets are available.
 A private PPP/T900 link is not publisher authentication. TLS protects transport and verifies the
 broker; broker authorization still requires per-client credentials and topic ACLs. Edge local
-controls retain their separate policy and maintenance lease.
+controls retain their separate persistent root approvals; local operations do not use a timed lease.
 
 Runtime menggunakan `/usr/bin/python3`, bukan Conda `base` atau environment SDR.
 Local HTTP server stdlib memiliki client/body caps, Host/Origin checks, cookie admin,
@@ -90,8 +90,8 @@ otomatis.
 
 ### Shutdown OS
 
-`system.shutdown.prepare/execute` dari Ground tidak memerlukan root approval flag atau maintenance
-lease. Challenge, durable journal, dan final UI confirmation tetap berlaku. Edge tidak mengikat
+`system.shutdown.prepare/execute` dari Ground tidak memerlukan flag approval root lokal. Challenge,
+durable journal, dan final UI confirmation tetap berlaku. Edge tidak mengikat
 MQTT command ke login Ground: publisher lain dengan izin topic broker dapat mengirim shutdown
 tanpa melalui konfirmasi browser.
 Helper menyimpan intent shutdown durable dan hanya menjadwalkan aksi systemd tetap. Intent

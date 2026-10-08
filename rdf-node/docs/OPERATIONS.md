@@ -88,9 +88,10 @@ deny-by-default yang memberi akses publish command hanya kepada Ground tepercaya
 mengaktifkan anonymous publish. TLS memverifikasi broker dan mengenkripsi transport, tetapi
 otorisasi publisher tetap dilakukan oleh broker.
 
-Flag CLI `--remote` telah dihapus; `--reboot` tetap mengatur gate reboot lokal Edge dan lease maintenance
-tetap wajib. Key lama `remote_commands_enabled` dan `allow_remote_control` tetap diterima untuk kompatibilitas,
-`controls approve` mengatur gate aksi lokal Edge; menjalankan tanpa flag **tidak mencabut** Ground.
+Flag CLI `--remote` telah dihapus; `--reboot` mengatur gate reboot lokal Edge melalui approval root
+satu kali yang persisten, tanpa lease maintenance. Key lama `remote_commands_enabled` dan
+`allow_remote_control` tetap diterima untuk kompatibilitas; `controls approve` mengatur gate aksi
+lokal Edge, dan menjalankannya tanpa flag **tidak mencabut** Ground.
 Untuk menutup jalur write, cabut ACL publish pada subtree `cmd/#` di broker atau nonaktifkan
 MQTT Control. Mematikan MQTT Control juga memutus telemetry/control channel.
 
@@ -106,9 +107,9 @@ Target Ground yang perlu disiapkan satu kali:
   dan konfirmasi UI. Edge tidak mengikat konfirmasi browser ke publisher MQTT.
 
 Prerequisite target settings/lifecycle bukan approval root per Ground command. `controls approve --reboot`,
-`--shutdown`, dan `--ppp-restart` tetap mengatur gate panel Edge lokal. Lifecycle, PPP restart,
-shutdown, dan reboot lokal memerlukan maintenance lease; settings lokal memerlukan approval
-single-writer. Ground tidak memakai approval atau lease root lokal.
+`--shutdown`, dan `--ppp-restart` tetap mengatur gate panel Edge lokal dan tersimpan lintas reboot.
+Lifecycle, PPP restart, shutdown, dan reboot lokal tidak memakai timed lease; settings lokal tetap
+memerlukan approval single-writer. Ground tidak memakai approval root lokal.
 
 Ground membutuhkan MQTT Control ready dan session/health node fresh untuk mutasi. Jika MQTT
 Control putus sepenuhnya, Ground tidak dapat mengirim PPP restart atau command lain.

@@ -296,8 +296,7 @@ class LifecycleSetupTests(unittest.TestCase):
                         engine_service=cfg['link']['engine_service'])
             controller=Controller(policy)
             actions=(('processing.set','RUNNING'),('processing.set','STOPPED'),('service.restart',None))
-            with mock.patch.object(controller,'maintenance',return_value=True), \
-                    mock.patch.object(controller,'_run') as run:
+            with mock.patch.object(controller,'_run') as run:
                 for op,desired in actions:
                     request={'op':op,'origin':'local-admin'}
                     if desired is not None:request['desired']=desired
@@ -323,11 +322,11 @@ class HelperTests(unittest.TestCase):
     def test_reboot_disabled(self):
         with self.assertRaisesRegex(ValueError,'REBOOT_DISABLED'):
             self.ctrl.dispatch({'op':'system.reboot.prepare','id':'x','origin':'local-admin'},os.getuid())
-    def test_local_reboot_still_requires_maintenance(self):
+    def test_local_reboot_uses_persistent_approval_without_lease(self):
         self.p['allow_reboot']=True
-        with mock.patch.object(self.ctrl,'maintenance',return_value=False):
-            with self.assertRaisesRegex(ValueError,'MAINTENANCE_REQUIRED'):
-                self.ctrl.dispatch({'op':'system.reboot.prepare','id':'x','origin':'local-admin'},os.getuid())
+        with mock.patch.object(self.ctrl,'_run'):
+            prepared=self.ctrl.dispatch({'op':'system.reboot.prepare','id':'x','origin':'local-admin'},os.getuid())
+        self.assertTrue(prepared['challenge'])
     def test_ground_reboot_needs_no_root_grants_or_lease(self):
         with mock.patch.object(self.ctrl,'_run') as run:
             prepared=self.ctrl.dispatch({'op':'system.reboot.prepare','id':'remote-reboot','origin':'ground-controller'},os.getuid())
@@ -343,10 +342,12 @@ class HelperTests(unittest.TestCase):
     def test_shutdown_disabled(self):
         with self.assertRaisesRegex(ValueError,'SHUTDOWN_DISABLED'):
             self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'x','origin':'local-admin'},os.getuid())
-    def test_shutdown_requires_maintenance(self):
+    def test_local_shutdown_uses_persistent_approval_without_lease(self):
         self.p['allow_shutdown']=True
-        with self.assertRaisesRegex(ValueError,'MAINTENANCE_REQUIRED'):
-            self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'x','origin':'local-admin'},os.getuid())
+        with mock.patch.object(self.ctrl,'_run') as run:
+            prepared=self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'x','origin':'local-admin'},os.getuid())
+        self.assertTrue(prepared['challenge'])
+        run.assert_not_called()
     def test_ground_config_patch_uses_fixed_target_without_root_permission(self):
         import hashlib
         path=self.path/'settings.json';raw=compact(settings());path.write_bytes(raw)
@@ -364,21 +365,20 @@ class HelperTests(unittest.TestCase):
                  'expected_digest':hashlib.sha256(raw).hexdigest()}
         with self.assertRaisesRegex(ValueError,'CONFIG_ADAPTER_NOT_APPROVED'):
             self.ctrl.dispatch(request,os.getuid())
-    def test_local_lifecycle_still_requires_maintenance_when_remote_enabled(self):
-        self.p.update(allow_remote_control=True,allow_lifecycle=True,lifecycle_audited=True)
+    def test_local_lifecycle_uses_persistent_approval_without_lease(self):
+        self.p.update(allow_lifecycle=True,lifecycle_audited=True)
         request={'op':'processing.set','desired':'STOPPED','origin':'local-admin'}
-        with mock.patch.object(self.ctrl,'maintenance',return_value=False):
-            with self.assertRaisesRegex(ValueError,'MAINTENANCE_REQUIRED'):
-                self.ctrl.dispatch(request,os.getuid())
+        with mock.patch.object(self.ctrl,'_run') as run:
+            result=self.ctrl.dispatch(request,os.getuid())
+        self.assertEqual(result['requested'],'STOPPED')
+        run.assert_called_once_with(['/usr/bin/systemctl','--no-block','stop','test-sdr.service'])
     def test_ground_lifecycle_uses_audited_fixed_target_without_root_permission(self):
         self.p.update(allow_remote_control=False,allow_lifecycle=False,lifecycle_audited=True)
         request={'op':'processing.set','desired':'STOPPED','origin':'ground-controller'}
-        with mock.patch.object(self.ctrl,'maintenance',return_value=False) as maintenance, \
-                mock.patch.object(self.ctrl,'_run') as run:
+        with mock.patch.object(self.ctrl,'_run') as run:
             result=self.ctrl.dispatch(request,os.getuid())
         self.assertEqual(json.loads((self.ctrl.state/'intent.json').read_bytes())['origin'],'ground-controller')
         self.assertEqual(result['requested'],'STOPPED')
-        maintenance.assert_not_called()
         run.assert_called_once_with(['/usr/bin/systemctl','--no-block','stop','test-sdr.service'])
     def test_ground_lifecycle_intent_recovers_without_local_approval(self):
         self.p.update(allow_lifecycle=False,lifecycle_audited=True)
@@ -429,11 +429,22 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(result,{'requested':True,'service':'t900-ppp.service'})
         show.assert_called_once()
         restart.assert_called_once_with(['/usr/bin/systemctl','--no-block','restart','t900-ppp.service'])
-    def test_local_ppp_restart_still_needs_approval_and_lease(self):
+    def test_local_ppp_restart_uses_persistent_approval_without_lease(self):
         self.p['allow_ppp_restart']=True
-        with mock.patch.object(self.ctrl,'maintenance',return_value=False):
-            with self.assertRaisesRegex(ValueError,'MAINTENANCE_REQUIRED'):
+        with mock.patch('rdf_node.helper.require_ppp_service_ready') as ready, \
+                mock.patch.object(self.ctrl,'_run') as restart:
+            result=self.ctrl.dispatch({'op':'ppp.restart','origin':'local-admin'},os.getuid())
+        self.assertEqual(result,{'requested':True,'service':'t900-ppp.service'})
+        ready.assert_called_once_with()
+        restart.assert_called_once_with(['/usr/bin/systemctl','--no-block','restart','t900-ppp.service'])
+    def test_local_ppp_restart_still_requires_persistent_approval(self):
+        with mock.patch('rdf_node.helper.require_ppp_service_ready') as ready:
+            with self.assertRaisesRegex(ValueError,'PPP_RESTART_NOT_APPROVED'):
                 self.ctrl.dispatch({'op':'ppp.restart','origin':'local-admin'},os.getuid())
+        ready.assert_not_called()
+    def test_maintenance_lease_rpc_is_not_supported(self):
+        with self.assertRaisesRegex(ValueError,'UNSUPPORTED_RPC'):
+            self.ctrl.dispatch({'op':'maintenance.open','seconds':300},0)
     def test_ppp_restart_action_failure_is_outcome_unknown(self):
         self.p.update(allow_ppp_restart=True,allow_remote_control=True)
         request={'op':'ppp.restart','origin':'ground-controller'}
@@ -531,19 +542,19 @@ class HelperTests(unittest.TestCase):
         with self.assertRaises(OSError):patch_file(file,{'gain_db':20.7},hashlib.sha256(raw).hexdigest(),self.p)
     def test_stop_persists_marker_no_real_systemctl(self):
         self.p.update(allow_lifecycle=True,lifecycle_audited=True)
-        with mock.patch.object(self.ctrl,'maintenance',return_value=True),mock.patch.object(self.ctrl,'_run') as run:
+        with mock.patch.object(self.ctrl,'_run') as run:
             r=self.ctrl.dispatch({'op':'processing.set','desired':'STOPPED','origin':'local-admin'},os.getuid())
         self.assertTrue((self.path/'state/engine.stopped').exists());self.assertEqual(r['requested'],'STOPPED');run.assert_called_once()
     def test_reboot_challenge_consumed_once_no_real_reboot(self):
         self.p['allow_reboot']=True
-        with mock.patch.object(self.ctrl,'maintenance',return_value=True),mock.patch.object(self.ctrl,'_run'):
+        with mock.patch.object(self.ctrl,'_run'):
             r=self.ctrl.dispatch({'op':'system.reboot.prepare','id':'p','origin':'local-admin'},os.getuid())
             e={'op':'system.reboot.execute','id':'p','challenge':r['challenge'],'origin':'local-admin'}
             self.assertTrue(self.ctrl.dispatch(e,os.getuid())['scheduled'])
             with self.assertRaises(ValueError):self.ctrl.dispatch(e,os.getuid())
     def test_shutdown_challenge_is_action_bound_and_one_use(self):
         self.p.update(allow_reboot=True,allow_shutdown=True)
-        with mock.patch.object(self.ctrl,'maintenance',return_value=True),mock.patch.object(self.ctrl,'_run') as run:
+        with mock.patch.object(self.ctrl,'_run') as run:
             reboot=self.ctrl.dispatch({'op':'system.reboot.prepare','id':'reboot','origin':'local-admin'},os.getuid())
             with self.assertRaisesRegex(ValueError,'SHUTDOWN_CHALLENGE_INVALID'):
                 self.ctrl.dispatch({'op':'system.shutdown.execute','id':'reboot','challenge':reboot['challenge'],'origin':'local-admin'},os.getuid())
@@ -564,7 +575,7 @@ class HelperTests(unittest.TestCase):
                 self.ctrl.dispatch(request,os.getuid())
     def test_shutdown_intent_blocks_second_schedule_for_current_boot(self):
         self.p['allow_shutdown']=True
-        with mock.patch.object(self.ctrl,'maintenance',return_value=True),mock.patch.object(self.ctrl,'_run') as run:
+        with mock.patch.object(self.ctrl,'_run') as run:
             first=self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'first','origin':'local-admin'},os.getuid())
             second=self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'second','origin':'local-admin'},os.getuid())
             self.ctrl.dispatch({'op':'system.shutdown.execute','id':'first','challenge':first['challenge'],'origin':'local-admin'},os.getuid())
@@ -576,19 +587,18 @@ class HelperTests(unittest.TestCase):
     def test_shutdown_intent_from_prior_boot_allows_new_schedule(self):
         self.p['allow_shutdown']=True;self.ctrl.boot='boot-current'
         self.ctrl.state.joinpath('shutdown-intent.json').write_bytes(compact({'id':'old','boot':'boot-previous'}))
-        with mock.patch.object(self.ctrl,'maintenance',return_value=True),mock.patch.object(self.ctrl,'_run') as run:
+        with mock.patch.object(self.ctrl,'_run') as run:
             prepared=self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'new','origin':'local-admin'},os.getuid())
             result=self.ctrl.dispatch({'op':'system.shutdown.execute','id':'new','challenge':prepared['challenge'],'origin':'local-admin'},os.getuid())
         self.assertTrue(result['scheduled']);run.assert_called_once()
         self.assertEqual(json.loads((self.ctrl.state/'shutdown-intent.json').read_text())['boot'],'boot-current')
     def test_malformed_shutdown_intent_blocks_prepare(self):
         self.p['allow_shutdown']=True;(self.ctrl.state/'shutdown-intent.json').write_text('{broken')
-        with mock.patch.object(self.ctrl,'maintenance',return_value=True):
-            with self.assertRaisesRegex(ValueError,'SHUTDOWN_ALREADY_SCHEDULED'):
-                self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'new','origin':'local-admin'},os.getuid())
+        with self.assertRaisesRegex(ValueError,'SHUTDOWN_ALREADY_SCHEDULED'):
+            self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'new','origin':'local-admin'},os.getuid())
     def test_prepare_preserves_other_live_challenges(self):
         self.p.update(allow_reboot=True,allow_shutdown=True)
-        with mock.patch.object(self.ctrl,'maintenance',return_value=True),mock.patch.object(self.ctrl,'_run') as run:
+        with mock.patch.object(self.ctrl,'_run') as run:
             shutdown=self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'shutdown','origin':'local-admin'},os.getuid())
             reboot=self.ctrl.dispatch({'op':'system.reboot.prepare','id':'reboot','origin':'local-admin'},os.getuid())
             for op,id,challenge in (
@@ -599,15 +609,13 @@ class HelperTests(unittest.TestCase):
             self.assertEqual(run.call_count,2)
     def test_pending_challenges_are_bounded(self):
         self.p['allow_shutdown']=True
-        with mock.patch.object(self.ctrl,'maintenance',return_value=True):
-            for index in range(32):
-                self.ctrl.dispatch({'op':'system.shutdown.prepare','id':f'shutdown-{index}','origin':'local-admin'},os.getuid())
-            with self.assertRaisesRegex(ValueError,'TOO_MANY_ACTIVE_CHALLENGES'):
-                self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'shutdown-overflow','origin':'local-admin'},os.getuid())
+        for index in range(32):
+            self.ctrl.dispatch({'op':'system.shutdown.prepare','id':f'shutdown-{index}','origin':'local-admin'},os.getuid())
+        with self.assertRaisesRegex(ValueError,'TOO_MANY_ACTIVE_CHALLENGES'):
+            self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'shutdown-overflow','origin':'local-admin'},os.getuid())
     def test_systemd_schedule_failure_is_outcome_unknown(self):
         self.p['allow_shutdown']=True
-        with mock.patch.object(self.ctrl,'maintenance',return_value=True),mock.patch.object(
-                self.ctrl,'_run',side_effect=HelperError('SYSTEMD_ACTION_FAILED')):
+        with mock.patch.object(self.ctrl,'_run',side_effect=HelperError('SYSTEMD_ACTION_FAILED')):
             prepared=self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'shutdown','origin':'local-admin'},os.getuid())
             with self.assertRaisesRegex(TimeoutError,'SYSTEMD_ACTION_OUTCOME_UNKNOWN'):
                 self.ctrl.dispatch({'op':'system.shutdown.execute','id':'shutdown','challenge':prepared['challenge'],'origin':'local-admin'},os.getuid())
@@ -643,7 +651,7 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(path.exists())
     def test_shutdown_challenge_expires_after_30_seconds(self):
         self.p['allow_shutdown']=True
-        with mock.patch.object(self.ctrl,'maintenance',return_value=True),mock.patch('rdf_node.helper.time.monotonic',side_effect=(100,131)):
+        with mock.patch('rdf_node.helper.time.monotonic',side_effect=(100,131)):
             prepared=self.ctrl.dispatch({'op':'system.shutdown.prepare','id':'shutdown','origin':'local-admin'},os.getuid())
             with self.assertRaisesRegex(ValueError,'SHUTDOWN_CHALLENGE_INVALID'):
                 self.ctrl.dispatch({'op':'system.shutdown.execute','id':'shutdown','challenge':prepared['challenge'],'origin':'local-admin'},os.getuid())

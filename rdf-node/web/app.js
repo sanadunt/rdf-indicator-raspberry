@@ -35,7 +35,7 @@ const mqttTopics=[
   ['cmd/system/reboot/prepare','QoS 1','Ground prepare needs no root grant; execute retains one-use challenge and operator confirmation.'],
   ['cmd/system/reboot/execute','QoS 1','Execute uses one-use challenge; no Ground root grant or per-action approval.'],
   ['cmd/system/shutdown/prepare','QoS 1','Prepare needs no root approval; Ground UI retains operator confirmation.'],
-  ['cmd/system/shutdown/execute','QoS 1','Execute retains one-use challenge; no Ground root approval or local lease.'],
+  ['cmd/system/shutdown/execute','QoS 1','Execute retains one-use challenge; Ground needs no root approval. Edge-local shutdown uses persistent root approval and Admin PIN.'],
   ['cmd/operation/get','QoS 1','Permintaan status operation.'],
   ['cmd/stream/set','QoS 1','Perubahan profile Ground langsung tanpa remote grant.']
  ]]
@@ -149,9 +149,9 @@ function render(s){
  const syn=q.sync||{};
  if(!hostPage) rows('sysrows',[["Engine / desired",`${p.observed||'--'} / ${p.desired||'BELUM DIAMBIL'}`],["Frame / Delay / IQ",`${syn.frame??'?'} / ${syn.sample_delay??'?'} / ${syn.iq??'?'}`],["Frame / progress",`${q.frame_index??'--'} / ${q.frame_progressing?'MAJU':'BELUM'}`],["Drop total / delta",`${q.dropped_frames??'--'} / ${q.drop_delta??'--'}`],["DAQ umur / USB SDR",`${age(q.source_age_ms)} / ${h.usb_count??'--'} terdeteksi`]]);
  else rows('sysrows',[["CPU / RAM",`${fmt(h.cpu_percent)}% / ${fmt(h.memory_percent)}%`],["Suhu / disk kosong",`${fmt(h.temperature_c)} C / ${fmt(h.disk_free_percent)}%`],["Throttle / under-voltage",`${h.throttled??'unknown'} / ${h.undervoltage??'unknown'}`],["Uptime",h.uptime_s==null?'--':`${Math.floor(h.uptime_s/60)} menit`],["Jam sistem",h.clock_state,h.clock_state]]);
- rows('configrows',[["Node / profil",`${s.node_id||'--'} / ${c.profile||'--'}`],["Source / MQTT",`${c.source_configured?'OK':'SETUP'} / ${c.mqtt_configured?'CONFIGURED':'OFF'}`],["RF revision / proof",`${c.sdr_revision??'--'} / ${c.proof||'--'}`],["Akses / maintenance",`${authenticated?'ADMIN':'READ ONLY'} / ${s.capabilities?.maintenance?'AKTIF':'OFF'}`]]);
+ rows('configrows',[["Node / profil",`${s.node_id||'--'} / ${c.profile||'--'}`],["Source / MQTT",`${c.source_configured?'OK':'SETUP'} / ${c.mqtt_configured?'CONFIGURED':'OFF'}`],["RF revision / proof",`${c.sdr_revision??'--'} / ${c.proof||'--'}`],["Akses / helper",`${authenticated?'ADMIN':'READ ONLY'} / ${s.capabilities?.helper_available?'SIAP':'OFF'}`]]);
  $('admin').textContent=authenticated?'Logout':'Login';
- $('configreason').textContent='Kontrol lokal mengikuti approval root dan maintenance lease; reboot memerlukan --reboot.';
+ $('configreason').textContent='Kontrol lokal memerlukan approval root satu kali; aksi tetap meminta PIN Admin dan konfirmasi layar.';
  const prefs={theme:'dark',accent:'teal',font:'system',...(c.preferences||{})};
  document.body.classList.toggle('light',prefs.theme==='light');
  document.body.dataset.accent=prefs.accent;document.body.dataset.font=prefs.font;
@@ -544,18 +544,17 @@ $('controlbtn').onclick=()=>{if(needLogin())return;const box=modal('Kontrol RDF'
  const row=document.createElement('div');box.append(row);
  action(row,'Frekuensi',()=>frequency()).disabled=!caps.config_patch;
   const reboot=action(row,'Reboot Raspberry',()=>prepareReboot(),true);
-  reboot.disabled=!caps.reboot||!caps.maintenance;
+  reboot.disabled=!caps.reboot;
   const rebootReason=!caps.helper_available?'Helper kontrol belum tersedia.':
-   !caps.reboot?'Reboot lokal memerlukan mode controlled dan approval root (--reboot).':
-   !caps.maintenance?'Buka maintenance lease lokal dengan sudo sebelum reboot.':'';
+   !caps.reboot?'Reboot lokal memerlukan mode controlled dan approval root (--reboot).':'';
   if(rebootReason){const note=text(row,rebootReason);note.className='hint';}
   const shutdown=action(row,'Shutdown Raspberry',()=>prepareShutdown(),true);
   shutdown.disabled=!caps.shutdown||!shutdownHistoryChecked;
   shutdown.title=!shutdownHistoryChecked?'Riwayat operasi belum tersedia.':shutdownUncertain?'Periksa Raspberry secara lokal sebelum mengulangi shutdown.':'';
 };
-function confirmOperation(label,op,extra){const box=modal(label);text(box,'Aksi ini mengganggu pemrosesan RDF. Bridge tetap hidup kecuali reboot OS. Pastikan kondisi maintenance aman.');action(box,'Konfirmasi',()=>command(op,extra),true);}
+function confirmOperation(label,op,extra){const box=modal(label);text(box,'Aksi ini mengganggu pemrosesan RDF. Bridge tetap hidup kecuali reboot OS. Pastikan kondisi operasi aman sebelum melanjutkan.');action(box,'Konfirmasi',()=>command(op,extra),true);}
 function frequency(){const box=modal('Frekuensi center + VFO0');text(box,'MHz; range dan gain mengikuti policy perangkat. File tersimpan belum berarti runtime terverifikasi.');const input=document.createElement('input');input.type='number';input.step='0.001';input.value=snapshot.detection?.frequency_hz?snapshot.detection.frequency_hz/1e6:'';box.append(input);action(box,'Apply',()=>{const hz=Math.round(Number(input.value)*1e6);if(!Number.isFinite(hz)||hz<=0)throw new Error('Frekuensi tidak valid');return command('config.patch',{changes:{center_frequency_hz:hz,vfo0_frequency_hz:hz}});});}
-async function prepareReboot(){const box=modal('Reboot Raspberry');text(box,'Node akan offline. Admin harus unlock; approval --reboot dan maintenance lease lokal harus aktif. Status health berhenti selama boot.');action(box,'Prepare',async()=>{const r=await command('system.reboot.prepare');$('modalmsg').textContent='Menunggu challenge...';let op=null;for(let i=0;i<20;i++){await new Promise(r=>setTimeout(r,300));const list=await get('/api/v2/operations/latest');op=list.find(x=>x.id===r.id);if(op&&['FAILED','APPLIED','REJECTED'].includes(op.stage))break;}
+async function prepareReboot(){const box=modal('Reboot Raspberry');text(box,'Node akan offline. Admin harus unlock; approval root --reboot disimpan satu kali. Konfirmasi akhir tetap diperlukan. Health berhenti selama boot.');action(box,'Prepare',async()=>{const r=await command('system.reboot.prepare');$('modalmsg').textContent='Menunggu challenge...';let op=null;for(let i=0;i<20;i++){await new Promise(r=>setTimeout(r,300));const list=await get('/api/v2/operations/latest');op=list.find(x=>x.id===r.id);if(op&&['FAILED','APPLIED','REJECTED'].includes(op.stage))break;}
  // Challenges are deliberately not returned by public history. A local reboot is
  // issued through authenticated command result access (private endpoint below).
  const result=await post('/api/v2/operation/result',{id:r.id});
@@ -564,7 +563,7 @@ async function prepareReboot(){const box=modal('Reboot Raspberry');text(box,'Nod
  });}
 async function prepareShutdown(){
  const box=modal('Shutdown Raspberry');
- text(box,'Raspberry akan dimatikan sepenuhnya; akses lokal diperlukan untuk menyalakannya lagi. Maintenance lease lokal (sudo) harus aktif.');
+ text(box,'Raspberry akan dimatikan sepenuhnya; akses lokal diperlukan untuk menyalakannya lagi. Fitur memerlukan Admin PIN dan approval root --shutdown yang disimpan satu kali.');
  action(box,'Prepare',async()=>{
   if(readShutdownUncertainty())setShutdownUncertainty(true);
   try{await checkShutdownHistory(true);}catch{$('modalmsg').textContent='Status shutdown tidak tersedia; permintaan tidak dikirim.';return;}

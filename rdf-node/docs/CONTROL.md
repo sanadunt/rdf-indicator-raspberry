@@ -32,18 +32,14 @@ sudo rdf-node controls approve --settings --lifecycle --reboot --shutdown --ppp-
 
 CLI meminta `APPROVE`; `--settings` juga meminta `SINGLE`, `--lifecycle` meminta `AUDITED`,
 `--reboot` meminta `REBOOT`, `--shutdown` meminta `SHUTDOWN`, dan `--ppp-restart` meminta
-`T900 PPP RESTART` setelah memeriksa unit. Gate `--reboot`, `--shutdown`, dan `--ppp-restart`
-berlaku untuk panel Edge lokal; Ground tidak memerlukannya. Start/Stop/Restart, PPP restart,
-reboot, dan shutdown lokal tetap memerlukan approval yang sesuai dan lease 30..900 detik:
+`T900 PPP RESTART` setelah preflight unit. Flag ini menyimpan approval root per aksi untuk panel
+Edge lokal; persetujuan tetap berlaku lintas reboot dan tidak memakai lease waktu atau `sudo`
+per aksi. Panel tetap memerlukan sesi Admin PIN dan konfirmasi layar untuk aksi destruktif.
 
-```bash
-sudo rdf-node controls maintenance-open --seconds 300
-sudo rdf-node controls maintenance-close
-```
-
-Ground tidak membuka, memperpanjang, atau menutup lease. Menjalankan `controls approve` tanpa flag
-tidak mencabut akses Ground. Batasi publish ke subtree `cmd/#` pada ACL broker dan cabut credential
-Ground di broker untuk menutup akses remote; jangan mengandalkan tombol UI atau remote grant Edge.
+Ground tidak membuat atau mengubah approval root lokal. Menjalankan `controls approve`
+tanpa flag tidak mencabut akses Ground. Batasi publish ke subtree `cmd/#` pada ACL broker dan
+cabut credential Ground di broker untuk menutup akses remote; jangan mengandalkan tombol UI atau
+remote grant Edge.
 
 Ground PIN dan CSRF melindungi API HTTP lokal, bukan publisher MQTT. Edge menetapkan actor
 `ground-controller` untuk command MQTT yang diterimanya, tetapi tidak mengautentikasi publisher
@@ -144,22 +140,21 @@ Release ini tidak menambahkan recovery loop DSP otomatis yang kedua.
 
 ## Reboot Raspberry
 
-1. Reboot dari panel Edge memerlukan sesi Admin, `controls approve --reboot`, dan maintenance lease.
+1. Reboot dari panel Edge memerlukan sesi Admin dan approval root satu kali `controls approve --reboot`; timed lease tidak digunakan.
    Ground tidak memerlukan remote grant atau approval root per aksi.
 2. `system.reboot.execute` membawa prepare_id+challenge, serta envelope session terbaru. Ground UI meminta konfirmasi akhir.
 3. Intent durable dibuat sebelum memanggil helper, kemudian systemd menjadwalkan reboot 5s.
 4. UI memberi REBOOT_SCHEDULED, bukan APPLIED sebelum reboot.
 5. Ground menerima boot_id baru dan health fresh, lalu mengonfirmasi APPLIED reboot; readiness SDR sesudah boot tetap dinilai terpisah.
 
-Lease maintenance dibuka hanya melalui sudo lokal/trusted management, 30..900 detik, dan
-terikat boot dan monotonic deadline. Lease diperlukan untuk lifecycle, PPP restart, reboot, dan
-shutdown lokal; settings tetap memakai gate approval single-writer.
-Ground tidak memakai atau mengubah lease; challenge/jurnal tetap berlaku. Jika Raspberry tidak
+Approval root lokal disimpan dalam helper policy/config dan tetap berlaku setelah reboot. Timed
+maintenance lease sudah dihapus; lifecycle, PPP restart, reboot, dan shutdown lokal tidak lagi
+memerlukan lease. Challenge, jurnal, dan pemeriksaan operasi tetap berlaku. Jika Raspberry tidak
 kembali, outcome tetap belum diketahui.
 
 ## Shutdown Raspberry
 
-1. `system.shutdown.prepare` dari Edge perlu capability shutdown dan maintenance lease. Ground tidak memerlukan gate root per aksi atau lease.
+1. `system.shutdown.prepare` dari Edge perlu capability shutdown dan approval root satu kali `--shutdown`, tanpa timed lease. Ground tidak memerlukan gate root per aksi.
 2. Prepare menghasilkan challenge sekali pakai, terikat operation ID, hanya berlaku 30 detik dan tidak dapat dipakai untuk reboot.
 3. UI meminta konfirmasi akhir. `system.shutdown.execute` menulis jurnal durable `SHUTDOWN_SCHEDULED` sebelum helper dipanggil.
 4. Helper menyimpan intent root-only, lalu menjadwalkan `/usr/bin/systemctl poweroff` melalui unit transient tetap setelah 5 detik. Tidak ada shell, nama unit dari payload, atau restart SDR/bridge.

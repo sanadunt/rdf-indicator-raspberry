@@ -770,6 +770,22 @@ class CommandTests(unittest.TestCase):
         self.assertFalse(caps['processing'])
         self.assertFalse(caps['restart'])
         self.assertFalse(caps['shutdown'])
+    def test_local_control_capabilities_need_neither_lease_nor_remote_grants(self):
+        self.a.cfg['runtime_mode']='controlled'
+        self.a.cfg['control'].update(
+            config_patch_enabled=True,processing_enabled=True,restart_enabled=True,
+            reboot_enabled=True,shutdown_enabled=True,ppp_restart_enabled=True,
+            remote_commands_enabled=False)
+        self.a.helper_status={
+            'allow_config':True,'allow_lifecycle':True,
+            'allow_reboot':True,'allow_shutdown':True,'allow_ppp_restart':True,
+            'allow_remote_control':False,'settings_target_available':True,
+            'lifecycle_target_available':True}
+        caps=self.a.capabilities()
+        self.assertNotIn('maintenance',caps)
+        self.assertEqual(tuple(caps[key] for key in
+                         ('config_patch','processing','restart','reboot','shutdown','ppp_restart')),
+                         (True,True,True,True,True,True))
     def test_ground_settings_write_bypasses_root_capability_flag(self):
         self.a.cfg['runtime_mode']='read_only'
         self.a.cfg['control']['config_patch_enabled']=False
