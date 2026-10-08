@@ -983,6 +983,11 @@ class ApiTests(unittest.TestCase):
         code,_,response=self.http('POST','/api/v2/display/preferences',{'accent':'amber'})
         self.assertEqual(code,200)
         self.assertEqual(json.loads(response)['font'],'system')
+    def test_night_theme_persists_for_panel(self):
+        self.login()
+        code,_,response=self.http('POST','/api/v2/display/preferences',{'theme':'night'})
+        self.assertEqual(code,200);self.assertEqual(json.loads(response)['theme'],'night')
+        self.a._snapshot();self.assertEqual(self.a.snapshot()['config']['preferences']['theme'],'night')
     def test_panel_blank_choices_persist_and_non_integer_rejected(self):
         self.login()
         for seconds in (60,300,900,0):
@@ -1000,7 +1005,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(snap['angle_convention'],'theta_mirror')
     def test_unknown_or_invalid_preference_rejected(self):
         self.login()
-        for body in ({'run_shell':'true'},{'accent':'ultraviolet'},{'font':'comic-sans'}):
+        for body in ({'run_shell':'true'},{'accent':'ultraviolet'},{'font':'comic-sans'},{'theme':'neon'}):
             self.assertEqual(self.http('POST','/api/v2/display/preferences',body)[0],400)
     def test_invalid_json_rejected(self):self.assertEqual(self.http('POST','/api/v2/login',raw=b'{bad')[0],400)
     def test_oversize_body_rejected(self):self.assertEqual(self.http('POST','/api/v2/login',raw=b' '*9000)[0],400)

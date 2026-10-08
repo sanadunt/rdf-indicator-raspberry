@@ -199,7 +199,7 @@ class Handler(BaseHTTPRequestHandler):
                 prefs=dict(app.cfg['display'])
                 prefs.update(app.journal.get('display',{}))
                 prefs.update(obj)
-                if (prefs['theme'] not in ('dark','light') or prefs['accent'] not in ('teal','blue','amber') or
+                if (prefs['theme'] not in ('dark','light','night') or prefs['accent'] not in ('teal','blue','amber') or
                     prefs['font'] not in ('system','serif','mono') or type(prefs['blank_after_seconds']) is not int or
                     not 0<=prefs['blank_after_seconds']<=86400):
                     raise ValueError('BAD_PREFERENCE')

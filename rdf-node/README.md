@@ -31,7 +31,11 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
 - Halaman Utama menampilkan dial arah relatif (0 di atas, searah jarum jam). Jarum dan kurva
   spektrum 360° (skala relatif per frame) hanya tampil untuk deteksi valid dengan sampel yang sama;
   sudut raw/UNVERIFIED tetap berupa angka. Ketuk dial untuk **mode baca jauh** layar penuh.
-- `Config > Tampilan` menyimpan mode gelap/terang, aksen warna, font lokal, dan waktu layar padam
+- Dial menampilkan jejak arah valid terakhir (maks. 8 titik, 30 detik; dihapus saat deteksi tidak
+  valid). Baris CMD menampilkan stage operasi apa adanya dengan warna, plus notifikasi singkat saat
+  operasi selesai/gagal. Ikon tab diberi titik kuning/merah bila halaman itu memuat masalah, dan
+  halaman dapat digeser kiri/kanan di layar sentuh.
+- `Config > Tampilan` menyimpan mode gelap/terang/malam (merah), aksen warna, font lokal, dan waktu layar padam
   (tidak pernah, 1, 5, atau 15 menit; layar tidak padam selama ada alarm error).
 - `Data > Atur` mengubah host/port, transport MQTT/TCP atau WebSocket, pilihan TLS, dua pasangan akun, dan Client ID dasar (akhiran `-control`/`-bulk`).
   TLS aktif memverifikasi sertifikat/nama host; TLS nonaktif mengirim kredensial dan payload tanpa enkripsi—gunakan hanya pada link tepercaya.

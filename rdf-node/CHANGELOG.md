@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Edge panel: fading trail of recent gate-valid bearings on the dial (cleared on any invalid
+  sample or new session); colour-grouped stage chip for the last operation with a short toast on
+  terminal stages (stage codes stay verbatim, so `PERSISTED_UNVERIFIED` remains amber); warn/bad
+  dots on the Link, Sistem, Config, and Data tabs; horizontal touch swipe between tabs. Policy
+  discards (`DIAGNOSTIC_NOT_NEEDED`, `BULK_PAUSED_*`) show as skipped instead of failed. Add a
+  red low-luminance `night` display theme, now accepted by config and API validation.
+- Ground companion: grouped card layout, health tiles decoded from `telemetry/health` codes (dimmed
+  while health is stale; raw JSON kept behind a toggle), a status pill in the header, separated
+  SDR-stack and host action groups, and a HiDPI polar plot with degree labels, peak dot, and a DoA
+  needle only under `theta_mirror` for a valid, non-stale detection. The STALE plot style now
+  applies; the old `.plot.stale` selector never matched the canvas.
+
 - Edge panel: draw the latest 360-value Angular frame as a per-frame-scaled curve inside the DoA
   dial, only under `theta_mirror` and only when its `q` matches the displayed gate-valid detection
   (the curve hides after 2 s without a matching frame). Tap the dial for a full-screen

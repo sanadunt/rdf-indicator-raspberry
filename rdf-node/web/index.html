@@ -16,7 +16,7 @@
 <div class="reading reading-freq"><small id="frequency-label">FREKUENSI VFO</small><div class="value-mid"><strong id="freq">--</strong><span class="unit">MHz</span></div><label id="quality">Data source belum tersedia</label></div>
 </div>
 </div>
-<div class="commandline"><span class="tag">CMD</span><span id="command">Belum ada operasi</span></div>
+<div class="commandline"><span class="tag">CMD</span><span id="command">Belum ada operasi</span><span id="cmdstage" class="stagechip" hidden></span></div>
 <div id="alertbox" class="alert"><b id="alerticon">i</b><span id="alert">Memuat status lokal...</span><span id="temp">--</span></div>
 </section>
 <section id="link" class="page details">
@@ -62,6 +62,7 @@
 <small class="focus-exit">Ketuk layar untuk kembali</small>
 </div>
 </div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <div id="stale" hidden role="status" aria-live="polite"><div class="stale-card"><b class="stale-icon" aria-hidden="true">!</b><b>SUMBER STATUS HILANG</b><span id="stalereason">API lokal tidak merespons.</span><small>Data di belakang bukan status terkini.</small><button id="retry" type="button">Coba lagi</button></div></div>
 <div id="modal" hidden><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="modaltitle"><div class="dialoghead"><b id="modaltitle">Login</b><button id="closemodal" type="button" aria-label="Tutup">&times;</button></div><div id="modalbody"></div><div id="modalmsg" class="hint" aria-live="polite"></div></div></div>
 <div id="blank" hidden><span>Ketuk untuk menampilkan indikator</span></div>

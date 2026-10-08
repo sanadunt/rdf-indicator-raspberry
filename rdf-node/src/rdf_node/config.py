@@ -74,7 +74,7 @@ def validate_config(c: dict) -> None:
         raise ValueError('AGGREGATE_BUDGET_TOO_HIGH')
     for k,v in c['freshness'].items():
         finite(v,500,120000)
-    if c['display']['theme'] not in ('dark','light'):
+    if c['display']['theme'] not in ('dark','light','night'):
         raise ValueError('INVALID_THEME')
     if c['display']['accent'] not in ('teal','blue','amber'):
         raise ValueError('INVALID_DISPLAY_ACCENT')

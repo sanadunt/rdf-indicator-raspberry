@@ -84,6 +84,11 @@ class ConfigTests(unittest.TestCase):
         for key,value in (('accent','ultraviolet'),('font','comic-sans')):
             c=load_config();c['display'][key]=value
             with self.assertRaises(ValueError):validate_config(c)
+    def test_display_theme_allows_night_and_rejects_unknown(self):
+        for theme in ('dark','light','night'):
+            c=load_config();c['display']['theme']=theme;validate_config(c)
+        c=load_config();c['display']['theme']='neon'
+        with self.assertRaisesRegex(ValueError,'INVALID_THEME'):validate_config(c)
     def test_plaintext_remote_transport_can_use_tcp_or_websocket(self):
         for transport in ('tcp','websocket'):
             c=load_config()

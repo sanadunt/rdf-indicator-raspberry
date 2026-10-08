@@ -79,10 +79,15 @@ function renderTopicList(){
  }
  host.replaceChildren(fragment);
 }
+// Policy discards (diagnostic not needed, Bulk paused by a gate) are reported by the Agent as
+// ERROR but are deliberate non-sends; show them as skipped with the reason, not as failures.
+function deliverySkipped(status){return status?.state==='ERROR'&&(status.error==='DIAGNOSTIC_NOT_NEEDED'||String(status.error||'').startsWith('BULK_PAUSED_'));}
 function setTopicDelivery(entry,status){
- const state=status?.state||'NONE',label=entry.label,info=entry.info;
+ const skipped=deliverySkipped(status),state=skipped?'SKIPPED':status?.state||'NONE',label=entry.label,info=entry.info;
  entry.cell.className=`delivery-cell delivery-cell--${state.toLowerCase()}`;
- if(state==='SENT'){
+ if(skipped){
+  label.textContent='DILEWATI';info.textContent=status.error;
+ }else if(state==='SENT'){
   label.textContent='TERKIRIM';
   info.textContent=status.qos===1?'PUBACK broker':'Socket lokal';
  }else if(state==='ERROR'){
@@ -105,7 +110,8 @@ function mqttPairState(l){
  return states.includes('ERROR')?'ERROR':states.every(value=>value==='CONNECTED')?'CONNECTED':states.every(value=>value==='DISABLED')?'':'CONNECTING';
 }
 const SVG_NS='http://www.w3.org/2000/svg';
-let needleTurn=null;
+const TRAIL_LENGTH=8,TRAIL_MAX_AGE_MS=30000;
+let needleTurn=null,bearingTrail=[],trailSid=null;
 function createDial(host){
  if(!host)return null;
  const svg=document.createElementNS(SVG_NS,'svg');
@@ -121,25 +127,41 @@ function createDial(host){
  }
  const labels=add('g',{class:'dial-labels'});
  for(const [text,x,y] of [['0',0,-44],['90',46,0],['180',0,48],['270',-46,0]])add('text',{x,y},labels).textContent=text;
+ const trail=add('g',{class:'dial-trail'});
+ const trailDots=Array.from({length:TRAIL_LENGTH},()=>add('circle',{r:2.6,cx:0,cy:0,opacity:0},trail));
  const needle=add('g',{class:'needle'});
  add('path',{class:'needle-wedge',d:'M0 0L-9.1-63.3A64 64 0 0 1 9.1-63.3Z'},needle);add('path',{class:'needle-line',d:'M0 10V-52'},needle);add('path',{class:'needle-head',d:'M0-64L-6-51H6Z'},needle);
  add('circle',{class:'dial-hub',r:4});
  const note=add('text',{class:'dial-note',y:24});
  host.dataset.spectrum='off';host.append(svg);
- return {host,needle,spectrum,note};
+ return {host,needle,spectrum,note,trailDots};
 }
 const dials=[createDial($('dial')),createDial($('focusdial'))].filter(Boolean);
 // Only a gate-valid relative DoA moves the needle. Raw/UNVERIFIED angles use a different
 // convention and stay numeric-only so the dial never implies a verified bearing.
-function updateDial(angle,unverified){
+function updateDial(angle,unverified,sample){
  const valid=typeof angle==='number'&&Number.isFinite(angle);
  const target=valid?((angle%360)+360)%360:null;
  if(valid)needleTurn=needleTurn===null?target:needleTurn+((target-needleTurn)%360+540)%360-180;
+ // Recent gate-valid bearings only; any invalid sample clears the trail so old fixes never
+ // read as current evidence.
+ const now=Date.now();
+ if(!valid)bearingTrail=[];
+ else if(bearingTrail.at(-1)?.sample!==sample)bearingTrail.push({angle:target,sample,at:now});
+ bearingTrail=bearingTrail.filter(point=>now-point.at<=TRAIL_MAX_AGE_MS).slice(-TRAIL_LENGTH);
+ const history=bearingTrail.slice(0,-1);
  const description=valid?`Dial arah relatif ${fmt(target)} derajat, 0 di atas searah jarum jam`:unverified?'Dial arah relatif: sudut belum terverifikasi, jarum disembunyikan':'Dial arah relatif: belum ada pengukuran valid';
  for(const dial of dials){
   dial.host.dataset.state=valid?'valid':unverified?'unverified':'none';
   dial.note.textContent=valid?'':unverified?'UNVERIFIED':'TANPA DATA';
   if(valid)dial.needle.style.setProperty('--a',`${needleTurn.toFixed(2)}deg`);
+  dial.trailDots.forEach((dot,index)=>{
+   const point=history[history.length-1-index];
+   if(!point){dot.setAttribute('opacity','0');return;}
+   const theta=point.angle*Math.PI/180,fade=1-(now-point.at)/TRAIL_MAX_AGE_MS;
+   dot.setAttribute('cx',(50*Math.sin(theta)).toFixed(1));dot.setAttribute('cy',(-50*Math.cos(theta)).toFixed(1));
+   dot.setAttribute('opacity',(Math.max(.12,fade*(1-index/TRAIL_LENGTH))*.85).toFixed(2));
+  });
   dial.host.setAttribute('aria-label',dial.host.id==='dial'?`${description}. Ketuk untuk mode baca jauh.`:description);
  }
 }
@@ -185,6 +207,47 @@ function renderData(s){
  if(prefix!==renderedTopicPrefix){renderedTopicPrefix=prefix;$('topicprefix').textContent=prefix;renderTopicList();}
  updateTopicStatuses(l.mqtt_topic_delivery||{});
 }
+const goodStages=new Set(['APPLIED','REBOOT_SCHEDULED','SHUTDOWN_SCHEDULED']);
+const badStages=new Set(['FAILED','REJECTED','EXPIRED','CONFLICT','CANCELLED']);
+const warnStages=new Set(['OUTCOME_UNKNOWN','PERSISTED_UNVERIFIED']);
+function stageTone(stage){return goodStages.has(stage)?'good':badStages.has(stage)?'bad':warnStages.has(stage)?'warn':'progress';}
+let seenOperation=undefined,toastTimer=null;
+function showToast(message,tone){
+ const toast=$('toast');toast.textContent=message;toast.className=`toast ${tone}`;toast.hidden=false;
+ if(toastTimer)clearTimeout(toastTimer);
+ toastTimer=setTimeout(()=>{toast.hidden=true;toastTimer=null;},4500);
+}
+// Stage codes are shown verbatim; colour only groups them. A finished stage is the journal
+// outcome, not proof that runtime state changed (e.g. PERSISTED_UNVERIFIED stays amber).
+function renderOperation(op){
+ const chip=$('cmdstage');
+ $('command').textContent=op?op.op:'Belum ada operasi';
+ chip.hidden=!op;
+ if(op){chip.textContent=op.stage;chip.className=`stagechip ${stageTone(op.stage)}`;}
+ const key=op?`${op.id}:${op.stage}`:null;
+ if(seenOperation===undefined){seenOperation=key;return;}
+ if(key===seenOperation)return;
+ seenOperation=key;
+ if(op&&stageTone(op.stage)!=='progress')showToast(`${op.op}: ${op.stage}`,stageTone(op.stage));
+}
+// Nav badges point at the tab that explains a problem; they never mark anything healthy.
+function tabAlerts(s){
+ const l=s.link||{},h=s.host||{},q=s.daq||{},c=s.config||{},p=s.processing||{};
+ const mqtt=[l.mqtt_control?.state,l.mqtt_bulk?.state];
+ const link=mqtt.includes('ERROR')?'bad':(l.ppp!=='UP'||l.usb!=='PRESENT'||['NO_REPLY','ERROR'].includes(l.ppp_probe)||mqtt.includes('CONNECTING'))?'warn':'';
+ const system=(q.state==='DEGRADED'||p.observed==='ERROR'||h.undervoltage===true)?'bad':(q.state!=='HEALTHY'||p.observed!=='RUNNING'||h.clock_trusted!==true)?'warn':'';
+ const config=c.source_configured?'':'warn';
+ const data=Object.values(l.mqtt_topic_delivery||{}).some(entry=>entry?.state==='ERROR'&&!deliverySkipped(entry))?'bad':'';
+ return {link,system,config,data};
+}
+function renderTabAlerts(s){
+ const alerts=tabAlerts(s);
+ for(const button of document.querySelectorAll('nav button')){
+  const level=alerts[button.dataset.tab]||'',name=button.querySelector('span').textContent;
+  if(level)button.dataset.alert=level;else delete button.dataset.alert;
+  button.setAttribute('aria-label',level?`${name}, ${level==='bad'?'ada masalah':'perlu perhatian'}`:name);
+ }
+}
 function render(s){
  const d=s.detection||{},l=s.link||{},h=s.host||{},q=s.daq||{},c=s.config||{},p=s.processing||{};
  const diag=s.diagnostic_doa||{},showDiagnostic=!d.valid&&diag.available;
@@ -195,7 +258,8 @@ function render(s){
  label('ppp',l.ppp||'--',l.ppp);label('mqtt',l.mqtt_control?.state||'DISABLED',l.mqtt_control?.state);
  $('angle-label').textContent=showDiagnostic?'DOA RAW / UNVERIFIED':'ARAH RELATIF';
  $('angle').textContent=showDiagnostic?fmt(diag.raw_doa_deg):d.valid?fmt(d.relative_doa_deg):'--';
- updateDial(d.valid?d.relative_doa_deg:null,showDiagnostic);
+ if(s.sid!==trailSid){trailSid=s.sid;bearingTrail=[];}
+ updateDial(d.valid?d.relative_doa_deg:null,showDiagnostic,d.q);
  $('angle').className=showDiagnostic?'warn':d.valid?'good':'neutral';
  $('age').textContent=showDiagnostic?`doa.xml / umur ${age(diag.source_age_ms)}`:d.valid?`Umur ${age(d.source_age_ms)}`:`${d.state||'MENUNGGU'} / ${age(d.source_age_ms)}`;
  $('frequency-label').textContent=showDiagnostic?'FREKUENSI XML':'FREKUENSI VFO';
@@ -203,7 +267,7 @@ function render(s){
  $('quality').textContent=showDiagnostic?`Gate: ${diagnosticReason}`:`PAPR ${fmt(d.confidence_native_db,2)} dB / P ${fmt(d.power_native_db)} dB`;
  label('daq',q.state==='HEALTHY'?'SINKRON':q.state||'UNKNOWN',q.state);
  label('sync',c.sdr_revision==null?'--':`r${c.sdr_revision}`,'');
- const op=s.last_operation;$('command').textContent=op?`${op.op} / ${op.stage}`:'Belum ada operasi';
+ renderOperation(s.last_operation);
  const alerts=s.active_alerts||[];const a=alerts.find(x=>x.severity==='error')||alerts[0];
  $('alert').textContent=a?a.text:'Status lokal normal';$('alertbox').className=`alert ${a?(a.severity==='error'?'bad':'warn'):'good'}`;
  $('alerticon').textContent=a?'!':'\u2713';$('temp').textContent=`${fmt(h.temperature_c)}\u00b0C`;
@@ -221,9 +285,10 @@ function render(s){
  $('admin').textContent=authenticated?'Logout':'Login';$('adminchip').hidden=!authenticated;
  $('configreason').textContent='Kontrol lokal memerlukan approval root satu kali; aksi tetap meminta PIN Admin dan konfirmasi layar.';
  const prefs={theme:'dark',accent:'teal',font:'system',...(c.preferences||{})};
- document.body.classList.toggle('light',prefs.theme==='light');
+ document.body.classList.toggle('light',prefs.theme==='light');document.body.classList.toggle('night',prefs.theme==='night');
  document.body.dataset.accent=prefs.accent;document.body.dataset.font=prefs.font;
  renderData(s);
+ renderTabAlerts(s);
 }
 async function get(path){const response=await fetch(path,{cache:'no-store',signal:AbortSignal.timeout(1200)});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json();}
 async function post(path,body,timeout=6000){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf||''},body:JSON.stringify(body),signal:AbortSignal.timeout(timeout)});let j=await response.json();if(!response.ok){const error=new Error(j.error||j.result?.error||j.stage||'Permintaan gagal');error.status=response.status;throw error;}return j;}
@@ -299,7 +364,33 @@ async function keepAdminSessionAlive(){
 }
 setInterval(keepAdminSessionAlive,ADMIN_SESSION_CHECK_MS);
 setInterval(()=>{const stale=Date.now()-lastProgress>5000;$('stale').hidden=!stale;if(stale)$('stalereason').textContent=Date.now()-lastApi>5000?'API lokal tidak merespons.':'API hidup, snapshot tidak bergerak.';const sec=snapshot.config?.preferences?.blank_after_seconds||0;if(sec>0&&Date.now()-lastTouch>sec*1000&&!snapshot.active_alerts?.some(x=>x.severity==='error'))$('blank').hidden=false;},250);
-for(const button of document.querySelectorAll('nav button'))button.addEventListener('click',()=>{for(const e of document.querySelectorAll('.page'))e.classList.toggle('active',e.id===button.dataset.tab);for(const e of document.querySelectorAll('nav button')){const active=e===button;e.classList.toggle('selected',active);if(active)e.setAttribute('aria-current','page');else e.removeAttribute('aria-current');}void refreshSpectrum(snapshot);});
+const tabOrder=Array.from(document.querySelectorAll('nav button'),button=>button.dataset.tab);
+function selectTab(tab,direction=0){
+ for(const page of document.querySelectorAll('.page')){
+  const active=page.id===tab;page.classList.toggle('active',active);page.classList.remove('enter-next','enter-prev');
+  if(active&&direction)page.classList.add(direction>0?'enter-next':'enter-prev');
+ }
+ for(const e of document.querySelectorAll('nav button')){const active=e.dataset.tab===tab;e.classList.toggle('selected',active);if(active)e.setAttribute('aria-current','page');else e.removeAttribute('aria-current');}
+ void refreshSpectrum(snapshot);
+}
+for(const button of document.querySelectorAll('nav button'))button.addEventListener('click',()=>selectTab(button.dataset.tab));
+// Horizontal touch swipe on a page moves to the neighbouring tab; the tap that ends a swipe
+// is swallowed so it cannot also press a button or open the far-reading view.
+let swipe=null,swallowClick=false;
+for(const page of document.querySelectorAll('.page')){
+ page.addEventListener('pointerdown',event=>{swipe=event.pointerType==='mouse'?null:{x:event.clientX,y:event.clientY,at:Date.now(),id:event.pointerId};});
+ page.addEventListener('pointercancel',()=>{swipe=null;});
+ page.addEventListener('pointerup',event=>{
+  if(!swipe||swipe.id!==event.pointerId)return;
+  const dx=event.clientX-swipe.x,dy=event.clientY-swipe.y,quick=Date.now()-swipe.at<700;swipe=null;
+  if(!quick||Math.abs(dx)<60||Math.abs(dx)<Math.abs(dy)*1.5)return;
+  const index=tabOrder.indexOf(page.id),next=index+(dx<0?1:-1);
+  if(next<0||next>=tabOrder.length)return;
+  swallowClick=true;setTimeout(()=>{swallowClick=false;},350);
+  selectTab(tabOrder[next],dx<0?1:-1);
+ });
+}
+document.addEventListener('click',event=>{if(swallowClick){swallowClick=false;event.preventDefault();event.stopPropagation();}},true);
 function segmented(id,onChange){
  const host=$(id);
  host.addEventListener('click',event=>{
@@ -593,7 +684,7 @@ function preferences(){
  const current={theme:'dark',accent:'teal',font:'system',blank_after_seconds:0,...(snapshot.config?.preferences||{})};
  const grid=document.createElement('div');grid.className='preference-grid';const selects={};
  const fields=[
-  ['theme','Mode',[['dark','Gelap'],['light','Terang']]],
+  ['theme','Mode',[['dark','Gelap'],['light','Terang'],['night','Malam (merah)']]],
   ['accent','Warna aksen',[['teal','Teal'],['blue','Biru'],['amber','Amber']]],
   ['font','Jenis huruf',[['system','Sistem'],['serif','Serif'],['mono','Monospace']]],
   ['blank_after_seconds','Layar padam',[['0','Tidak pernah'],['60','1 menit'],['300','5 menit'],['900','15 menit']]]
