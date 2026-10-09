@@ -1,36 +1,68 @@
 <!doctype html>
 <html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"><title>RDF Node</title><link rel="stylesheet" href="/style.css"></head>
 <body><main class="shell">
-<header><span class="brand"><b class="brand-dot"></b>RDF NODE <small id="mode"></small></span><span id="run" class="badge neutral">MENUNGGU</span></header>
+<header><span class="brand"><b class="brand-dot"></b>RDF NODE <small id="mode"></small></span><span class="head-right"><span id="adminchip" class="adminchip" hidden>ADMIN</span><span id="run" class="badge neutral">MENUNGGU</span></span></header>
 <section id="home" class="page active">
-<div class="linkstrip"><div><small>PPP LINK</small><b id="ppp">--</b></div><div><small>MQTT</small><b id="mqtt">--</b></div></div>
-<div class="primary"><div><small id="angle-label">ARAH RELATIF</small><strong id="angle">--<span>&deg;</span></strong><label id="age">Belum ada pengukuran</label></div><div><small id="frequency-label">FREKUENSI VFO</small><strong id="freq" class="frequency">-- <span>MHz</span></strong><label id="quality">Data source belum tersedia</label></div></div>
-<div class="daqstrip"><div><small>DAQ</small><b id="daq">BELUM DIKETAHUI</b></div><div><small>CONFIG REV</small><b id="sync">--</b></div></div>
-<div class="commandline"><span class="dim">CMD</span><span id="command">Belum ada operasi</span></div>
+<div class="statusbar">
+<div class="stat"><small>PPP</small><b id="ppp">--</b></div>
+<div class="stat"><small>MQTT</small><b id="mqtt">--</b></div>
+<div class="stat"><small>DAQ</small><b id="daq">BELUM DIKETAHUI</b></div>
+<div class="stat"><small>CONFIG REV</small><b id="sync">--</b></div>
+</div>
+<div class="hero">
+<div id="dial" class="dial" data-state="none" role="button" tabindex="0" aria-label="Dial arah relatif: belum ada pengukuran. Ketuk untuk mode baca jauh."></div>
+<div class="readout">
+<div class="reading"><small id="angle-label">ARAH RELATIF</small><div class="value-big"><strong id="angle" class="neutral">--</strong><span class="unit">&deg;</span></div><label id="age">Belum ada pengukuran</label></div>
+<div class="reading reading-freq"><small id="frequency-label">FREKUENSI VFO</small><div class="value-mid"><strong id="freq">--</strong><span class="unit">MHz</span></div><label id="quality">Data source belum tersedia</label></div>
+</div>
+</div>
+<div class="commandline"><span class="tag">CMD</span><span id="command">Belum ada operasi</span><span id="cmdstage" class="stagechip" hidden></span></div>
 <div id="alertbox" class="alert"><b id="alerticon">i</b><span id="alert">Memuat status lokal...</span><span id="temp">--</span></div>
 </section>
 <section id="link" class="page details">
-<div class="pagetitle"><b>KONEKSI / DELIVERY</b><button id="linkpage" class="smallbtn">Rincian &rsaquo;</button></div>
+<div class="pagetitle"><b>KONEKSI / DELIVERY</b><div id="linkpage" class="seg" role="group" aria-label="Tampilan halaman Link"><button type="button" data-view="0" class="on" aria-pressed="true">Koneksi</button><button type="button" data-view="1" aria-pressed="false">Rincian</button></div></div>
 <div id="linkrows" class="rows"></div>
 </section>
 <section id="system" class="page details">
-<div class="pagetitle"><b id="systitle">RDF / DAQ</b><button id="syspage" class="smallbtn">Host &rsaquo;</button></div>
+<div class="pagetitle"><b id="systitle">RDF / DAQ</b><div id="syspage" class="seg" role="group" aria-label="Tampilan halaman Sistem"><button type="button" data-view="0" class="on" aria-pressed="true">DAQ</button><button type="button" data-view="1" aria-pressed="false">Host</button></div></div>
 <div id="sysrows" class="rows"></div>
 </section>
 <section id="config" class="page details">
-<div class="pagetitle"><b>CONFIG / CONTROL</b><button id="admin" class="smallbtn">Login</button></div>
-<div id="configrows" class="configrows"></div>
-<div class="configbuttons"><button id="profilebtn">Profil</button><button id="controlbtn">Kontrol</button><button id="themebtn">Tampilan</button></div>
-<p id="configreason" class="hint">Read-only; pengaturan sumber melalui setup CLI.</p>
+<div class="pagetitle"><b>CONFIG / CONTROL</b><button id="admin" type="button" class="smallbtn">Login</button></div>
+<div id="configrows" class="rows configrows"></div>
+<div class="configbuttons">
+<button id="profilebtn" type="button"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>Profil</button>
+<button id="controlbtn" type="button"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3v8M6.3 7.5a8 8 0 1 0 11.4 0"/></svg>Kontrol</button>
+<button id="themebtn" type="button"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>Tampilan</button>
+<button id="blankbtn" type="button" aria-label="Layar hitam sekarang; ketuk layar untuk kembali"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 5h18v12H3zM8 21h8M12 17v4M2 2l20 20"/></svg>Layar hitam</button>
+</div>
 </section>
 <section id="data" class="page data-page">
-<div class="pagetitle"><b>DATA / MQTT</b><button id="mqttsettings" class="smallbtn">Login</button></div>
-<div class="data-summary"><div><small>CTRL / BULK</small><b id="mqttclients">DISABLED / DISABLED</b></div></div>
+<div class="pagetitle"><b>DATA / MQTT</b><button id="mqttsettings" type="button" class="smallbtn">Login</button></div>
+<div class="data-summary"><small>MQTT CTRL / BULK</small><b id="mqttclients">DISABLED / DISABLED</b></div>
 <div class="topic-heading"><span id="topicprefix"></span><span id="deliverylegend" aria-label="QoS 0 sukses berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker." title="QoS 0 sukses berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker.">QoS 0 lokal · QoS 1 PUBACK</span></div>
 <div id="topiclist" class="topic-list" tabindex="0" aria-label="Topik MQTT keluar Raspberry ke Ground dan topik masuk"></div>
 </section>
-<nav><button data-tab="home" class="selected" aria-current="page" aria-label="Utama"><span>&#9673;</span>Utama</button><button data-tab="link" aria-label="Link"><span>&#8644;</span>Link</button><button data-tab="system" aria-label="Sistem"><span>&#9638;</span>Sistem</button><button data-tab="config" aria-label="Config"><span>&#9881;</span>Config</button><button data-tab="data" aria-label="Data"><span>&#9634;</span>Data</button></nav>
-<div id="stale" hidden role="status" aria-live="polite"><b>SUMBER STATUS HILANG</b><span id="stalereason">API lokal tidak merespons.</span><small>Data di belakang bukan status terkini.</small><button id="retry" type="button">Coba lagi</button></div>
-<div id="modal" hidden><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="modaltitle"><div class="dialoghead"><b id="modaltitle">Login</b><button id="closemodal" aria-label="Tutup">&times;</button></div><div id="modalbody"></div><div id="modalmsg" class="hint" aria-live="polite"></div></div></div>
-<div id="blank" hidden><span>Ketuk untuk menampilkan indikator</span></div>
+<nav>
+<button type="button" data-tab="home" class="selected" aria-current="page" aria-label="Utama"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg><span>Utama</span></button>
+<button type="button" data-tab="link" aria-label="Link"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="10" r="1.6"/><path d="M12 12v9M8.5 6.5a5 5 0 0 0 0 7M15.5 6.5a5 5 0 0 1 0 7M5.6 3.6a9 9 0 0 0 0 12.8M18.4 3.6a9 9 0 0 1 0 12.8"/></svg><span>Link</span></button>
+<button type="button" data-tab="system" aria-label="Sistem"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx=".5"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg><span>Sistem</span></button>
+<button type="button" data-tab="config" aria-label="Config"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg><span>Config</span></button>
+<button type="button" data-tab="data" aria-label="Data"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M7 20V4M4 7l3-3 3 3M17 4v16M14 17l3 3 3-3"/></svg><span>Data</span></button>
+</nav>
+<div id="focus" hidden aria-label="Mode baca jauh; ketuk untuk kembali">
+<div id="focusdial" class="dial dial-large" data-state="none" role="img" aria-label="Dial arah relatif: belum ada pengukuran"></div>
+<div class="focus-readout">
+<small id="focus-angle-label">ARAH RELATIF</small>
+<div class="focus-angle"><strong id="focusangle" class="neutral">--</strong><span class="unit">&deg;</span></div>
+<label id="focusage">Belum ada pengukuran</label>
+<div class="focus-freq"><strong id="focusfreq">--</strong><span class="unit">MHz</span></div>
+<div class="focus-status"><b id="focusppp">PPP --</b><b id="focusmqtt">MQTT --</b><b id="focusdaq">DAQ --</b></div>
+<p id="focusalert" class="focus-alert"></p>
+</div>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<div id="stale" hidden role="status" aria-live="polite"><div class="stale-card"><b class="stale-icon" aria-hidden="true">!</b><b>SUMBER STATUS HILANG</b><span id="stalereason">API lokal tidak merespons.</span><small>Data di belakang bukan status terkini.</small><button id="retry" type="button">Coba lagi</button></div></div>
+<div id="modal" hidden><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="modaltitle"><div class="dialoghead"><b id="modaltitle">Login</b><button id="closemodal" type="button" aria-label="Tutup">&times;</button></div><div id="modalbody"></div><div id="modalmsg" class="hint" aria-live="polite"></div></div></div>
+<div id="blank" hidden aria-label="Layar hitam; ketuk untuk kembali"><div class="blank-clock"><strong id="blanktime">--:--</strong><span id="blankdate"></span><em id="blankclock" hidden>BELUM SINKRON</em></div></div>
 </main><script src="/app.js"></script></body></html>

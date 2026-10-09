@@ -538,7 +538,65 @@ $('refresh').onclick=()=>command('config.get');$('start').onclick=()=>command('p
  };
  $('setprofile').onclick=()=>command('stream.set',{profile:$('profile').value});
  $('ppp-restart').onclick=()=>{void requestPppRestart();};
-function plot(a){const c=$('plot').getContext('2d');c.clearRect(0,0,480,480);const cx=240,cy=240,r=180;c.strokeStyle='#31455e';c.lineWidth=1;c.fillStyle='#a6b7cf';c.font='14px system-ui';for(const x of [60,120,180]){c.beginPath();c.arc(cx,cy,x,0,Math.PI*2);c.stroke();}c.beginPath();c.moveTo(50,cy);c.lineTo(430,cy);c.moveTo(cx,50);c.lineTo(cx,430);c.stroke();c.fillText('0',234,35);c.fillText('90',439,244);c.fillText('180',228,455);c.fillText('270',10,244);if(!a)return;const v=a.values;if(!Array.isArray(v)||v.length!==360)return;const min=Math.min(...v),max=Math.max(...v),range=max-min;c.strokeStyle=a.stale?'#778493':'#79dce4';c.lineWidth=2;c.beginPath();v.forEach((x,i)=>{const radius=range===0?r/2:10+(r-10)*(x-min)/range;const theta=i*Math.PI/180;const px=cx+radius*Math.sin(theta),py=cy-radius*Math.cos(theta);if(i===0)c.moveTo(px,py);else c.lineTo(px,py);});c.closePath();c.stroke();}
+function plotColors(){const css=getComputedStyle(document.documentElement),v=name=>css.getPropertyValue(name).trim();return {face:v('--bg'),line:v('--line'),dim:v('--dim'),accent:v('--accent'),ok:v('--ok')};}
+// The Angular array is drawn by index (theta). A DoA needle is added only under theta_mirror,
+// where theta equals the relative DoA axis, and only for a valid, non-stale detection.
+function plot(a){
+ const canvas=$('plot'),dpr=Math.min(window.devicePixelRatio||1,3);
+ if(canvas.width!==Math.round(480*dpr)){canvas.width=Math.round(480*dpr);canvas.height=Math.round(480*dpr);}
+ const c=canvas.getContext('2d');c.setTransform(dpr,0,0,dpr,0,0);c.clearRect(0,0,480,480);
+ const col=plotColors(),cx=240,cy=240,r=200,inner=14;
+ const point=(deg,radius)=>{const t=deg*Math.PI/180;return [cx+radius*Math.sin(t),cy-radius*Math.cos(t)];};
+ c.fillStyle=col.face;c.beginPath();c.arc(cx,cy,r+10,0,Math.PI*2);c.fill();
+ c.strokeStyle=col.line;c.lineWidth=1;
+ for(const radius of [r/3,2*r/3,r]){c.beginPath();c.arc(cx,cy,radius,0,Math.PI*2);c.stroke();}
+ for(let deg=0;deg<360;deg+=10){const major=deg%30===0,[x1,y1]=point(deg,major?0:r-6),[x2,y2]=point(deg,r);c.globalAlpha=major?.9:.6;c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();}
+ c.globalAlpha=1;c.fillStyle=col.dim;c.font='600 12px system-ui,sans-serif';c.textAlign='center';c.textBaseline='middle';
+ for(let deg=0;deg<360;deg+=30){const [x,y]=point(deg,r-20);c.fillText(String(deg),x,y);}
+ if(!a)return;const v=a.values;if(!Array.isArray(v)||v.length!==360||!v.every(Number.isFinite))return;
+ const min=Math.min(...v),max=Math.max(...v),range=max-min,radiusOf=x=>range===0?r/2:inner+(r-34-inner)*(x-min)/range;
+ const stroke=a.stale?col.dim:col.accent;
+ c.beginPath();v.forEach((x,i)=>{const [px,py]=point(i,radiusOf(x));if(i===0)c.moveTo(px,py);else c.lineTo(px,py);});c.closePath();
+ c.globalAlpha=.16;c.fillStyle=stroke;c.fill();c.globalAlpha=1;c.strokeStyle=stroke;c.lineWidth=2;c.lineJoin='round';c.stroke();
+ if(Number.isInteger(a.peak_index)&&a.peak_index>=0&&a.peak_index<360){
+  const [px,py]=point(a.peak_index,radiusOf(v[a.peak_index]));
+  c.fillStyle=stroke;c.beginPath();c.arc(px,py,5,0,Math.PI*2);c.fill();c.strokeStyle=col.face;c.lineWidth=2;c.stroke();
+ }
+ const d=snapshot.detection||{};
+ if(!a.stale&&d.valid&&Number.isFinite(d.relative_doa_deg)&&snapshot.capabilities?.angle==='theta_mirror'){
+  const [tx,ty]=point(d.relative_doa_deg,r-30),[lx,ly]=point(d.relative_doa_deg-4,r-46),[rx,ry]=point(d.relative_doa_deg+4,r-46);
+  c.strokeStyle=col.ok;c.lineWidth=3;c.lineCap='round';c.beginPath();c.moveTo(cx,cy);c.lineTo(tx,ty);c.stroke();
+  c.fillStyle=col.ok;c.beginPath();c.moveTo(...point(d.relative_doa_deg,r-24));c.lineTo(lx,ly);c.lineTo(rx,ry);c.closePath();c.fill();
+ }
+ c.fillStyle=col.face;c.strokeStyle=col.dim;c.lineWidth=2;c.beginPath();c.arc(cx,cy,5,0,Math.PI*2);c.fill();c.stroke();
+}
+const runNames={0:'STOPPED',1:'RUNNING',2:'STARTING',3:'STOPPING',4:'ERROR',255:'UNKNOWN'},daqNames={0:'DEGRADED',1:'HEALTHY',2:'UNKNOWN'};
+// Tiles mirror telemetry/health codes. When health is not fresh every node-reported tile is
+// dimmed: the last values stay readable but are not presented as current.
+function renderHealth(s){
+ const h=s.health||{},fresh=s.health_fresh===true,mqtt=s.link?.mqtt_control?.state||'--',ageMs=s.health_age_ms;
+ const tone=(value,good,bad)=>value===good?'good':value===bad?'bad':value==null?'':'warn';
+ const tiles=[
+  ['Health',fresh?`FRESH · ${ageMs??'--'} ms`:ageMs==null?'BELUM ADA':`STALE · ${(ageMs/1000).toFixed(1)} s`,fresh?'good':'bad',true],
+  ['MQTT Control',mqtt,mqtt==='CONNECTED'?'good':mqtt==='ERROR'?'bad':'warn',true],
+  ['Proses SDR',runNames[h.run]??'--',tone(h.run,1,4)],
+  ['DAQ',daqNames[h.daq]??'--',tone(h.daq,1,0)],
+  ['Jam node',h.clk===1?'SINKRON':h.clk===0?'TIDAK DIPERCAYA':'--',h.clk===1?'good':h.clk===0?'warn':''],
+  ['Umur source',Number.isFinite(h.age)?`${(h.age/1000).toFixed(1)} s`:'--',''],
+  ['Drop frame',h.drop??'--',h.drop>0?'warn':''],
+  ['Suhu',Number.isFinite(h.temp)?`${h.temp.toFixed(1)} °C`:'--',''],
+  ['Config rev',h.rev??s.config?.sdr_revision??'--',''],
+  ['Profil',s.node_state?.profile||'--','']
+ ];
+ const grid=$('healthgrid');
+ grid.replaceChildren(...tiles.map(([name,value,level,current])=>{
+  const tile=document.createElement('div');tile.className=`tile ${level}${current?' freshness':''}`;
+  const caption=document.createElement('small');caption.textContent=name;const strong=document.createElement('b');strong.textContent=String(value);
+  tile.append(caption,strong);return tile;
+ }));
+ grid.classList.toggle('stale',!fresh);
+}
+function setStatePill(text,level){$('state').textContent=text;$('state').className=`statepill ${level}`;}
 async function poll(manual=false){
  if(pollPending){if(manual)pollAgain=true;return;}
  pollPending=true;
@@ -560,9 +618,11 @@ updateActionButtons();
   document.querySelector('main').classList.remove('data-stale');
   const d=snapshot.detection||{};
   renderDiagnostic(snapshot.diagnostic_doa);
-  $('state').textContent=`${snapshot.mode} / ${snapshot.health_fresh?'HEALTH FRESH':'HEALTH STALE'} / MQTT ${snapshot.link?.mqtt_control?.state||'--'}`;
+  const mqttState=snapshot.link?.mqtt_control?.state||'--';
+  setStatePill(`${snapshot.mode} / ${snapshot.health_fresh?'HEALTH FRESH':'HEALTH STALE'} / MQTT ${mqttState}`,mqttState==='ERROR'?'bad':snapshot.health_fresh&&mqttState==='CONNECTED'?'good':'warn');
   $('angle').textContent=d.valid?`${d.relative_doa_deg.toFixed(1)}\u00b0`:'--';
   $('metadata').textContent=`VFO ${d.frequency_hz?(d.frequency_hz/1e6).toFixed(3):'--'} MHz; PAPR ${d.confidence_native_db??'--'} dB; data diterima ${d.received_age_ms??'--'} ms`;
+  renderHealth(snapshot);
   $('health').textContent=JSON.stringify({health:snapshot.health,health_age_ms:snapshot.health_age_ms,config:snapshot.config,capabilities:snapshot.capabilities},null,2);
   try{
    const a=await get('/api/v2/angular/latest');plot(a);$('plot').classList.remove('stale');
@@ -576,7 +636,7 @@ updateActionButtons();
   updateSettingsButton();
   updateShutdownButton();
   updatePppButton();
-  $('state').textContent='GROUND API UNAVAILABLE';document.querySelector('main').classList.add('data-stale');
+  setStatePill('GROUND API UNAVAILABLE','bad');document.querySelector('main').classList.add('data-stale');
   $('plot').classList.add('stale');
   apiStatus(`Ground API tidak merespons (${e.message}). Data terakhir tetap ditampilkan sebagai STALE.`);
  }
@@ -592,4 +652,5 @@ $('retry').onclick=()=>{
  if(pollPending){pollAgain=true;return;}
  void poll(true);
 };
+plot(null);
 get('/api/v2/session').then(r=>{csrf=r.csrf;updatePppButton();updateSettingsButton();updateShutdownButton();if(csrf)void refreshPppHistory(true);}).catch(()=>{});poll();
