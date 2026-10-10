@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 @rdf-node/AGENTS.md
 
-The import above is the main repository guide: architecture, module boundaries, conventions, and testing limits. This file adds only what that guide leaves out. There are two AGENTS.md files: `rdf-node/AGENTS.md` is newer. The root `AGENTS.md` still describes angular chunk reassembly, Ground receipts, and local approval for Ground commands, and all three are out of date (see "Current behavior" below).
+The import above is the main repository guide: architecture, module boundaries, conventions, and testing limits. This file adds only what that guide leaves out. There are two AGENTS.md files: `rdf-node/AGENTS.md` is newer than the root one, but both still describe angular chunk reassembly, Ground receipts, and local approval for privileged/Ground commands (the "Ground data" and "Commands" bullets). All three are out of date; "Current behavior" below wins wherever they disagree.
 
 ## Layout
 
@@ -30,6 +30,8 @@ PYTHONPATH=../src:../vendor python3 -m unittest test_system.ApiTests.<test_metho
 ```
 
 `run.py` puts `src/` and `vendor/` (bundled PyYAML) on `sys.path` itself. There is no install step for development.
+
+All roles share one CLI (`src/rdf_node/cli.py`): `run.py edge|ground|demo` start the HTTP server plus Agent or Ground receiver; `helper` runs the privileged Unix-socket helper; `doctor`, `setup`, `set-pin`, `import-bundle`, and `controls approve|shutdown-reconcile` are deployment tools. Non-demo roles default to `/etc/rdf-node/config.yaml` (Ground: `/etc/rdf-ground/config.yaml`), so use `demo` for local runs.
 
 ## Gotchas
 
