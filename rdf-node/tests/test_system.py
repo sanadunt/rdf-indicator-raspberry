@@ -1568,6 +1568,23 @@ class BackupLinkTests(unittest.TestCase):
         self.assertEqual((a.journal.lookup(command['id'])['actor'],a.journal.lookup(command['id'])['stage']),
                          ('ground-controller','APPLIED'))
 
+    def test_pending_backup_settings_request_is_freed_when_backup_drops(self):
+        a=self.a
+        (a.source.path/'settings.json').write_bytes(compact(settings()));a.source.poll(force=True)
+        a.cfg['mqtt']['tls']=True
+        control,bulk,backup=self.links()
+        topic=a.prefix+'/cmd/config/get'
+        request=self.request('config.get')
+        self.assertEqual(a.commands.submit(request,'ground-controller',topic=topic,link='backup')['stage'],'APPLIED')
+        backup.ready=False
+        self.run_once()
+        self.assertIsNone(a.settings_request_id)
+        self.assertNotIn('settings/reported',self.suffixes(control)+self.suffixes(backup))
+        a.commands.last_rate.clear()
+        primary=self.request('config.get')
+        self.assertEqual(a.commands.submit(primary,'ground-controller',topic=topic,link='primary')['stage'],'APPLIED')
+        self.assertEqual(a.settings_request_link,'primary')
+
     def test_config_get_requires_tls_on_the_requesting_link(self):
         a=self.a
         (a.source.path/'settings.json').write_bytes(compact(settings()));a.source.poll(force=True)
@@ -1858,6 +1875,10 @@ class BackupApiTests(unittest.TestCase):
                 self.assertEqual(self.a._load_backup_settings(),defaults)
         atomic_write(self.a.backup_state_path,compact(saved),0o600)
         self.assertEqual(self.a._load_backup_settings(),{k:saved[k] for k in Agent.BACKUP_KEYS})
+        # 'config' credentials disappear from config.yaml: fall back to config, never to anonymous.
+        atomic_write(self.a.backup_state_path,compact(dict(saved,auth='config')),0o600)
+        self.assertIsNone(self.a.cfg['mqtt']['backup']['credentials_file'])
+        self.assertEqual(self.a._load_backup_settings(),defaults)
 
     def test_backup_settings_unavailable_on_ground_and_in_demo(self):
         cfg=load_config();cfg['state_dir']=str(self.path/'ground-backup')

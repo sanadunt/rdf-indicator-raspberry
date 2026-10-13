@@ -56,7 +56,7 @@ class Agent:
         self.backup_reconfigure=threading.Event(); self.backup_pending=None
         self.mqtt_backup_topic_delivery={}; self._backup_generation=-1
         self.backup_bulk_reason=None; self.backup_last_angular_q=0; self.backup_angular_abort=0
-        self.settings_request_link=None
+        self.settings_request_link=None; self.backup_client_id=None
         self.backup_desired=self._load_backup_settings()
         self.backup_active=self.backup_desired
         self.backup_client=self._new_backup_client(self.backup_desired)
@@ -247,6 +247,7 @@ class Agent:
                 return defaults
             settings={key:value[key] for key in self.BACKUP_KEYS}
             self._validate_backup_settings(settings)
+            if settings['auth']=='config' and not self.cfg['mqtt']['backup']['credentials_file']: return defaults
             if settings['enabled'] and not self._backup_transport_ready(settings): return defaults
             return settings
         except (OSError,KeyError,TypeError,ValueError): return defaults
@@ -260,7 +261,8 @@ class Agent:
              'transport':settings['transport'],'websocket_path':settings['websocket_path'],
              'keepalive':self.cfg['mqtt']['keepalive'],'reconnect_max':self.cfg['mqtt']['reconnect_max']}
         path=self._backup_credentials_path(settings)
-        return Client(cfg=cfg,client_id=self._backup_client_id(),credentials_file=str(path) if path else None,
+        self.backup_client_id=self._backup_client_id()
+        return Client(cfg=cfg,client_id=self.backup_client_id,credentials_file=str(path) if path else None,
                       subscriptions=self._command_subscriptions() if settings['commands'] else (),will=self._will(),
                       on_message=lambda topic,payload,retained,e=epoch:self._incoming(topic,payload,retained,link='backup',epoch=e),
                       rate=b['budget_bytes_s'])
@@ -282,7 +284,8 @@ class Agent:
                     'tls':settings['tls'],'commands':settings['commands'],
                     'auth':'none' if settings['auth']=='none' else 'account',
                     'credentials_set':bool(path and self._credentials_ready(path)),'trust_mode':trust,
-                    'client_id':self._backup_client_id(),'editable':not self.demo,
+                    'client_id':self.backup_client_id if self.backup_client else self._backup_client_id(),
+                    'editable':not self.demo,
                     'apply_pending':self.backup_reconfigure.is_set()}
     def configure_mqtt_backup(self,value):
         keys={'enabled','host','port','transport','websocket_path','tls','commands','auth','username','password'}
@@ -599,6 +602,9 @@ class Agent:
                 if backup_hello and not state_sent:
                     self._offer('state','state',state,1,True,priority=1,links=('backup',))
                 with self.settings_request_lock:
+                    # A report for a backup session that dropped can never be delivered; free the slot.
+                    if self.settings_request_id and self.settings_request_link=='backup' and not b_ready:
+                        self.settings_request_id=None; self.settings_request_payload=None
                     settings_id=self.settings_request_id; settings_payload=self.settings_request_payload
                     settings_link=self.settings_request_link or 'primary'
                 # Raw settings only travel over TLS, and only back to the link that asked for them.
