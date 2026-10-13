@@ -45,6 +45,30 @@ MQTT Control Packets travel only in WebSocket binary frames; the parser treats t
 byte stream, not frame-aligned packets. Client frames are masked, server frames must be unmasked,
 and fragmentation/control frames are handled.
 
+## Broker cadangan
+
+Edge dapat memakai satu broker cadangan opsional (`mqtt.backup`, panel `Data > Cadangan`) sebagai
+mirror LAN/online yang independen dari PPP/T900. Kontrak wire tidak berubah: prefix, topic,
+payload, QoS, retained, dan expiry identik dengan broker utama, dengan client ID
+`{client_id}-backup`, transport/TLS sendiri, dan budget `mqtt.backup.budget_bytes_s` yang terpisah
+dari budget T900. Data tetap dikirim ke cadangan saat broker utama tidak READY.
+
+Aturan khusus per broker:
+
+- `availability`/`capabilities` dikirim saat koneksi masing-masing broker siap; Last Will berlaku
+  per koneksi.
+- Angular normal ke cadangan dijadwalkan sendiri (interval profile dan budget cadangan) dan tidak
+  dipause oleh alasan khusus T900 (`BULK_NOT_READY`, `CONTROL_BACKLOG`, `WAIT_STABLE`).
+- Bila `mqtt.backup.commands: true`, Edge subscribe `cmd/*` yang sama di broker cadangan dan
+  memproses command itu seperti command Ground (actor `ground-controller`). ACK command dari
+  cadangan hanya dikirim ke cadangan; ACK command dari broker utama atau panel lokal dikirim ke semua
+  broker READY.
+- `config.get` memerlukan TLS pada broker asal request, dan `settings/reported` hanya dikirim ke
+  broker itu.
+
+Detail per topic ada di [MQTT_TOPIC_SUMMARY.md](MQTT_TOPIC_SUMMARY.md#broker-cadangan); konfigurasi,
+ACL, dan routing di [MQTT_GROUND.md](MQTT_GROUND.md#broker-cadangan-mirror-lanonline).
+
 ## DoA compact
 
 ```json
@@ -139,8 +163,9 @@ Edge merespons lewat `settings/reported` dengan QoS 1, non-retained, expiry 30 s
 
 Field wajib tepat `v,sid,boot,id,rev,t,settings_json`. `settings_json` menyimpan teks UTF-8
 persis dari file native yang berhasil dibaca, bukan normalisasi atau safe-field serialization.
-TLS wajib; Edge menolak TLS-off, source settings unavailable/stale, atau compact envelope di atas
-8.192 byte dengan error spesifik. Edge tidak memotong atau memecah report. `ack/config` memuat
+TLS wajib pada broker asal request; Edge menolak TLS-off, source settings unavailable/stale, atau
+compact envelope di atas 8.192 byte dengan error spesifik. Report hanya dikirim ke broker yang
+meminta (utama atau cadangan), tidak di-mirror. Edge tidak memotong atau memecah report. `ack/config` memuat
 status/error command; settings datang pada PUBLISH terpisah.
 
 Ground menerima hanya PUBLISH non-retained yang cocok dengan pending `id`, session `sid`, `boot`,

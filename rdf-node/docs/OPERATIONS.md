@@ -27,6 +27,13 @@ tetap mengikuti provisioning bundle; halaman lokal tidak menyediakan bypass veri
 Perubahan broker/credential mengganti kedua client dan menghapus cache session lama. Bulk lanjut
 setelah kedua koneksi MQTT siap dan masa `resume_stable_seconds` berlalu. Telemetry tidak
 bergantung pada konfirmasi Ground.
+Broker cadangan (`Data > Cadangan`) disimpan terpisah di
+`/var/lib/rdf-node/mqtt-ui-backup-settings.json` dan akunnya di `mqtt-ui-backup-account.json`,
+keduanya mode 0600. File panel yang valid menggantikan `mqtt.backup` di `config.yaml`; hapus kedua
+file lalu restart `rdf-edge.service` untuk kembali ke `config.yaml`. Menyimpan pengaturan cadangan
+hanya mengganti client cadangan; koneksi broker utama tidak diputus. `ca_file`,
+`credentials_file`, dan `budget_bytes_s` cadangan hanya diatur di `config.yaml`. Lihat
+[MQTT_GROUND.md](MQTT_GROUND.md#broker-cadangan-mirror-lanonline).
 Source permission memakai ACL terbatas pada _share; tidak chmod777 atau recursive home read.
 Untuk menampilkan file settings native dari Ground, operator harus memakai `Refresh config`.
 Export memerlukan MQTT TLS aktif, source settings tersedia dan fresh, serta compact MQTT
@@ -45,7 +52,8 @@ Redact identifier sensitif sebelum membagikan diagnosis.
 
 Backup yang disarankan pada media aman:
 - /etc/rdf-node (termasuk credentials, harus dianggap rahasia);
-- /var/lib/rdf-node (SQLite journal, MQTT credential UI mode 0600; perlakukan sebagai rahasia);
+- /var/lib/rdf-node (SQLite journal, MQTT credential UI mode 0600 termasuk akun broker cadangan
+  `mqtt-ui-backup-account.json`; perlakukan sebagai rahasia);
 - /etc/rdf-node/helper.yaml dan /var/lib/rdf-node-control (intent/backupsettings);
 - /etc/rdf-ground dan /etc/rdf-ground-mqtt pada Ubuntu;
 - konfigurasi asli unit SDR/watchdog sebelum approval lifecycle.
@@ -114,6 +122,27 @@ memerlukan approval single-writer. Ground tidak memakai approval root lokal.
 Ground membutuhkan MQTT Control ready dan session/health node fresh untuk mutasi. Jika MQTT
 Control putus sepenuhnya, Ground tidak dapat mengirim PPP restart atau command lain.
 
+## Broker cadangan: keamanan dan routing
+
+Broker cadangan mengirim salinan semua data Edge ke broker LAN/online dan tetap berjalan saat
+PPP/T900 atau broker utama mati. Bila `Terima perintah` aktif (default), command dari broker
+cadangan dijalankan **seperti command Ground**, termasuk reboot, shutdown, restart PPP, dan patch
+settings, tanpa approval root per aksi. Batasi ACL publish `<prefix>/cmd/#` di broker cadangan
+hanya untuk controller tepercaya dan jangan izinkan anonymous publish. Jangan aktifkan
+`Terima perintah` pada broker publik atau bersama. Untuk menutup seluruh akses write remote, cabut
+ACL `cmd/#` di kedua broker atau set `Terima perintah: Nonaktif`.
+
+Broker dengan ACL publish-only harus dipasangkan dengan `Terima perintah: Nonaktif`; bila broker
+menolak subscribe `cmd/*`, client cadangan terus reconnect dengan error `SUBACK_REJECTED` dan
+tidak pernah READY.
+Broker LAN self-signed memerlukan `mqtt.backup.ca_file` (dan SAN yang cocok dengan host/IP) atau
+TLS nonaktif pada LAN tepercaya; tanpa itu muncul `TLS_CERTIFICATE_VERIFY_FAILED`.
+
+Edge mengikuti routing OS. Sebelum mengaktifkan broker online, jalankan
+`ip route get <host-cadangan>`. Bila keluar lewat PPP (`ppp0`), trafik cadangan memakai bandwidth
+T900 di luar budget agregat T900 (default cadangan 8.000 B/s) dan dapat mengganggu telemetry dan
+command utama. Pastikan ada uplink LAN/Wi-Fi/seluler dengan route ke broker cadangan.
+
 ## Uninstall
 
 ```bash
@@ -155,7 +184,8 @@ systemd dan tidak mematikan mesin.
 Acceptance Raspberry belum dilakukan untuk T900 restart/pemulihan link, runtime settings SDR,
 cold boot, autologin/compositor, touchscreen, PSU/thermal, performa receiver Chromium,
 semantik config native, cakupan detached child process, callback convergence, latency radio,
-interoperabilitas Mosquitto, adapter dashboard lama, atau reboot/shutdown nyata. Semua ini tetap
+interoperabilitas Mosquitto, broker cadangan LAN/online dan routing-nya, adapter dashboard lama,
+atau reboot/shutdown nyata. Semua ini tetap
 perlu diuji pada perangkat; kelulusan test fixture/unit tidak membuktikannya.
 
 Untuk acceptance T900 dengan pengawasan, periksa dahulu unit fixed ini secara read-only:

@@ -24,12 +24,14 @@ wrapper chunk atau Base64. MQTT tidak mengirim raw IQ, raw CSV, koordinat GPS, k
 
 ## Koneksi dan pemisahan kanal
 
-Edge membuka dua MQTT client:
+Edge membuka dua MQTT client ke broker utama (PPP/T900), ditambah satu client opsional ke broker
+cadangan:
 
 | Kanal | Client ID | Hak data |
 |---|---|---|
 | Control | `{client_id}-control` | Publish JSON telemetry (termasuk `telemetry/doa` UNVERIFIED dan topik diagnostik), state, capabilities, settings response, availability, ACK; subscribe command. |
 | Bulk | `{client_id}-bulk` | Publish satu object JSON untuk `telemetry/angular` normal, termasuk varian UNVERIFIED dengan flags parsial. Tidak subscribe command dan tidak memiliki hak command. |
+| Backup (opsional) | `{client_id}-backup` | Satu koneksi ke broker cadangan LAN/online yang publish salinan semua topic Edge di atas; subscribe command hanya bila `mqtt.backup.commands` / `Terima perintah` aktif. |
 | Ground | `{node_id}-ground` | Subscribe data operasional/ACK dan settings response yang diminta; publish command. |
 
 Kredensial Control dan Bulk terpisah bila digunakan; tanpa kredensial, client memakai anonymous
@@ -39,6 +41,24 @@ Jika broker mengizinkan publish anonymous ke topic tersebut, publisher yang menj
 memakai operasi remote yang aktif. Plaintext mengekspos credential dan payload; gunakan hanya
 pada link privat terisolasi/tepercaya. MQTT memakai Clean Start dan Session Expiry 0; reconnect
 membuat sesi baru tanpa replay offline. QoS 2 dan persistent broker session tidak didukung.
+
+### Broker cadangan
+
+Broker cadangan memakai prefix dan topic yang identik, payload yang sama, serta QoS, retained, dan
+expiry yang sama seperti tabel di bawah; kolom `Kanal` hanya berlaku untuk broker utama karena
+semua topic cadangan lewat satu client `{client_id}-backup`. Konfigurasi, panel, ACL, dan risiko
+routing dijelaskan di [MQTT_GROUND.md](MQTT_GROUND.md#broker-cadangan-mirror-lanonline). Perbedaan
+per topic:
+
+| Topic | Perilaku di broker cadangan |
+|---|---|
+| `telemetry/health`, `telemetry/health/detail`, `telemetry/doa`, `telemetry/diagnostic/doa`, `state` | Dikirim pada jadwal yang sama ke setiap broker READY. Bila broker utama mati, cadangan tetap menerimanya. |
+| `availability`, `capabilities` | Dikirim saat koneksi cadangan (re)connect; reconnect cadangan juga mengirim ulang `state`. Last Will `availability` offline berlaku per koneksi, jadi availability di cadangan menggambarkan koneksi cadangan saja. |
+| `telemetry/angular` | Jadwal sendiri: `max(interval_profile, (payload + topic + 160) / mqtt.backup.budget_bytes_s)`. Tidak dipause oleh `BULK_NOT_READY`, `CONTROL_BACKLOG`, atau `WAIT_STABLE`; tetap dipause oleh `PROFILE_CONTROL`, `SOURCE_NOT_ELIGIBLE`, dan `CONTROL_IN_PROGRESS`. |
+| `telemetry/diagnostic/angular` | Hanya saat alasan level source memblokir Angular dan profile bukan `control`; minimum 6 s (source tidak eligible) atau 30 s (command berjalan), diperpanjang oleh budget cadangan. Sequence `q` diagnostic dipakai bersama kedua broker, jadi dapat melompat di salah satu broker. |
+| `ack/config`, `ack/operation` | Command yang datang dari broker cadangan dijawab hanya di broker cadangan. Command dari broker utama atau panel Edge lokal dijawab ke semua broker READY. |
+| `settings/reported` | Hanya ke broker yang mengirim `cmd/config/get`, dan hanya bila broker itu memakai TLS. Tidak di-mirror. |
+| `cmd/*` | Disubscribe di broker cadangan hanya bila `Terima perintah` aktif. Command diproses seperti command Ground (actor `ground-controller`). |
 
 ## Daftar lengkap topic
 
@@ -121,6 +141,14 @@ Untuk setiap outgoing PUBLISH, kode menghitung `len(MQTT packet) + 142`, lalu me
 Kesimpulan: bila Raspberry memakai budget default dan tidak ada trafik PPP lain yang berarti, rata-rata MQTT Edge diperkirakan muat di bawah 15 kbit/s. Jangan klaim hard cap 15 kbit/s dari limiter ini saja. Untuk batas fisik yang tegas diperlukan shaper bersama pada interface/link dan pengukuran aktual. `telemetry/health/detail.tx` dan `.rx` menunjukkan rate interface dalam kbit/s untuk acceptance, tetapi belum ada pengukuran T900 nyata pada penilaian ini.
 
 Jika perangkat memakai nilai MQTT budget berbeda dari `config/example.yaml`, hitung ulang dari konfigurasi aktual. Untuk limit agregat yang ketat, sisakan margin untuk overhead dan trafik non-MQTT.
+
+Broker cadangan memiliki bucket sendiri, `mqtt.backup.budget_bytes_s` (default 8.000 byte/s,
+rentang 1.000..200.000), yang **tidak** dihitung dalam estimasi 15 kbit/s di atas maupun dalam
+pemeriksaan agregat Control+Bulk. Dengan fixture di bagian berikut, trafik PUBLISH ke cadangan kira-kira
+445 B/s tanpa Angular (`control`), sekitar 1.192 B/s (9,5 kbit/s) pada `balanced` karena Angular
+dikirim tiap 4 s, dan sekitar 1.939 B/s (15,5 kbit/s) pada `graph_u8` karena Angular tiap 2 s;
+belum termasuk TCP/TLS/WebSocket/IP. Angka ini aman untuk LAN/internet, tetapi bila route ke broker
+cadangan lewat PPP, trafik itu ditambahkan ke beban T900 dan dapat melampaui 15 kbit/s.
 
 
 ## Ukuran payload dan laju aktual
@@ -547,6 +575,7 @@ Status yang dikenal jurnal mencakup `ACCEPTED`, `APPLYING`, `VERIFYING`, `REBOOT
 |---|---|
 | Edge Control | Publish topic operasional, `settings/reported`, ACK dan availability milik node sendiri; subscribe `sdr/v2/{node_id}/cmd/#`. |
 | Edge Bulk | Publish hanya `sdr/v2/{node_id}/telemetry/angular`. |
+| Edge Backup (broker cadangan) | Publish semua topic Edge milik node (gabungan hak Control dan Bulk); subscribe `sdr/v2/{node_id}/cmd/#` hanya bila `Terima perintah` aktif. SUBACK yang ditolak membuat client cadangan tidak READY. Batasi publish `cmd/#` di broker ini sama ketatnya dengan broker utama. |
 | Ground controller | Subscribe topic operasional/ACK dan `settings/reported`; publish `sdr/v2/{node_id}/cmd/#`. |
 | Ground viewer | Subscribe saja; tanpa hak publish command dan tanpa credential controller. |
 
@@ -558,7 +587,9 @@ Pada API Edge `GET /api/v2/link`, `mqtt_topic_delivery.<suffix>.state` dan `conf
 menunjukkan tahap pengiriman. Untuk QoS 0, `confirmation="SOCKET_WRITE"` hanya membuktikan
 penulisan ke socket lokal; untuk QoS 1, `PUBACK` membuktikan broker mengakui PUBLISH.
 Tidak ada konfirmasi delivery aplikasi dari Ground ke Edge. Periksa Ground API untuk status
-penerimaan dan validasi.
+penerimaan dan validasi. `mqtt_topic_delivery` hanya untuk broker utama; status kirim ke broker
+cadangan ada di peta terpisah `mqtt_backup.topic_delivery`, bersama `mqtt_backup.state`, `ready`,
+dan `error`.
 
 Pada API Ground, `GET /api/v2/link` menunjukkan status client dan counter kumulatif `rejected`.
 Counter itu juga naik ketika antrean penerimaan penuh; ia bukan error code dan tidak menunjukkan
@@ -637,4 +668,4 @@ Jangan mempromosikan frame parsial menjadi LIVE hanya agar dashboard tampak vali
 - `src/rdf_node/control.py`: daftar operasi, envelope validation, idempotency dan ACK.
 - `src/rdf_node/codec.py`: validasi field dan 360 nilai Angular JSON.
 - `docs/PROTOCOL.md`: kontrak wire dan batas freshness.
-- `docs/MQTT_GROUND.md`: transport, provisioning dan ACL Ground.
+- `docs/MQTT_GROUND.md`: transport, provisioning, ACL Ground, dan broker cadangan.

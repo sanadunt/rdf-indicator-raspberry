@@ -122,6 +122,85 @@ class ConfigTests(unittest.TestCase):
         c=load_config();c['telemetry']['profile']='fast'
         with self.assertRaises(ValueError):validate_config(c)
 
+class BackupConfigTests(unittest.TestCase):
+    def backup(self,**changes):
+        c=load_config();c['mqtt']['backup'].update(changes);return c
+    def test_backup_defaults_are_valid_and_disabled(self):
+        c=load_config()
+        self.assertEqual(c['mqtt']['backup'],{'enabled':False,'host':None,'port':8883,'transport':'tcp',
+                                              'websocket_path':'/mqtt','tls':True,'ca_file':None,
+                                              'credentials_file':None,'commands':True,'budget_bytes_s':8000})
+        validate_config(c)
+    def test_enabled_backup_requires_host(self):
+        c=self.backup(enabled=True)
+        with self.assertRaisesRegex(ValueError,'MQTT_BACKUP_HOST_REQUIRED'):validate_config(c)
+        for host in ('backup.example.net','192.168.10.20'):
+            validate_config(self.backup(enabled=True,host=host))
+        # A disabled backup may keep a host for later use.
+        validate_config(self.backup(enabled=False,host='backup.example.net'))
+    def test_backup_rejects_invalid_values(self):
+        cases=(
+            ('transport','udp','INVALID_MQTT_TRANSPORT'),
+            ('port',0,'INTEGER_OUT_OF_RANGE'),('port',65536,'INTEGER_OUT_OF_RANGE'),
+            ('port','8883','INTEGER_OUT_OF_RANGE'),('port',True,'INTEGER_OUT_OF_RANGE'),
+            ('budget_bytes_s',999,'INTEGER_OUT_OF_RANGE'),('budget_bytes_s',200001,'INTEGER_OUT_OF_RANGE'),
+            ('budget_bytes_s',8000.0,'INTEGER_OUT_OF_RANGE'),
+            ('enabled','false','BOOLEAN_REQUIRED'),('tls',1,'BOOLEAN_REQUIRED'),('commands',None,'BOOLEAN_REQUIRED'),
+            ('websocket_path','/mqtt\r\nHost:attacker','INVALID_MQTT_WEBSOCKET_PATH'),
+            ('websocket_path','mqtt','INVALID_MQTT_WEBSOCKET_PATH'),
+            ('host','broker.local/path','INVALID_MQTT_HOST'),('host','','INVALID_MQTT_HOST'),
+            ('host',' broker.local','INVALID_MQTT_HOST'),
+            ('ca_file','certs/ca.pem','ABSOLUTE_PATH_REQUIRED'),
+            ('credentials_file','backup.json','ABSOLUTE_PATH_REQUIRED'),
+            ('credentials_file',5,'ABSOLUTE_PATH_REQUIRED'),
+        )
+        for key,value,error in cases:
+            with self.subTest(key=key,value=value):
+                with self.assertRaisesRegex(ValueError,error):validate_config(self.backup(**{key:value}))
+        for budget in (1000,200000):
+            validate_config(self.backup(budget_bytes_s=budget))
+        validate_config(self.backup(enabled=True,host='backup.example.net',ca_file='/etc/rdf-node/backup-ca.pem',
+                                    credentials_file='/etc/rdf-node/backup.json',transport='websocket',
+                                    websocket_path='/mqtt?node=uav',commands=False))
+    def test_backup_yaml_rejects_unknown_key_and_wrong_types(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'c.yaml'
+            p.write_text('mqtt:\n  backup:\n    enabled: false\n    fallback_only: true\n')
+            with self.assertRaisesRegex(ValueError,'mqtt.backup.fallback_only: UNKNOWN_CONFIG_KEY'):load_config(p)
+            p.write_text('mqtt:\n  backup:\n    commands: "false"\n')
+            with self.assertRaisesRegex(ValueError,'mqtt.backup.commands: BOOLEAN_REQUIRED'):load_config(p)
+            p.write_text('mqtt:\n  backup:\n    port: "1883"\n')
+            with self.assertRaisesRegex(ValueError,'mqtt.backup.port: INTEGER_REQUIRED'):load_config(p)
+            p.write_text('mqtt:\n  backup:\n    ca_file: 5\n')
+            with self.assertRaisesRegex(ValueError,'mqtt.backup.ca_file: STRING_OR_NULL_REQUIRED'):load_config(p)
+            p.write_text('mqtt:\n  backup:\n    enabled: true\n')
+            with self.assertRaisesRegex(ValueError,'MQTT_BACKUP_HOST_REQUIRED'):load_config(p)
+            p.write_text('mqtt:\n  backup:\n    enabled: true\n    host: 192.168.10.20\n    port: 1883\n'
+                         '    tls: false\n    commands: false\n    budget_bytes_s: 20000\n')
+            backup=load_config(p)['mqtt']['backup']
+            self.assertEqual((backup['enabled'],backup['host'],backup['port'],backup['tls'],backup['commands'],
+                              backup['budget_bytes_s'],backup['transport']),
+                             (True,'192.168.10.20',1883,False,False,20000,'tcp'))
+    def test_backup_plaintext_loopback_requires_explicit_test_opt_in(self):
+        for host in ('127.0.0.1','localhost','::1'):
+            with self.subTest(host=host):
+                c=self.backup(enabled=True,host=host,tls=False)
+                with self.assertRaisesRegex(ValueError,'PLAINTEXT_ONLY_EXPLICIT_LOOPBACK_TEST'):validate_config(c)
+                c['mqtt']['allow_insecure_loopback']=True;validate_config(c)
+                validate_config(self.backup(enabled=True,host=host,tls=True))
+        # Plaintext on a LAN or remote backup broker is an explicit, allowed choice.
+        validate_config(self.backup(enabled=True,host='192.168.10.20',tls=False,port=1883))
+        validate_config(self.backup(enabled=True,host='backup.example.net',tls=False,transport='websocket',port=80))
+    def test_backup_budget_is_not_counted_in_t900_aggregate(self):
+        c=self.backup(budget_bytes_s=200000)
+        c['telemetry'].update(control_budget_bytes_s=1000,bulk_budget_bytes_s=500)
+        validate_config(c)
+        c['telemetry']['control_budget_bytes_s']=1001
+        with self.assertRaisesRegex(ValueError,'AGGREGATE_BUDGET_TOO_HIGH'):validate_config(c)
+        c=self.backup(budget_bytes_s=1000)
+        c['telemetry'].update(control_budget_bytes_s=1001,bulk_budget_bytes_s=500)
+        with self.assertRaisesRegex(ValueError,'AGGREGATE_BUDGET_TOO_HIGH'):validate_config(c)
+
 class ParserTests(unittest.TestCase):
     def test_377_csv_values(self):
         r=parse_csv(csv_bytes(record()),settings());self.assertEqual(len(r['values']),360);self.assertEqual(r['raw_doa_deg'],10)

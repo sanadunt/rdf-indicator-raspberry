@@ -574,9 +574,9 @@ function attachMqttKeyboard(box,entries){
   if(entry.field.parentNode===editor&&entry.parent)entry.parent.insertBefore(entry.field,entry.next&&entry.next.parentNode===entry.parent?entry.next:null);
  }
  function revealField(field){
-  const view=box.getBoundingClientRect(),rect=field.getBoundingClientRect();
-  if(rect.top<view.top)box.scrollTop-=view.top-rect.top;
-  else if(rect.bottom>view.bottom)box.scrollTop+=rect.bottom-view.bottom;
+  const view=box.getBoundingClientRect(),rect=field.getBoundingClientRect(),pad=4;
+  if(rect.top-pad<view.top)box.scrollTop-=view.top-rect.top+pad;
+  else if(rect.bottom+pad>view.bottom)box.scrollTop+=rect.bottom-view.bottom+pad;
  }
  function updateKeyboardAction(){
   if(!active)return;

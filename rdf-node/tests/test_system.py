@@ -8,6 +8,7 @@ from rdf_node.config import load_config
 from rdf_node.api import Auth,Server,set_pin
 from rdf_node.util import now_ms,compact,atomic_write
 from rdf_node.monitor import Monitor
+from rdf_node.control import OPS
 from test_core import settings,record,csv_bytes,status
 from broker_fixture import Broker,wait
 
@@ -1387,3 +1388,670 @@ class EndToEndTests(unittest.TestCase):
                 self.assertFalse(broker.errors)
             finally:
                 agent.stop();ground.stop();broker.stop()
+
+
+def capture_client(name,ready=True,confirm=False):
+    """Fake MQTT client: records offers; `confirm` reports delivery like a socket write."""
+    client=Client(cfg={},client_id=name);client.ready=ready;client.connected=ready;client.sent=[]
+    def offer(key,topic,payload,**options):
+        client.sent.append((key,topic,payload,options))
+        if confirm and options.get('on_sent'):options['on_sent']()
+        return True
+    client.offer=offer;return client
+
+def backup_body(**changes):
+    body={'enabled':True,'host':'backup.example.net','port':8883,'transport':'tcp','websocket_path':'/mqtt',
+          'tls':True,'commands':True,'auth':'account','username':'backup-user','password':'backup-secret'}
+    body.update(changes);return body
+
+BACKUP_DEFAULT_VIEW={'enabled':False,'host':'','port':8883,'transport':'tcp','websocket_path':'/mqtt','tls':True,
+                     'commands':True,'auth':'none','credentials_set':False,'trust_mode':'system',
+                     'client_id':'uav-01-backup','editable':True,'apply_pending':False}
+
+
+class BackupLinkTests(unittest.TestCase):
+    """Backup broker scheduling, ACK routing and delivery maps with fake clients (no network)."""
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.path=Path(os.path.realpath(self.tmp.name))
+        self.a=make_agent(self.path);self.addCleanup(self.a.journal.close)
+    def links(self,primary=True,bulk=True,backup=True,backup_tls=True):
+        a=self.a
+        control=capture_client('cap-control',primary);bulk_client=capture_client('cap-bulk',bulk)
+        backup_client=capture_client('cap-backup',backup)
+        a.clients={'control':control,'bulk':bulk_client};a.backup_client=backup_client
+        a.backup_active=dict(a.backup_active,enabled=True,host='backup.example.net',tls=backup_tls)
+        return control,bulk_client,backup_client
+    def run_once(self,snapshot=None):
+        a=self.a;snap=snapshot if snapshot is not None else a.snapshot();real=a.snapshot
+        a.stop_event.clear()
+        def one_snapshot():
+            a.stop_event.set();return snap
+        a.snapshot=one_snapshot
+        try:a._schedule()
+        finally:a.snapshot=real
+        self.assertFalse(str(a.bulk_reason).startswith('SCHEDULER_'),a.bulk_reason)
+    def suffixes(self,client):
+        return [topic.split(self.a.prefix+'/',1)[1] for _,topic,_,_ in client.sent]
+    def payloads(self,client,suffix):
+        return [json.loads(payload) for _,topic,payload,_ in client.sent if topic==self.a.prefix+'/'+suffix]
+    def request(self,op,**extras):
+        a=self.a
+        return dict(v=2,id=op.replace('.','-')+'-'+uuid.uuid4().hex[:12],sid=a.sid,boot=a.boot,issued_ms=now_ms(),
+                    expires_ms=now_ms()+15000,base_rev=a.source.revision,op=op,**extras)
+    def ack_ids(self,client,suffix='ack/operation'):
+        return [(p['id'],p['status']) for p in self.payloads(client,suffix)]
+
+    def test_disabled_backup_snapshot_shape(self):
+        self.assertIsNone(self.a.backup_client)
+        snapshot=self.a.snapshot()
+        self.assertEqual(snapshot['link']['mqtt_backup'],
+                         {'enabled':False,'commands':True,'state':'DISABLED','ready':False,'error':None,'depth':0,
+                          'pending_age_ms':0,'bulk_pause':None,'angular_aborted':0,'topic_delivery':{}})
+        self.assertFalse(snapshot['config']['mqtt_backup_configured'])
+
+    def test_scheduler_mirrors_every_topic_to_primary_and_backup(self):
+        a=self.a;a.profile='balanced';a.cfg['telemetry']['resume_stable_seconds']=0;a.bulk_resume_after=0
+        control,bulk,backup=self.links()
+        self.run_once()
+        expected={'availability','capabilities','state','telemetry/health','telemetry/doa'}
+        self.assertLessEqual(expected,set(self.suffixes(control)),self.suffixes(control))
+        self.assertLessEqual(expected,set(self.suffixes(backup)),self.suffixes(backup))
+        self.assertEqual(self.suffixes(bulk),['telemetry/angular'])
+        self.assertIn('telemetry/angular',self.suffixes(backup))
+        self.assertNotIn('telemetry/angular',self.suffixes(control))
+        self.assertNotIn('telemetry/diagnostic/angular',self.suffixes(backup))
+        for suffix in ('availability','capabilities','state'):
+            options=[o for _,topic,_,o in backup.sent if topic==a.prefix+'/'+suffix][0]
+            self.assertEqual((options['qos'],options['retain']),(1,True),suffix)
+        for suffix in ('telemetry/health','telemetry/doa','state'):
+            self.assertEqual(self.payloads(control,suffix),self.payloads(backup,suffix),suffix)
+        primary_frame=self.payloads(bulk,'telemetry/angular')[0];backup_frame=self.payloads(backup,'telemetry/angular')[0]
+        self.assertEqual(primary_frame,backup_frame)
+        self.assertEqual((backup_frame['encoding'],len(backup_frame['values']),backup_frame['flags']),('json',360,63))
+        self.assertEqual(self.payloads(backup,'availability')[0]['online'],True)
+        self.assertIsNone(a.bulk_reason);self.assertIsNone(a.backup_bulk_reason)
+        self.assertEqual(a.backup_last_angular_q,a.last_angular_q)
+
+    def test_backup_angular_ignores_primary_only_pauses(self):
+        a=self.a
+        for reason in ('BULK_NOT_READY','CONTROL_BACKLOG','WAIT_STABLE'):
+            with self.subTest(reason=reason):
+                a.profile='balanced';a.bulk_resume_after=0;a.last_angular_q=0;a.backup_last_angular_q=0
+                control,bulk,backup=self.links(bulk=reason!='BULK_NOT_READY')
+                a._generation=control.generation;a._backup_generation=backup.generation
+                if reason=='CONTROL_BACKLOG':control.pending_age_ms=1000
+                if reason=='WAIT_STABLE':a.bulk_resume_after=time.monotonic()+60
+                self.run_once()
+                self.assertEqual(a.bulk_reason,reason)
+                self.assertIsNone(a.backup_bulk_reason)
+                self.assertNotIn('telemetry/angular',self.suffixes(bulk))
+                self.assertIn('telemetry/angular',self.suffixes(backup))
+                self.assertNotIn('telemetry/diagnostic/angular',self.suffixes(backup))
+                self.assertEqual(len(self.payloads(backup,'telemetry/angular')[0]['values']),360)
+
+    def test_source_level_reasons_pause_angular_on_both_links(self):
+        a=self.a;live=a.snapshot()
+        ineligible=copy.deepcopy(live);ineligible['detection'].update(valid=False,reasons=['DAQ_NOT_HEALTHY'])
+        for reason in ('PROFILE_CONTROL','CONTROL_IN_PROGRESS','SOURCE_NOT_ELIGIBLE'):
+            with self.subTest(reason=reason):
+                a.profile='control' if reason=='PROFILE_CONTROL' else 'balanced'
+                a.commands.busy=reason=='CONTROL_IN_PROGRESS';a.bulk_resume_after=0
+                a.last_angular_q=0;a.backup_last_angular_q=0
+                control,bulk,backup=self.links()
+                a._generation=control.generation;a._backup_generation=backup.generation
+                try:self.run_once(ineligible if reason=='SOURCE_NOT_ELIGIBLE' else live)
+                finally:a.commands.busy=False
+                self.assertEqual((a.bulk_reason,a.backup_bulk_reason),(reason,reason))
+                self.assertNotIn('telemetry/angular',self.suffixes(bulk))
+                self.assertNotIn('telemetry/angular',self.suffixes(backup))
+                diagnostic='telemetry/diagnostic/angular' in self.suffixes(backup)
+                self.assertEqual(diagnostic,reason!='PROFILE_CONTROL')
+
+    def test_backup_keeps_publishing_when_primary_is_down_or_disabled(self):
+        a=self.a;a.profile='balanced'
+        for case in ('down','disabled'):
+            with self.subTest(case=case):
+                a.backup_last_angular_q=0;a.last_angular_q=0;a.last_doa_q=0;a.last_sent_state=None;a._backup_generation=-1
+                control,bulk,backup=self.links(primary=False,bulk=False)
+                if case=='disabled':a.clients={}
+                self.run_once()
+                self.assertEqual(a.bulk_reason,'MQTT_NOT_READY')
+                self.assertIsNone(a.backup_bulk_reason)
+                self.assertLessEqual({'availability','capabilities','state','telemetry/health','telemetry/doa',
+                                      'telemetry/angular'},set(self.suffixes(backup)))
+                self.assertEqual((control.sent,bulk.sent),([],[]))
+
+    def test_backup_down_leaves_primary_schedule_unchanged(self):
+        a=self.a;a.profile='balanced';a.cfg['telemetry']['resume_stable_seconds']=0;a.bulk_resume_after=0
+        control,bulk,backup=self.links(backup=False)
+        self.run_once()
+        self.assertEqual(backup.sent,[])
+        self.assertEqual(a.backup_bulk_reason,'MQTT_NOT_READY');self.assertIsNone(a.bulk_reason)
+        self.assertIn('telemetry/health',self.suffixes(control));self.assertIn('telemetry/angular',self.suffixes(bulk))
+
+    def test_command_acks_return_to_the_link_that_sent_them(self):
+        a=self.a;control,bulk,backup=self.links()
+        query=self.request('operation.get',target_id='missing')
+        result=a.commands.submit(query,'ground-controller',topic=a.prefix+'/cmd/operation/get',link='backup')
+        self.assertEqual(result['stage'],'APPLIED')
+        self.assertEqual(self.ack_ids(backup),[(query['id'],'APPLIED')])
+        self.assertEqual(self.ack_ids(control),[])
+        options=[o for _,topic,_,o in backup.sent if topic.endswith('/ack/operation')][0]
+        self.assertEqual((options['qos'],options['retain'],options['priority']),(1,False,0))
+        rejected=self.request('stream.set',profile='turbo')
+        a.commands.submit(rejected,'ground-controller',topic=a.prefix+'/cmd/stream/set',link='backup')
+        self.assertIn((rejected['id'],'REJECTED'),self.ack_ids(backup))
+        self.assertEqual(self.ack_ids(control),[])
+        primary=self.request('operation.get',target_id=query['id'])
+        a.commands.submit(primary,'ground-controller',topic=a.prefix+'/cmd/operation/get',link='primary')
+        self.assertEqual(self.ack_ids(control),[(primary['id'],'APPLIED')])
+        self.assertIn((primary['id'],'APPLIED'),self.ack_ids(backup))
+        local=self.request('operation.get',target_id=query['id'])
+        self.assertEqual(a.commands.submit(local,'local-admin')['stage'],'APPLIED')
+        self.assertIn((local['id'],'APPLIED'),self.ack_ids(control))
+        self.assertIn((local['id'],'APPLIED'),self.ack_ids(backup))
+        # Replaying a journaled backup command answers on the backup link only.
+        control.sent.clear();backup.sent.clear()
+        a.commands.submit(query,'ground-controller',topic=a.prefix+'/cmd/operation/get',link='backup')
+        self.assertEqual(self.ack_ids(backup),[(query['id'],'APPLIED')]);self.assertEqual(control.sent,[])
+
+    def test_worker_command_from_backup_acks_only_on_backup(self):
+        a=self.a;control,bulk,backup=self.links()
+        a.commands.start();self.addCleanup(a.commands.stop)
+        command=self.request('stream.set',profile='graph_u8')
+        result=a.commands.submit(command,'ground-controller',topic=a.prefix+'/cmd/stream/set',link='backup')
+        self.assertEqual(result['stage'],'ACCEPTED')
+        self.assertTrue(wait(lambda:(command['id'],'APPLIED') in self.ack_ids(backup),5),self.ack_ids(backup))
+        self.assertIn((command['id'],'ACCEPTED'),self.ack_ids(backup))
+        self.assertEqual(self.ack_ids(control),[])
+        self.assertEqual(a.profile,'graph_u8')
+        self.assertEqual((a.journal.lookup(command['id'])['actor'],a.journal.lookup(command['id'])['stage']),
+                         ('ground-controller','APPLIED'))
+
+    def test_config_get_requires_tls_on_the_requesting_link(self):
+        a=self.a
+        (a.source.path/'settings.json').write_bytes(compact(settings()));a.source.poll(force=True)
+        a.cfg['mqtt']['tls']=True
+        control,bulk,backup=self.links(backup_tls=False)
+        topic=a.prefix+'/cmd/config/get'
+        plain=self.request('config.get')
+        result=a.commands.submit(plain,'ground-controller',topic=topic,link='backup')
+        self.assertEqual((result['stage'],result['result']['error']),('REJECTED','TLS_REQUIRED_FOR_SETTINGS_REPORT'))
+        self.assertEqual(self.ack_ids(backup,'ack/config'),[(plain['id'],'REJECTED')])
+        self.assertEqual(self.ack_ids(control,'ack/config'),[])
+        self.assertIsNone(a.settings_request_id)
+        # Backup TLS on: the raw settings report goes back to the backup only.
+        a.backup_active=dict(a.backup_active,tls=True);a.commands.last_rate.clear()
+        secure=self.request('config.get')
+        self.assertEqual(a.commands.submit(secure,'ground-controller',topic=topic,link='backup')['stage'],'APPLIED')
+        self.assertEqual(a.settings_request_link,'backup')
+        for client in (control,bulk,backup):client.sent.clear()
+        self.run_once()
+        reports=self.payloads(backup,'settings/reported')
+        self.assertEqual([p['id'] for p in reports],[secure['id']])
+        self.assertNotIn('settings/reported',self.suffixes(control)+self.suffixes(bulk))
+        self.assertIsNone(a.settings_request_id)
+        # Primary plaintext: rejected even though the backup is TLS; primary TLS: report to primary only.
+        a.cfg['mqtt']['tls']=False;a.commands.last_rate.clear()
+        primary_plain=self.request('config.get')
+        result=a.commands.submit(primary_plain,'ground-controller',topic=topic,link='primary')
+        self.assertEqual(result['result']['error'],'TLS_REQUIRED_FOR_SETTINGS_REPORT')
+        a.cfg['mqtt']['tls']=True;a.commands.last_rate.clear()
+        primary=self.request('config.get')
+        self.assertEqual(a.commands.submit(primary,'ground-controller',topic=topic,link='primary')['stage'],'APPLIED')
+        for client in (control,bulk,backup):client.sent.clear()
+        self.run_once()
+        self.assertEqual([p['id'] for p in self.payloads(control,'settings/reported')],[primary['id']])
+        self.assertNotIn('settings/reported',self.suffixes(backup))
+
+    def test_config_get_rate_limit_is_per_link(self):
+        a=self.a
+        (a.source.path/'settings.json').write_bytes(compact(settings()));a.source.poll(force=True)
+        a.cfg['mqtt']['tls']=True;self.links()
+        first=self.request('operation.get',target_id='missing');second=self.request('operation.get',target_id='missing')
+        topic=a.prefix+'/cmd/operation/get'
+        self.assertEqual(a.commands.submit(first,'ground-controller',topic=topic,link='primary')['stage'],'APPLIED')
+        self.assertEqual(a.commands.submit(second,'ground-controller',topic=topic,link='backup')['stage'],'APPLIED')
+        third=self.request('operation.get',target_id='missing')
+        self.assertEqual(a.commands.submit(third,'ground-controller',topic=topic,link='backup')['result']['error'],
+                         'REQUEST_RATE_LIMIT')
+
+    def test_backup_publish_failures_use_a_separate_delivery_map(self):
+        a=self.a
+        a.clients={'control':capture_client('cap-control',confirm=True)}
+        a.backup_client=Client(cfg={},client_id='offline-backup')
+        self.assertTrue(a._offer('health','telemetry/health',{'v':2}))
+        self.assertFalse(a._offer('caps','capabilities',{'v':2},1,True,links=('backup',)))
+        a._snapshot();link=a.snapshot()['link']
+        primary=link['mqtt_topic_delivery'];backup=link['mqtt_backup']['topic_delivery']
+        self.assertEqual((primary['telemetry/health']['state'],primary['telemetry/health']['error']),('SENT',None))
+        self.assertNotIn('capabilities',primary)
+        self.assertEqual((backup['telemetry/health']['state'],backup['telemetry/health']['error']),('ERROR','MQTT_DISCONNECTED'))
+        self.assertEqual((backup['capabilities']['state'],backup['capabilities']['qos'],backup['capabilities']['confirmation']),
+                         ('ERROR',1,'PUBACK'))
+        self.assertTrue(link['mqtt_backup']['enabled'])
+        # And the reverse: a failing primary never overwrites backup delivery evidence.
+        a.clients={'control':Client(cfg={},client_id='offline-control')}
+        a.backup_client=capture_client('cap-backup',confirm=True)
+        self.assertTrue(a._offer('detail','telemetry/health/detail',{'v':2}))
+        a._snapshot();link=a.snapshot()['link']
+        self.assertEqual(link['mqtt_topic_delivery']['telemetry/health/detail']['error'],'MQTT_DISCONNECTED')
+        self.assertEqual(link['mqtt_backup']['topic_delivery']['telemetry/health/detail']['state'],'SENT')
+        self.assertEqual(link['mqtt_topic_delivery']['telemetry/health']['state'],'SENT')
+
+    def test_backup_client_identity_subscriptions_and_budget(self):
+        a=self.a
+        a.configure_mqtt_backup(backup_body(auth='none',username='',password=''))
+        a._apply_pending_backup();client=a.backup_client
+        self.assertEqual(client.client_id,'uav-01-backup')
+        self.assertEqual(sorted(topic for topic,_,_ in client.subscriptions),
+                         sorted(a.prefix+'/'+suffix for suffix in OPS.values()))
+        self.assertTrue(all(qos==1 for _,qos,_ in client.subscriptions))
+        self.assertEqual(client.will[0],a.prefix+'/availability')
+        self.assertEqual(json.loads(client.will[1])['online'],False)
+        self.assertEqual((client.cfg['host'],client.cfg['port'],client.cfg['tls'],client.cfg['ca_file']),
+                         ('backup.example.net',8883,True,None))
+        self.assertIsNone(client.credentials_file)
+        self.assertEqual(client.bucket.rate,a.cfg['mqtt']['backup']['budget_bytes_s'])
+        self.assertFalse(client.bulk)
+        self.assertNotIn(client,a.clients.values())
+        a.configure_mqtt_backup(backup_body(auth='none',username='',password='',commands=False))
+        a._apply_pending_backup()
+        self.assertEqual(a.backup_client.subscriptions,[])
+        self.assertTrue(client.stop_event.is_set())
+        a._snapshot();self.assertFalse(a.snapshot()['link']['mqtt_backup']['commands'])
+
+    def test_live_reconfigure_keeps_the_other_link_clients(self):
+        a=self.a
+        control=Client(cfg={},client_id='keep-control');bulk=Client(cfg={},client_id='keep-bulk',bulk=True)
+        a.clients={'control':control,'bulk':bulk}
+        a.configure_mqtt_backup(backup_body(auth='none',username='',password=''))
+        a._apply_pending_backup()
+        self.assertIs(a.clients['control'],control);self.assertIs(a.clients['bulk'],bulk)
+        self.assertFalse(control.stop_event.is_set() or bulk.stop_event.is_set())
+        backup=a.backup_client;self.assertIsNotNone(backup)
+        a.mqtt_topic_delivery['telemetry/health']={'state':'SENT'}
+        a.configure_mqtt({'enabled':False,'host':'ground.example','port':8883,'client_id':'uav-01',
+                          'transport':'tcp','tls':True,'websocket_path':'/mqtt',
+                          'control':{'username':'','password':''},'bulk':{'username':'','password':''}})
+        a._apply_pending_mqtt()
+        self.assertEqual(a.clients,{})
+        self.assertTrue(control.stop_event.is_set())
+        self.assertIs(a.backup_client,backup);self.assertFalse(backup.stop_event.is_set())
+        # Disabling the backup stops only the backup client.
+        primary=capture_client('cap-control');a.clients={'control':primary}
+        a.configure_mqtt_backup(backup_body(enabled=False,host='',auth='none',username='',password=''))
+        a._apply_pending_backup()
+        self.assertIsNone(a.backup_client);self.assertTrue(backup.stop_event.is_set())
+        self.assertIs(a.clients['control'],primary)
+        a._snapshot();snapshot=a.snapshot()
+        self.assertEqual(snapshot['link']['mqtt_backup']['state'],'DISABLED')
+        self.assertFalse(snapshot['config']['mqtt_backup_configured'])
+
+
+class BackupApiTests(unittest.TestCase):
+    setUp=ApiTests.setUp;shutdown=ApiTests.shutdown;http=ApiTests.http;login=ApiTests.login
+    def post(self,body):
+        code,_,response=self.http('POST','/api/v2/mqtt/backup',body);return code,json.loads(response)
+    def state(self,name):return Path(self.a.cfg['state_dir'])/name
+
+    def test_backup_settings_require_admin_session_and_csrf(self):
+        code,_,response=self.http('GET','/api/v2/mqtt/backup')
+        self.assertEqual((code,json.loads(response)),(401,{'error':'AUTHENTICATION_REQUIRED'}))
+        self.assertEqual(self.http('POST','/api/v2/mqtt/backup',backup_body())[0],403)
+        self.login();csrf=self.csrf;self.csrf=''
+        self.assertEqual(self.http('POST','/api/v2/mqtt/backup',backup_body())[0],403)
+        self.csrf='wrong-'+csrf
+        self.assertEqual(self.http('POST','/api/v2/mqtt/backup',backup_body())[0],403)
+        self.assertFalse(self.state('mqtt-ui-backup-settings.json').exists())
+        self.assertFalse(self.state('mqtt-ui-backup-account.json').exists())
+        self.csrf=csrf
+        code,_,response=self.http('GET','/api/v2/mqtt/backup')
+        self.assertEqual((code,json.loads(response)),(200,BACKUP_DEFAULT_VIEW))
+
+    def test_backup_settings_reject_invalid_bodies_with_spec_codes(self):
+        self.login()
+        missing=backup_body();del missing['commands']
+        cases=(
+            (dict(backup_body(),extra=1),'INVALID_MQTT_BACKUP_SETTINGS'),
+            (missing,'INVALID_MQTT_BACKUP_SETTINGS'),
+            (backup_body(auth='config'),'INVALID_MQTT_BACKUP_SETTINGS'),
+            (backup_body(auth='anonymous',username='',password=''),'INVALID_MQTT_BACKUP_SETTINGS'),
+            (backup_body(enabled='true'),'INVALID_MQTT_BACKUP_SETTINGS'),
+            (backup_body(tls=0),'INVALID_MQTT_BACKUP_SETTINGS'),
+            (backup_body(commands=None),'INVALID_MQTT_BACKUP_SETTINGS'),
+            (backup_body(host='broker.local/path'),'INVALID_MQTT_HOST'),
+            (backup_body(host=''),'INVALID_MQTT_HOST'),
+            (backup_body(host=' 192.168.1.20'),'INVALID_MQTT_HOST'),
+            (backup_body(host=5),'INVALID_MQTT_HOST'),
+            (backup_body(enabled=False,host='bad host'),'INVALID_MQTT_HOST'),
+            (backup_body(port=0),'INVALID_MQTT_PORT'),(backup_body(port=65536),'INVALID_MQTT_PORT'),
+            (backup_body(port='8883'),'INVALID_MQTT_PORT'),(backup_body(port=True),'INVALID_MQTT_PORT'),
+            (backup_body(port=1883.5),'INVALID_MQTT_PORT'),
+            (backup_body(transport='udp'),'INVALID_MQTT_TRANSPORT'),
+            (backup_body(transport='websocket',websocket_path='/mqtt\r\nHost:attacker'),'INVALID_MQTT_WEBSOCKET_PATH'),
+            (backup_body(auth='none'),'INVALID_MQTT_CREDENTIALS'),
+            (backup_body(auth='none',username='',password='p'),'INVALID_MQTT_CREDENTIALS'),
+            (backup_body(username='backup-user',password=''),'INCOMPLETE_MQTT_CREDENTIALS'),
+            (backup_body(username='',password='backup-secret'),'INCOMPLETE_MQTT_CREDENTIALS'),
+            (backup_body(username=5),'INVALID_MQTT_CREDENTIALS'),
+            (backup_body(password='x'*513),'INVALID_MQTT_CREDENTIALS'),
+            (backup_body(username='user\x00'),'INVALID_MQTT_CREDENTIALS'),
+            (backup_body(username='',password=''),'MQTT_BACKUP_CREDENTIALS_REQUIRED'),
+        )
+        for body,error in cases:
+            with self.subTest(body=body):
+                self.assertEqual(self.post(body),(400,{'error':error}))
+        self.assertEqual(self.http('POST','/api/v2/mqtt/backup',raw=b'[]')[0],400)
+        self.assertFalse(self.state('mqtt-ui-backup-settings.json').exists())
+        self.assertFalse(self.state('mqtt-ui-backup-account.json').exists())
+        self.assertEqual(self.a.mqtt_backup_view(),BACKUP_DEFAULT_VIEW)
+
+    def test_backup_settings_disabled_allows_blank_host_and_anonymous(self):
+        self.login()
+        code,view=self.post(backup_body(enabled=False,host='',auth='none',username='',password=''))
+        self.assertEqual(code,200,view)
+        self.assertEqual(view,dict(BACKUP_DEFAULT_VIEW,apply_pending=True))
+        code,view=self.post(backup_body(auth='none',username='',password='',tls=False,port=1883,commands=False))
+        self.assertEqual(code,200,view)
+        self.assertEqual((view['enabled'],view['auth'],view['credentials_set'],view['trust_mode'],view['commands']),
+                         (True,'none',False,'plaintext',False))
+        self.assertFalse(self.state('mqtt-ui-backup-account.json').exists())
+
+    def test_backup_account_secrets_stay_in_private_files(self):
+        self.login()
+        code,_,response=self.http('POST','/api/v2/mqtt/backup',backup_body())
+        self.assertEqual(code,200,response)
+        self.assertNotIn(b'backup-secret',response);self.assertNotIn(b'backup-user',response)
+        self.assertEqual(json.loads(response),dict(BACKUP_DEFAULT_VIEW,enabled=True,host='backup.example.net',
+                                                    auth='account',credentials_set=True,apply_pending=True))
+        settings_file=self.state('mqtt-ui-backup-settings.json');account_file=self.state('mqtt-ui-backup-account.json')
+        self.assertEqual(json.loads(settings_file.read_bytes()),
+                         {'schema':1,'enabled':True,'host':'backup.example.net','port':8883,'transport':'tcp',
+                          'websocket_path':'/mqtt','tls':True,'commands':True,'auth':'account'})
+        self.assertEqual(json.loads(account_file.read_bytes()),{'username':'backup-user','password':'backup-secret'})
+        self.assertEqual(stat.S_IMODE(settings_file.stat().st_mode),0o600)
+        self.assertEqual(stat.S_IMODE(account_file.stat().st_mode),0o600)
+        code,_,response=self.http('GET','/api/v2/mqtt/backup')
+        self.assertEqual(code,200);self.assertNotIn(b'backup-secret',response);self.assertNotIn(b'backup-user',response)
+        self.a._apply_pending_backup();self.a._snapshot()
+        self.assertEqual(self.a.backup_client.credentials_file,str(account_file))
+        code,_,response=self.http('GET','/api/v2/snapshot')
+        self.assertEqual(code,200)
+        for secret in (b'backup-secret',b'backup-user',b'backup.example.net',b'mqtt-ui-backup-account'):
+            self.assertNotIn(secret,response)
+        snapshot=json.loads(response)
+        self.assertTrue(snapshot['config']['mqtt_backup_configured'])
+        self.assertEqual((snapshot['link']['mqtt_backup']['enabled'],snapshot['link']['mqtt_backup']['commands']),(True,True))
+        self.assertEqual(json.loads(self.http('GET','/api/v2/mqtt/backup')[2])['apply_pending'],False)
+        # A new Agent restores the saved backup settings and account.
+        self.a.journal.close()
+        restored=Agent(copy.deepcopy(self.a.cfg))
+        try:
+            self.assertEqual(restored.mqtt_backup_view(),dict(BACKUP_DEFAULT_VIEW,enabled=True,host='backup.example.net',
+                                                              auth='account',credentials_set=True))
+            self.assertEqual(restored.backup_client.client_id,'uav-01-backup')
+            self.assertEqual(restored.backup_client.credentials_file,str(account_file))
+        finally:restored.journal.close()
+
+    def test_backup_blank_account_keeps_stored_credentials(self):
+        self.login()
+        self.assertEqual(self.post(backup_body())[0],200)
+        account_file=self.state('mqtt-ui-backup-account.json');original=account_file.read_bytes()
+        code,view=self.post(backup_body(host='backup2.example.net',username='',password=''))
+        self.assertEqual(code,200,view)
+        self.assertEqual((view['host'],view['auth'],view['credentials_set']),('backup2.example.net','account',True))
+        self.assertEqual(account_file.read_bytes(),original)
+        self.assertEqual(self.post(backup_body(host='backup3.example.net',username='new-user',password='')),
+                         (400,{'error':'INCOMPLETE_MQTT_CREDENTIALS'}))
+        self.assertEqual(account_file.read_bytes(),original)
+        self.assertEqual(self.a.mqtt_backup_view()['host'],'backup2.example.net')
+        code,view=self.post(backup_body(auth='none',username='',password=''))
+        self.assertEqual((code,view['auth'],view['credentials_set']),(200,'none',False))
+        self.assertEqual(json.loads(self.state('mqtt-ui-backup-settings.json').read_bytes())['auth'],'none')
+        self.a._apply_pending_backup();self.assertIsNone(self.a.backup_client.credentials_file)
+        code,view=self.post(backup_body(username='',password=''))
+        self.assertEqual((code,view['auth'],view['credentials_set']),(200,'account',True))
+        code,view=self.post(backup_body(username='other-user',password='other-secret'))
+        self.assertEqual(code,200)
+        self.assertEqual(json.loads(account_file.read_bytes()),{'username':'other-user','password':'other-secret'})
+
+    def test_backup_blank_account_keeps_config_credentials_file(self):
+        credentials=self.path/'backup-config.json'
+        credentials.write_bytes(compact({'username':'cfg-user','password':'cfg-secret'}))
+        self.a.cfg['mqtt']['backup']['credentials_file']=str(credentials)
+        self.a.backup_desired=self.a._load_backup_settings()
+        self.login()
+        view=json.loads(self.http('GET','/api/v2/mqtt/backup')[2])
+        self.assertEqual((view['auth'],view['credentials_set']),('account',True))
+        code,view=self.post(backup_body(username='',password=''))
+        self.assertEqual((code,view['auth'],view['credentials_set']),(200,'account',True))
+        self.assertEqual(json.loads(self.state('mqtt-ui-backup-settings.json').read_bytes())['auth'],'config')
+        self.assertFalse(self.state('mqtt-ui-backup-account.json').exists())
+        self.a._apply_pending_backup();self.assertEqual(self.a.backup_client.credentials_file,str(credentials))
+        credentials.unlink()
+        self.assertEqual(self.post(backup_body(username='',password='')),
+                         (400,{'error':'MQTT_BACKUP_CREDENTIALS_REQUIRED'}))
+
+    def test_backup_trust_modes_and_unavailable_custom_ca(self):
+        ca=self.path/'backup-ca.pem';self.a.cfg['mqtt']['backup']['ca_file']=str(ca)
+        self.login()
+        self.assertEqual(json.loads(self.http('GET','/api/v2/mqtt/backup')[2])['trust_mode'],'unavailable')
+        body=backup_body(auth='none',username='',password='')
+        self.assertEqual(self.post(body),(400,{'error':'MQTT_BACKUP_TLS_CA_UNAVAILABLE'}))
+        code,view=self.post(dict(body,tls=False))
+        self.assertEqual((code,view['trust_mode']),(200,'plaintext'))
+        ca.write_bytes(b'-----BEGIN CERTIFICATE-----\n')
+        code,view=self.post(body)
+        self.assertEqual((code,view['trust_mode']),(200,'custom'))
+        self.a._apply_pending_backup()
+        self.assertEqual(self.a.backup_client.cfg['ca_file'],str(ca))
+
+    def test_invalid_saved_backup_settings_fall_back_to_config(self):
+        defaults=self.a._backup_defaults()
+        saved={'schema':1,'enabled':True,'host':'backup.example.net','port':8883,'transport':'tcp',
+               'websocket_path':'/mqtt','tls':True,'commands':True,'auth':'none'}
+        for value in (dict(saved,schema=2),dict(saved,extra=True),dict(saved,port='8883'),dict(saved,host=''),
+                      dict(saved,auth='account')):
+            with self.subTest(value=value):
+                atomic_write(self.a.backup_state_path,compact(value),0o600)
+                self.assertEqual(self.a._load_backup_settings(),defaults)
+        atomic_write(self.a.backup_state_path,compact(saved),0o600)
+        self.assertEqual(self.a._load_backup_settings(),{k:saved[k] for k in Agent.BACKUP_KEYS})
+
+    def test_backup_settings_unavailable_on_ground_and_in_demo(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-backup')
+        cfg['api']['admin_hash_file']=str(self.path/'ground-backup-auth.json');cfg['api']['port']=0
+        set_pin(Path(cfg['api']['admin_hash_file']),self.pin)
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        server=Server(ground,cfg,ground=True)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        port=self.port
+        try:
+            self.port=server.server_port
+            code,_,response=self.http('GET','/api/v2/mqtt/backup')
+            self.assertEqual((code,json.loads(response)),(404,{'error':'NOT_FOUND'}))
+            self.login()
+            code,_,response=self.http('GET','/api/v2/mqtt/backup')
+            self.assertEqual((code,json.loads(response)),(404,{'error':'NOT_FOUND'}))
+            code,_,response=self.http('POST','/api/v2/mqtt/backup',backup_body())
+            self.assertEqual((code,json.loads(response)),(404,{'error':'NOT_FOUND'}))
+        finally:
+            self.port=port;server.shutdown();server.server_close();thread.join(2)
+        demo_cfg=copy.deepcopy(self.a.cfg);demo_cfg['state_dir']=str(self.path/'demo-backup')
+        demo_cfg['mqtt']['backup'].update(enabled=True,host='backup.example.net')
+        demo=Agent(demo_cfg,demo=True)
+        try:
+            self.assertIsNone(demo.backup_client)
+            view=demo.mqtt_backup_view()
+            self.assertEqual((view['enabled'],view['editable'],view['client_id']),(False,False,'uav-01-backup-demo'))
+            with self.assertRaisesRegex(ValueError,'INVALID_MQTT_BACKUP_SETTINGS'):
+                demo.configure_mqtt_backup(backup_body())
+        finally:demo.journal.close()
+
+
+class BackupBrokerEndToEndTests(unittest.TestCase):
+    """Primary and backup loopback brokers with a running Agent."""
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.path=Path(os.path.realpath(self.tmp.name))
+        initial=make_agent(self.path);self.cfg=initial.cfg;initial.journal.close()
+        self.creds=self.path/'mqtt.json';self.creds.write_bytes(compact({'username':'test','password':'test-password'}))
+        self.cfg['telemetry']['resume_stable_seconds']=1
+        self.writer_stop=threading.Event()
+        def writer():
+            index=2
+            while not self.writer_stop.wait(.25):
+                index+=1
+                atomic_write(self.path/'share'/'status.json',compact(status(idx=index)))
+                atomic_write(self.path/'share'/'DOA_value.html',csv_bytes(record()))
+        thread=threading.Thread(target=writer,daemon=True);thread.start()
+        self.addCleanup(lambda:(self.writer_stop.set(),thread.join(2)))
+    def broker(self,**options):
+        broker=Broker(**options);self.addCleanup(broker.stop);return broker
+    def start_agent(self,primary=None,backup=None,**backup_options):
+        cfg=copy.deepcopy(self.cfg)
+        if primary:
+            cfg['mqtt'].update(enabled=True,host='127.0.0.1',port=primary.port,tls=False,allow_insecure_loopback=True,
+                               control_credentials_file=str(self.creds),bulk_credentials_file=str(self.creds))
+        if backup:
+            cfg['mqtt']['backup'].update(enabled=True,host='127.0.0.1',port=backup.port,tls=False,**backup_options)
+        agent=Agent(cfg);agent.monitor=FakeMonitor(cfg);self.addCleanup(agent.stop);agent.start();return agent
+    def received(self,broker,agent,suffix):
+        with broker.lock:return [m for m in broker.messages if m['topic']==agent.prefix+'/'+suffix]
+    def acks(self,broker,agent,id):
+        return [json.loads(m['payload'])['status'] for m in self.received(broker,agent,'ack/operation')
+                if json.loads(m['payload'])['id']==id]
+    def request(self,agent,op,**extras):
+        return dict(v=2,id=op.replace('.','-')+'-'+uuid.uuid4().hex[:12],sid=agent.sid,boot=agent.boot,
+                    issued_ms=now_ms(),expires_ms=now_ms()+15000,base_rev=agent.source.revision,op=op,**extras)
+    def wait_ready(self,agent,primary=True):
+        self.assertTrue(wait(lambda:(not primary or (agent.clients and all(c.ready for c in agent.clients.values()))) and
+                             agent.backup_client is not None and agent.backup_client.ready,10),
+                        [{k:c.status() for k,c in agent.clients.items()},
+                         agent.backup_client.status() if agent.backup_client else None])
+
+    def test_backup_mirrors_telemetry_and_survives_primary_outage(self):
+        primary=self.broker();backup=self.broker(auth={'':''})
+        agent=self.start_agent(primary,backup)
+        topics=('availability','capabilities','state','telemetry/health','telemetry/doa','telemetry/angular')
+        self.assertTrue(wait(lambda:all(self.received(b,agent,t) for b in (primary,backup) for t in topics),15),
+                        [agent.snapshot().get('link'),primary.errors,backup.errors])
+        self.assertEqual((primary.mqtt_connect_count,backup.mqtt_connect_count),(2,1))
+        with backup.lock:flags=backup.clients[0]['connect_flags']
+        self.assertEqual(flags&0xc0,0,'backup must connect anonymously when auth is none')
+        self.assertTrue(flags&4,'backup must register the availability will')
+        for suffix in ('availability','capabilities','state'):
+            message=self.received(backup,agent,suffix)[0]
+            self.assertEqual((message['qos'],message['retain']),(1,True),suffix)
+        for suffix in ('telemetry/health','telemetry/doa','telemetry/angular'):
+            self.assertTrue(all(m['qos']==0 and not m['retain'] for m in self.received(backup,agent,suffix)),suffix)
+        self.assertTrue(json.loads(self.received(backup,agent,'availability')[0]['payload'])['online'])
+        primary_frame=json.loads(self.received(primary,agent,'telemetry/angular')[0]['payload'])
+        backup_frame=json.loads(self.received(backup,agent,'telemetry/angular')[0]['payload'])
+        self.assertEqual(set(primary_frame),set(backup_frame))
+        for key in ('v','encoding','sid','flags','values','frequency_hz','revision','vfo','convention'):
+            self.assertEqual(primary_frame[key],backup_frame[key],key)
+        self.assertEqual((backup_frame['flags'],len(backup_frame['values'])),(63,360))
+        # Primary (PPP/T900) broker goes away: the backup keeps health and angular flowing.
+        primary.stop()
+        self.assertTrue(wait(lambda:not agent.clients['control'].ready,5))
+        def counts():return (len(self.received(backup,agent,'telemetry/health')),
+                             len(self.received(backup,agent,'telemetry/angular')))
+        health,angular=counts()
+        self.assertTrue(wait(lambda:counts()[0]>=health+2 and counts()[1]>=angular+1,12),
+                        [counts(),agent.snapshot().get('link')])
+        def degraded():
+            link=agent.snapshot()['link']
+            return (link['mqtt_backup']['state']=='CONNECTED' and link['bulk_pause']=='MQTT_NOT_READY' and
+                    link['mqtt_control']['state']!='CONNECTED')
+        self.assertTrue(wait(degraded,5),agent.snapshot().get('link'))
+        snapshot=agent.snapshot();link=snapshot['link']['mqtt_backup']
+        self.assertEqual((link['enabled'],link['ready'],link['bulk_pause'],link['commands']),(True,True,None,True))
+        self.assertEqual(link['topic_delivery']['telemetry/health']['state'],'SENT')
+        self.assertNotIn('host',link)
+        self.assertTrue(snapshot['config']['mqtt_backup_configured'])
+        self.assertFalse(backup.errors);self.assertFalse(primary.errors)
+
+    def test_backup_alone_carries_telemetry_when_primary_is_disabled(self):
+        backup=self.broker(auth={'':''})
+        agent=self.start_agent(None,backup)
+        self.assertEqual(agent.clients,{})
+        self.assertTrue(wait(lambda:all(self.received(backup,agent,t) for t in
+                                        ('availability','state','telemetry/health','telemetry/doa','telemetry/angular')),10),
+                        [agent.snapshot().get('link'),backup.errors])
+        self.assertTrue(wait(lambda:agent.snapshot()['link']['mqtt_backup']['state']=='CONNECTED',5))
+        snapshot=agent.snapshot()
+        self.assertEqual((snapshot['link']['mqtt_control']['state'],snapshot['link']['bulk_pause']),('DISABLED','MQTT_NOT_READY'))
+        self.assertEqual((snapshot['config']['mqtt_configured'],snapshot['config']['mqtt_backup_configured']),(False,True))
+        frame=json.loads(self.received(backup,agent,'telemetry/angular')[0]['payload'])
+        self.assertEqual((frame['flags'],len(frame['values'])),(63,360))
+        self.assertFalse(backup.errors)
+
+    def test_backup_commands_execute_and_ack_on_their_own_link(self):
+        primary=self.broker();backup=self.broker(auth={'':''})
+        agent=self.start_agent(primary,backup)
+        self.wait_ready(agent)
+        with backup.lock:self.assertEqual(len(backup.clients[0]['subs']),len(OPS))
+        from_backup=self.request(agent,'stream.set',profile='graph_u8')
+        backup._broadcast(agent.prefix+'/cmd/stream/set',compact(from_backup),1)
+        self.assertTrue(wait(lambda:'APPLIED' in self.acks(backup,agent,from_backup['id']),10),
+                        [self.received(backup,agent,'ack/operation'),agent.snapshot().get('last_operation')])
+        self.assertEqual(agent.profile,'graph_u8')
+        self.assertEqual(agent.journal.lookup(from_backup['id'])['actor'],'ground-controller')
+        from_primary=self.request(agent,'operation.get',target_id=from_backup['id'])
+        primary._broadcast(agent.prefix+'/cmd/operation/get',compact(from_primary),1)
+        self.assertTrue(wait(lambda:'APPLIED' in self.acks(primary,agent,from_primary['id']) and
+                             'APPLIED' in self.acks(backup,agent,from_primary['id']),10),
+                        [self.received(primary,agent,'ack/operation'),self.received(backup,agent,'ack/operation')])
+        # The primary ACK above was queued after any mirrored backup ACK, so its absence is final.
+        self.assertEqual(self.acks(primary,agent,from_backup['id']),[],
+                         'a command received from the backup broker must not be acknowledged over the T900 link')
+        result=[json.loads(m['payload']) for m in self.received(primary,agent,'ack/operation')
+                if json.loads(m['payload'])['id']==from_primary['id']][-1]['result']
+        self.assertEqual((result['operation']['id'],result['operation']['stage']),(from_backup['id'],'APPLIED'))
+        self.assertFalse(backup.errors);self.assertFalse(primary.errors)
+
+    def test_backup_without_commands_has_no_subscriptions(self):
+        primary=self.broker();backup=self.broker(auth={'':''})
+        agent=self.start_agent(primary,backup,commands=False)
+        self.wait_ready(agent)
+        self.assertEqual(agent.backup_client.subscriptions,[])
+        with backup.lock:self.assertEqual([c['subs'] for c in backup.clients],[{}])
+        ignored=self.request(agent,'stream.set',profile='graph_u8')
+        backup._broadcast(agent.prefix+'/cmd/stream/set',compact(ignored),1)
+        accepted=self.request(agent,'operation.get',target_id='missing')
+        primary._broadcast(agent.prefix+'/cmd/operation/get',compact(accepted),1)
+        self.assertTrue(wait(lambda:'APPLIED' in self.acks(primary,agent,accepted['id']) and
+                             'APPLIED' in self.acks(backup,agent,accepted['id']),10))
+        self.assertIsNone(agent.journal.lookup(ignored['id']))
+        self.assertEqual(agent.profile,'balanced')
+        self.assertEqual((self.acks(primary,agent,ignored['id']),self.acks(backup,agent,ignored['id'])),([],[]))
+        self.assertTrue(wait(lambda:agent.snapshot()['link']['mqtt_backup']['commands'] is False,5))
+        self.assertFalse(backup.errors)
+
+    def test_live_reconfigure_never_restarts_the_other_link(self):
+        primary=self.broker();backup=self.broker(auth={'':''});replacement=self.broker(auth={'':''})
+        agent=self.start_agent(primary,backup)
+        self.wait_ready(agent)
+        control,bulk=agent.clients['control'],agent.clients['bulk'];old_backup=agent.backup_client
+        view=agent.configure_mqtt_backup({'enabled':True,'host':'127.0.0.1','port':replacement.port,'transport':'tcp',
+                                          'websocket_path':'/mqtt','tls':False,'commands':True,'auth':'none',
+                                          'username':'','password':''})
+        self.assertEqual((view['port'],view['trust_mode']),(replacement.port,'plaintext'))
+        self.assertTrue(wait(lambda:agent.backup_client is not old_backup and agent.backup_client is not None and
+                             agent.backup_client.ready and not backup.clients,10))
+        self.assertTrue(wait(lambda:self.received(replacement,agent,'availability') and
+                             self.received(replacement,agent,'telemetry/health'),8))
+        self.assertIs(agent.clients['control'],control);self.assertIs(agent.clients['bulk'],bulk)
+        self.assertTrue(control.ready and bulk.ready)
+        self.assertEqual(primary.mqtt_connect_count,2,'backup reconfigure must not reconnect the primary clients')
+        current_backup=agent.backup_client
+        agent.configure_mqtt({'enabled':True,'host':'127.0.0.1','port':primary.port,'client_id':'uav-01b',
+                              'transport':'tcp','tls':False,'websocket_path':'/mqtt',
+                              'control':{'username':'','password':''},'bulk':{'username':'','password':''}})
+        self.assertTrue(wait(lambda:agent.clients.get('control') not in (None,control) and
+                             all(c.ready for c in agent.clients.values()),10))
+        self.assertEqual(agent.clients['control'].client_id,'uav-01b-control')
+        self.assertIs(agent.backup_client,current_backup);self.assertTrue(current_backup.ready)
+        self.assertEqual(replacement.mqtt_connect_count,1,'primary reconfigure must not reconnect the backup client')
+        self.assertFalse(primary.errors or backup.errors or replacement.errors)

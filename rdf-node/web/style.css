@@ -140,7 +140,7 @@ nav button[data-alert="bad"]::before{background:var(--bad)}
 
 /* Data / MQTT */
 .data-page .pagetitle{height:42px}
-.data-summary{height:28px;display:grid;grid-template-columns:auto minmax(0,1.4fr) auto minmax(0,1fr);align-items:center;gap:6px;padding:0 10px;border-radius:var(--radius);background:var(--surface)}
+.data-summary{height:28px;display:grid;grid-template-columns:auto minmax(0,2fr) auto minmax(0,1fr);align-items:center;gap:6px;padding:0 10px;border-radius:var(--radius);background:var(--surface)}
 .data-summary small+b+small{padding-left:8px;border-left:1px solid var(--line);line-height:16px}
 .data-summary b{font-size:12.5px;white-space:nowrap}
 .data-summary b::before{content:'';flex:0 0 7px;width:7px;height:7px;border-radius:50%;background:currentColor}
@@ -231,7 +231,7 @@ nav button[data-alert="bad"]::before{background:var(--bad)}
 #mqtt-keyboard-editor{min-width:0}
 #mqtt-keyboard-editor .mqtt-settings-field{gap:0}
 #mqtt-keyboard-editor .mqtt-settings-field span{display:none}
-.dialog #mqtt-keyboard-editor .mqtt-settings-field input{height:44px;margin:0;padding:5px 8px}
+.dialog #mqtt-keyboard-editor .mqtt-settings-field input{height:44px;margin:0;padding:5px 8px;font-size:15px}
 .mqtt-keyboard-rows{display:flex;flex-direction:column;gap:2px;min-width:0}
 .mqtt-keyboard-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:2px;min-width:0}
 .mqtt-key{flex:0 0 44px;width:44px;height:44px;min-height:44px;margin:0;padding:0;font-size:15px;border-radius:6px;touch-action:manipulation}
