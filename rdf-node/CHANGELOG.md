@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+- Add an optional backup MQTT broker on the Edge (`mqtt.backup`, panel `Data > Cadangan`). A third
+  client, `<client_id>-backup`, mirrors every Edge publish to a LAN or online broker under the same
+  `sdr/v2/{node_id}` topics, independent of the PPP/T900 primary, and keeps publishing while the
+  primary is down. It has its own transport, TLS (`ca_file: null` uses the system CA store; a
+  private or self-signed CA needs `mqtt.backup.ca_file`), credentials, and token bucket
+  (`budget_bytes_s`, default 8000 B/s, outside the T900 aggregate check). Backup Angular is paced
+  by the profile interval and the backup budget and is not paused by primary-only reasons
+  (`BULK_NOT_READY`, `CONTROL_BACKLOG`, `WAIT_STABLE`). Saving either broker's settings never
+  restarts the other broker's clients.
+- With `commands: true` (panel `Terima perintah`, default on) the Edge also subscribes `cmd/*` on
+  the backup broker and runs those commands like Ground commands (actor `ground-controller`, same
+  gates, shared single mutation). Commands from the backup are acknowledged only on the backup;
+  primary and local-panel commands are acknowledged on every ready broker. `config.get` requires
+  TLS on the broker it came from, and `settings/reported` goes only to that broker. Restrict
+  publish on `cmd/#` in the backup broker's ACL, or turn commands off for a publish-only broker
+  (a rejected SUBACK keeps the backup client from becoming READY).
+- New Edge API `GET`/`POST /api/v2/mqtt/backup` (admin session; POST also needs CSRF). Panel
+  settings persist in `mqtt-ui-backup-settings.json` and `mqtt-ui-backup-account.json` (mode
+  0600) and override `mqtt.backup` from `config.yaml`. The snapshot adds `link.mqtt_backup`
+  (state, readiness, error, queue, pause reason, and a separate per-topic delivery map) and
+  `config.mqtt_backup_configured`; `link.mqtt_topic_delivery` stays primary-only.
+- Commands still queued from a replaced MQTT session are now dropped by a per-broker connection
+  epoch instead of draining the shared inbound queue on primary reconfigure.
+- Replaced MQTT clients are stopped (and their successors started) on a helper thread, so a client
+  stuck in DNS, TCP or TLS on one broker no longer pauses publishing on the other for up to 7 s.
+  Disabling or repointing the backup first publishes retained `availability`
+  `{online:false, reason:"BACKUP_DISABLED"|"BACKUP_RECONFIGURED"}` to the old backup broker.
+  Changing the primary base Client ID also reconnects the backup under the new
+  `<client_id>-backup`. A pending `config.get` report for a broker that dropped no longer blocks
+  `config.get` on the other broker. A blank `Pakai akun` save reuses the account in use, then the
+  panel account, then `mqtt.backup.credentials_file`; `GET /api/v2/mqtt/backup` reports which one
+  as `credentials_source`.
+- Online backup traffic follows the OS default route. If that route is PPP, the backup consumes T900
+  bandwidth; check `ip route get <host>` before enabling it.
+
 - Edge panel: the black screen shows a dim clock and date from the Pi system time, marked
   `BELUM SINKRON` when the Edge reports the clock as untrusted. Remove explanatory captions from
   the panel (Config approval note, PIN keypad hint, Profil intro, frequency note, far-reading exit

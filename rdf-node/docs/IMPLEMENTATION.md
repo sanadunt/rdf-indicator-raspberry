@@ -8,6 +8,7 @@ Native SDR _share
    -> Agent cached snapshot
        -> HTTP loopback + static 480x320 panel
        -> Scheduler -> MQTT control / MQTT bulk -> T900 PPP
+                   -> MQTT backup (opsional) -> broker cadangan LAN/online (route OS)
 
 Ground MQTT consumer
    -> validate session, freshness, health and source/angle evidence
@@ -15,6 +16,7 @@ Ground MQTT consumer
    -> serve raw settings only after an explicit config.get request
 
 Ground command received through the configured broker/link
+   (atau broker cadangan bila `Terima perintah` aktif)
    -> CommandManager -> SQLite journal -> single worker
    -> restricted Unix helper -> fixed settings path/audited unit action
    -> verify evidence -> result/report
@@ -24,7 +26,7 @@ Ground command received through the configured broker/link
 
 Panel dan MQTT tidak menjalankan receiver SDR kedua. Browser tidak membaca file native,
 tidak menerima password tersimpan dari API, dan tidak memiliki hak root. Edge tetap hidup bila
-SDR, helper, PPP, atau Ground gagal. Engine GUI lama tidak dihentikan: pada deployment tertentu
+SDR, helper, PPP, Ground, atau broker cadangan gagal. Engine GUI lama tidak dihentikan: pada deployment tertentu
 proses itu juga menjalankan signal processor.
 `Data > Atur` hanya menerima perubahan melalui session admin+CSRF. Broker settings disimpan di
 `/var/lib/rdf-node/mqtt-ui-settings.json`; credential CTRL/BULK disimpan terpisah pada
@@ -39,6 +41,65 @@ password CTRL/BULK terpisah. Keyboard sentuh melayani kolom teks; selector nativ
 dioperasikan dengan keyboard. Save mengganti kedua client tanpa restart service dan menghapus
 sequence/cache session lama; Bulk lanjut setelah kedua koneksi MQTT siap dan
 `resume_stable_seconds` berlalu. Telemetry tidak bergantung pada konfirmasi Ground.
+
+### Broker MQTT cadangan
+
+`Agent.backup_client` adalah satu client MQTT tambahan (`{client_id}-backup`, bukan bagian dari
+`Agent.clients`) ke broker cadangan LAN/online. Ia memakai host/port/transport/TLS sendiri,
+`mqtt.backup.ca_file` (bukan `mqtt.ca_file` utama), credential sendiri, Last Will `availability`
+yang sama, dan token bucket `mqtt.backup.budget_bytes_s` (default 8.000 B/s) yang tidak masuk batas
+agregat T900. Topic tree identik. Subscription command dibuat hanya bila `commands` aktif.
+Detail operasional, schema `mqtt.backup`, ACL, TLS, dan routing ada di
+[MQTT_GROUND.md](MQTT_GROUND.md#broker-cadangan-mirror-lanonline).
+
+Mirror: setiap publish scheduler dikirim ke semua link READY (Control/Bulk utama dan/atau
+cadangan), dan scheduler berjalan selama salah satu broker READY. Cadangan memiliki hook reconnect
+sendiri (availability, capabilities, state retained) serta jadwal Angular sendiri yang dipace oleh
+interval profile dan budget cadangan; alasan khusus T900 (`BULK_NOT_READY`, `CONTROL_BACKLOG`,
+`WAIT_STABLE`) tidak mempausenya, sedangkan alasan source (`PROFILE_CONTROL`,
+`SOURCE_NOT_ELIGIBLE`, `CONTROL_IN_PROGRESS`) berlaku untuk keduanya. Status kirim cadangan
+disimpan di peta terpisah dan tidak pernah menimpa `mqtt_topic_delivery` utama.
+
+Command inbound ditandai dengan link asal (`primary` atau `backup`) dan epoch koneksi. Menyimpan
+ulang pengaturan salah satu broker hanya mengganti client broker itu, menaikkan epoch-nya sehingga
+command lama yang masih antre diabaikan, dan membersihkan request settings yang tertunda dari link
+itu; client broker lain tidak di-restart. ACK command dari cadangan hanya dikirim ke cadangan; ACK
+dari broker utama atau panel lokal dikirim ke semua link READY. `config.get` memerlukan TLS pada
+link asal, dan `settings/reported` hanya dikirim ke link itu. Command cadangan memakai paling banyak
+separuh antrean inbound (16 dari 32 slot), dan batas read-only satu per detik dihitung per link.
+
+Pengaturan panel disimpan di `/var/lib/rdf-node/mqtt-ui-backup-settings.json`
+(`{schema:1, enabled, host, port, transport, websocket_path, tls, commands, auth}`, `auth` =
+`none|account|config`) dan akun panel di `mqtt-ui-backup-account.json` (`{username,password}`),
+keduanya mode 0600. File yang ada dan valid menggantikan nilai `mqtt.backup` di `config.yaml`;
+`ca_file`, `credentials_file`, dan `budget_bytes_s` tetap dari `config.yaml`.
+
+API lokal Edge (Ground mengembalikan 404):
+
+- `GET /api/v2/mqtt/backup` memerlukan sesi Admin (401 `AUTHENTICATION_REQUIRED` bila tidak) dan
+  mengembalikan `enabled`, `host`, `port`, `transport`, `websocket_path`, `tls`, `commands`,
+  `auth` (`none`/`account`), `credentials_set`, `credentials_source` (`panel`/`config`/`null`:
+  akun yang dipakai bila `Pakai akun` disimpan dengan User/Pass kosong), `trust_mode`
+  (`plaintext`/`system`/`custom`/`unavailable`), `client_id`, `editable` (`false` pada DEMO), dan
+  `apply_pending`. Username/password tidak pernah dikembalikan.
+- `POST /api/v2/mqtt/backup` memerlukan sesi dan `X-CSRF-Token`, dengan body tepat
+  `{enabled, host, port, transport, websocket_path, tls, commands, auth, username, password}`.
+  `auth: "none"` mewajibkan username/password kosong; akun panel yang sudah tersimpan tidak dihapus.
+  `auth: "account"` dengan keduanya kosong memakai ulang akun yang ada, berurutan: akun yang sedang
+  dipakai, akun panel, lalu `mqtt.backup.credentials_file`; bila tidak ada dan cadangan aktif,
+  ditolak `MQTT_BACKUP_CREDENTIALS_REQUIRED`. Hanya satu yang diisi ditolak. `host`
+  boleh kosong hanya bila `enabled: false`. Error 400 `{error}`: `INVALID_MQTT_BACKUP_SETTINGS`,
+  `INVALID_MQTT_HOST`, `INVALID_MQTT_PORT`, `INVALID_MQTT_TRANSPORT`,
+  `INVALID_MQTT_WEBSOCKET_PATH`, `INCOMPLETE_MQTT_CREDENTIALS`, `INVALID_MQTT_CREDENTIALS`,
+  `MQTT_BACKUP_CREDENTIALS_REQUIRED`, `MQTT_BACKUP_TLS_CA_UNAVAILABLE`. DEMO selalu
+  `INVALID_MQTT_BACKUP_SETTINGS`. Respons 200 sama dengan GET; perubahan diterapkan langsung tanpa
+  memutus broker utama.
+
+Snapshot (`GET /api/v2/snapshot`, `GET /api/v2/link`) memuat `link.mqtt_backup` tanpa host atau
+secret: `enabled`, `commands`, `state`, `ready`, `error`, `depth`, `pending_age_ms`, `bulk_pause`,
+`angular_aborted`, `topic_delivery`, dan, saat client aktif, `generation`, `tx_bytes`, `rx_bytes`,
+`reconnects` serta statistik outbox. Cadangan nonaktif dilaporkan `state: "DISABLED"`.
+`config.mqtt_backup_configured` bernilai `true` bila cadangan aktif dengan host.
 
 ### Direct Ground commands and trust boundary
 
@@ -60,6 +121,8 @@ Ground PIN+CSRF protects the local HTTP API, not MQTT publisher identity. Edge a
 `ground-controller` actor to accepted MQTT commands and does not authenticate which publisher
 sent them. Broker credentials/ACLs and network isolation are the command trust boundary; any
 publisher authorized to the command topics can request all operations whose targets are available.
+When the backup broker accepts commands (`mqtt.backup.commands: true`), its `cmd/#` ACL is part of
+the same trust boundary: its commands get the same `ground-controller` actor and gates.
 A private PPP/T900 link is not publisher authentication. TLS protects transport and verifies the
 broker; broker authorization still requires per-client credentials and topic ACLs. Edge local
 controls retain their separate persistent root approvals; local operations do not use a timed lease.
@@ -213,6 +276,8 @@ selesai ditulis ke socket lokal (`SOCKET_WRITE`); untuk QoS 1, `PUBACK` berarti 
 PUBLISH. Keduanya bukan bukti aplikasi Ground memproses data; Edge tidak menampilkan konfirmasi
 delivery aplikasi. Error seperti `MQTT_DISCONNECTED`, `OUTBOX_FULL`, dan `PUBLISH_REJECTED_0X87`
 ditampilkan per topic; `sent_ms` tetap menunjuk sukses terakhir jika percobaan terbaru gagal.
+Daftar topic panel dan `mqtt_topic_delivery` hanya menggambarkan broker utama; status broker
+cadangan ada di `link.mqtt_backup.topic_delivery` dan ringkasan `CADANGAN`.
 
 `telemetry/diagnostic/doa` memakai client Control, QoS 0, expiry 3 s, tanpa retention.
 Saat `doa.xml` tersedia, Edge mengirim sampel tiap 3 s termasuk jika isinya tidak berubah

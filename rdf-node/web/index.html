@@ -38,10 +38,10 @@
 </div>
 </section>
 <section id="data" class="page data-page">
-<div class="pagetitle"><b>DATA / MQTT</b><button id="mqttsettings" type="button" class="smallbtn">Login</button></div>
-<div class="data-summary"><small>MQTT CTRL / BULK</small><b id="mqttclients">DISABLED / DISABLED</b></div>
+<div class="pagetitle"><b>DATA / MQTT</b><span class="pagetitle-actions"><button id="mqttbackupsettings" type="button" class="smallbtn">Cadangan</button><button id="mqttsettings" type="button" class="smallbtn">Login</button></span></div>
+<div class="data-summary"><small>UTAMA</small><b id="mqttclients">DISABLED / DISABLED</b><small>CADANGAN</small><b id="mqttbackup">DISABLED</b></div>
 <div class="topic-heading"><span id="topicprefix"></span><span id="deliverylegend" aria-label="QoS 0 sukses berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker." title="QoS 0 sukses berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker.">QoS 0 lokal · QoS 1 PUBACK</span></div>
-<div id="topiclist" class="topic-list" tabindex="0" aria-label="Topik MQTT keluar Raspberry ke Ground dan topik masuk"></div>
+<div id="topiclist" class="topic-list" tabindex="0" aria-label="Topik MQTT keluar Raspberry ke Ground dan topik masuk; status kirim untuk broker utama"></div>
 </section>
 <nav>
 <button type="button" data-tab="home" class="selected" aria-current="page" aria-label="Utama"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg><span>Utama</span></button>

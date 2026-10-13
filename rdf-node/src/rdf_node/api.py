@@ -129,6 +129,10 @@ class Handler(BaseHTTPRequestHandler):
                 if self.server.ground: return self.reply(404,{'error':'NOT_FOUND'})
                 if not self._admin_session(): return self.reply(401,{'error':'AUTHENTICATION_REQUIRED'})
                 return self.reply(200,app.mqtt_settings_view())
+            if p=='/api/v2/mqtt/backup':
+                if self.server.ground: return self.reply(404,{'error':'NOT_FOUND'})
+                if not self._admin_session(): return self.reply(401,{'error':'AUTHENTICATION_REQUIRED'})
+                return self.reply(200,app.mqtt_backup_view())
             snap=app.snapshot()
             if p=='/api/v2/snapshot': return self.reply(200,snap)
             if p=='/api/v2/link': return self.reply(200,snap.get('link',{}))
@@ -193,6 +197,10 @@ class Handler(BaseHTTPRequestHandler):
             if p=='/api/v2/mqtt/settings' and not self.server.ground:
                 try: result=app.configure_mqtt(obj)
                 except ValueError as e: return self.reply(400,{'error':str(e) or 'INVALID_MQTT_SETTINGS'})
+                return self.reply(200,result)
+            if p=='/api/v2/mqtt/backup' and not self.server.ground:
+                try: result=app.configure_mqtt_backup(obj)
+                except ValueError as e: return self.reply(400,{'error':str(e) or 'INVALID_MQTT_BACKUP_SETTINGS'})
                 return self.reply(200,result)
             if p=='/api/v2/display/preferences' and not self.server.ground:
                 if set(obj)-{'theme','accent','font','blank_after_seconds'}: raise ValueError('UNKNOWN_PREFERENCE')

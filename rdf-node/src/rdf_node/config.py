@@ -72,6 +72,7 @@ def validate_config(c: dict) -> None:
     validate_websocket_path(c['mqtt']['websocket_path'])
     if c['telemetry']['control_budget_bytes_s']+c['telemetry']['bulk_budget_bytes_s']>1500:
         raise ValueError('AGGREGATE_BUDGET_TOO_HIGH')
+    validate_backup_config(c['mqtt']['backup'], c['mqtt']['allow_insecure_loopback'])
     for k,v in c['freshness'].items():
         finite(v,500,120000)
     if c['display']['theme'] not in ('dark','light','night'):
@@ -90,18 +91,40 @@ def validate_config(c: dict) -> None:
         raise ValueError('INVALID_SERVICE_NAME')
     for k in ('local_ip','peer_ip'):
         ipaddress.IPv4Address(c['link'][k])
-    if not c['mqtt']['tls']:
-        try:
-            is_local = ipaddress.ip_address(c['mqtt']['host']).is_loopback
-        except ValueError:
-            is_local = c['mqtt']['host'] == 'localhost'
-        if is_local and not c['mqtt']['allow_insecure_loopback']:
-            raise ValueError('PLAINTEXT_ONLY_EXPLICIT_LOOPBACK_TEST')
+    if not c['mqtt']['tls'] and _is_loopback(c['mqtt']['host']) and not c['mqtt']['allow_insecure_loopback']:
+        raise ValueError('PLAINTEXT_ONLY_EXPLICIT_LOOPBACK_TEST')
     if c['mqtt']['enabled']:
         if not c['mqtt']['control_credentials_file'] or not c['mqtt']['bulk_credentials_file']:
             raise ValueError('MQTT_CREDENTIALS_REQUIRED')
     if c['runtime_mode'] == 'read_only' and any(c['control'][k] for k in ('config_patch_enabled','processing_enabled','restart_enabled','reboot_enabled','shutdown_enabled','ppp_restart_enabled')):
         raise ValueError('MUTATION_REQUIRES_CONTROLLED_MODE')
+
+def _is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host == 'localhost'
+
+def validate_backup_config(b: dict, allow_insecure_loopback: bool) -> None:
+    # The backup broker is a LAN or online mirror; its budget is not part of the T900 aggregate.
+    for key in ('enabled', 'tls', 'commands'):
+        if type(b[key]) is not bool:
+            raise ValueError('BOOLEAN_REQUIRED')
+    for key, lo, hi in (('port', 1, 65535), ('budget_bytes_s', 1000, 200000)):
+        if type(b[key]) is not int or not lo <= b[key] <= hi:
+            raise ValueError('INTEGER_OUT_OF_RANGE')
+    if b['transport'] not in ('tcp', 'websocket'):
+        raise ValueError('INVALID_MQTT_TRANSPORT')
+    validate_websocket_path(b['websocket_path'])
+    if b['host'] is not None:
+        validate_mqtt_host(b['host'])
+    elif b['enabled']:
+        raise ValueError('MQTT_BACKUP_HOST_REQUIRED')
+    for p in (b['ca_file'], b['credentials_file']):
+        if p is not None and (not isinstance(p, str) or not Path(p).is_absolute()):
+            raise ValueError('ABSOLUTE_PATH_REQUIRED')
+    if b['host'] is not None and not b['tls'] and _is_loopback(b['host']) and not allow_insecure_loopback:
+        raise ValueError('PLAINTEXT_ONLY_EXPLICIT_LOOPBACK_TEST')
 
 def save_config(path: Path, cfg: dict) -> None:
     from .util import atomic_write

@@ -32,6 +32,17 @@ mqtt:
   keepalive: 15
   reconnect_max: 30
   allow_insecure_loopback: false
+  backup:
+    enabled: false
+    host: null
+    port: 8883
+    transport: tcp
+    websocket_path: /mqtt
+    tls: true
+    ca_file: null
+    credentials_file: null
+    commands: true
+    budget_bytes_s: 8000
 telemetry:
   profile: balanced
   resume_stable_seconds: 20

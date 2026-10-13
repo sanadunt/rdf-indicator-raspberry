@@ -14,7 +14,8 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
 > Edge tidak mengautentikasi identitas publisher MQTT. Private PPP/T900 bukan autentikasi:
 > publisher mana pun yang diizinkan ACL broker ke topic command dapat meminta operasi remote.
 > Gunakan TLS, credential terpisah, dan ACL broker yang hanya memberi akses command kepada Ground;
-> jangan izinkan anonymous publish.
+> jangan izinkan anonymous publish. Bila broker cadangan dipakai dengan `Terima perintah` aktif,
+> command dari broker itu dijalankan seperti command Ground; terapkan ACL `cmd/#` yang sama ketat.
 >
 > Pengujian lokal paket bukan bukti uji pada Raspberry/layar/T900 milik Anda.
 > Baca [TEST_REPORT.md](docs/TEST_REPORT.md) dan [batas implementasi](docs/IMPLEMENTATION.md).
@@ -45,6 +46,8 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
 - `Data > Atur` mengubah host/port, transport MQTT/TCP atau WebSocket, pilihan TLS, dua pasangan akun, dan Client ID dasar (akhiran `-control`/`-bulk`).
   TLS aktif memverifikasi sertifikat/nama host; TLS nonaktif mengirim kredensial dan payload tanpa enkripsi—gunakan hanya pada link tepercaya.
   Pengaturan disimpan lokal dan diterapkan tanpa restart layanan; perubahan koneksi memulai sesi transport baru.
+- `Data > Cadangan` mengatur **broker MQTT cadangan** opsional (LAN atau online) yang menerima salinan semua
+  publish Edge, terpisah dari PPP/T900, dan tetap berjalan saat broker utama mati. Lihat bagian 4.
 - Daftar Data memuat topic/payload keluar dan command dari Ground; angular terkompresi, raw IQ tidak dikirim.
 - Jurnal command SQLite, ID dedup, expiry/session/revision validation, satu mutasi aktif.
 - Safe settings patch dan Start/Stop/Restart stack SDR hanya memakai target helper yang fixed; panel Edge tetap mengikuti approval lokal, Ground tidak perlu approval root remote.
@@ -244,6 +247,51 @@ Menggunakan broker yang sudah ada juga didukung: atur host, port, transport, cre
 digunakan. `tls: false` memilih TCP atau `ws://` biasa; credential dan payload tidak terenkripsi,
 jadi gunakan hanya melalui link privat/tepercaya dengan listener broker plaintext yang cocok.
 
+### Broker MQTT cadangan (opsional)
+
+Selain broker utama lewat PPP/T900, Edge dapat **mirror** semua publish ke satu broker cadangan di
+LAN (mis. `192.168.1.10`) atau online. Broker cadangan memakai client sendiri
+(`<client_id>-backup`), topic yang identik (`sdr/v2/{node_id}/...`), dan budget sendiri, serta
+tetap menerima data saat PPP/T900 atau broker utama mati. Default nonaktif.
+
+Atur dari panel `Data > Cadangan` (login PIN Admin): Status cadangan, Transport (MQTT/TCP atau
+WebSocket), Enkripsi TLS, IP / host, Port, Path WebSocket, Terima perintah, dan Akun (Tanpa akun
+atau Pakai akun dengan User/Pass). Simpan langsung menyambung ulang client cadangan tanpa memutus
+broker utama. Pengaturan panel disimpan di `/var/lib/rdf-node/mqtt-ui-backup-settings.json` dan
+`mqtt-ui-backup-account.json` (mode 0600) dan menggantikan nilai koneksi `mqtt.backup` di
+`/etc/rdf-node/config.yaml`; `ca_file`, `credentials_file`, dan `budget_bytes_s` hanya diatur di
+`config.yaml` (berlaku setelah restart `rdf-edge.service`):
+
+```yaml
+mqtt:
+  backup:
+    enabled: false
+    host: null              # wajib bila enabled
+    port: 8883
+    transport: tcp          # tcp | websocket
+    websocket_path: /mqtt
+    tls: true               # false = plaintext, hanya jaringan tepercaya
+    ca_file: null           # null = CA sistem; isi path untuk CA privat/self-signed
+    credentials_file: null  # null = anonymous; JSON {username,password}
+    commands: true          # subscribe cmd/* di broker cadangan
+    budget_bytes_s: 8000    # 1000..200000; di luar budget T900
+```
+
+Hal yang perlu diperhatikan:
+
+- Broker harus MQTT 5. ACL harus mengizinkan publish semua topic Edge dan, bila `Terima perintah`
+  aktif, subscribe `cmd/#` node; bila subscribe ditolak, cadangan tidak pernah READY. Untuk broker
+  publish-only, matikan `Terima perintah`.
+- Command dari broker cadangan dijalankan **seperti command Ground** (termasuk reboot/shutdown).
+  Batasi ACL publish `cmd/#` di broker itu dan jangan aktifkan `Terima perintah` di broker publik.
+  ACK command dari cadangan hanya dikirim ke cadangan; `config.get` dari cadangan memerlukan TLS.
+- TLS dengan `ca_file: null` memakai CA sistem (broker online bersertifikat publik). Broker LAN
+  self-signed memerlukan `mqtt.backup.ca_file`, atau TLS nonaktif hanya di LAN tepercaya.
+- Koneksi mengikuti routing OS. Bila route ke broker online lewat PPP, trafik cadangan memakai
+  bandwidth T900; periksa `ip route get <host>` sebelum mengaktifkan.
+
+Detail lengkap: [MQTT_GROUND.md](docs/MQTT_GROUND.md#broker-cadangan-mirror-lanonline).
+
 ## 5. Mengizinkan data RDF asli menjadi LIVE
 
 Default `authority_verified: false` dan `angle_verified: false` sengaja mencegah source
@@ -315,6 +363,8 @@ aksi panel Edge lokal; `--remote` sudah dihapus, sedangkan `--reboot` tetap meng
 Menjalankan `controls approve` tanpa flag **tidak mencabut** Ground. Batasi publish `cmd/#` melalui
 ACL broker dan cabut credential Ground di broker untuk menutup akses remote. Edge tidak membuktikan
 bahwa publisher MQTT benar-benar Ground; link private peer-to-peer sendiri bukan autentikasi publisher.
+Bila broker cadangan aktif dengan `Terima perintah`, publisher yang diizinkan ACL `cmd/#` di broker
+cadangan memperoleh akses yang sama; tutup ACL di kedua broker atau matikan `Terima perintah`.
 
 Sebelum mengaktifkan Ground, pastikan akun broker dan ACL topic hanya mengizinkan Ground yang
 dipercaya. TLS aktif memverifikasi sertifikat/nama host broker; autentikasi publisher tetap tugas
@@ -398,6 +448,7 @@ Tidak ada perintah reboot atau shutdown nyata dari test suite. Jalankan tanpa su
 | CLOCK UNTRUSTED | Periksa time sync OS; jangan bypass freshness |
 | MQTT DISABLED | Provision/import bundle atau konfigurasi broker; plaintext hanya untuk link privat tepercaya |
 | TLS error | Periksa CA/SAN/clock broker; jangan matikan verifikasi |
+| MQTT cadangan ERROR | Lihat error di tab Link: `SUBACK_REJECTED` = ACL menolak subscribe `cmd/*` (matikan `Terima perintah` untuk broker publish-only); `TLS_CERTIFICATE_VERIFY_FAILED` = isi `mqtt.backup.ca_file` untuk broker self-signed/CA privat; cek juga `ip route get <host>` |
 | Ground tidak melihat telemetry | Periksa receiver, subscription ACL, session dan health; MQTT CONNECTED di Edge bukan bukti receiver memproses data |
 | Ping peer PPP | Tab Link: satu ping ICMP tiap sekitar 5 detik dipaksa melalui interface PPP; tanpa balasan bukan bukti link mati. |
 | Grafik tidak mulai | Tab Link: gate source/angle, backlog/stabilisasi, CONTROL profile |
@@ -422,7 +473,7 @@ Jangan membagikan full settings, credential bundle, file hash/password atau log 
 | `/opt/rdf-node/current` | Release aplikasi aktif |
 | `/etc/rdf-node/config.yaml` | Config bridge Raspberry |
 | `/etc/rdf-node/helper.yaml` | Approval/helper policy root-only |
-| `/var/lib/rdf-node` | Jurnal dan preferensi bridge |
+| `/var/lib/rdf-node` | Jurnal, preferensi bridge, dan pengaturan/akun MQTT panel (utama dan cadangan) |
 | `/var/lib/rdf-node-control` | Stop/shutdown intent dan backup settings root-only |
 | `/etc/rdf-ground/config.yaml` | Config receiver Ubuntu |
 | `/etc/rdf-ground-mqtt` | TLS/ACL broker terpisah |

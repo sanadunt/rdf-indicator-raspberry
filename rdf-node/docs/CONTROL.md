@@ -48,6 +48,30 @@ command; link private PPP/T900 sendiri bukan autentikasi. TLS memverifikasi brok
 transport, tetapi otorisasi publisher tetap memerlukan credential broker dan ACL per topic.
 Jangan izinkan anonymous publish ke topic command.
 
+### Command dari broker cadangan
+
+Bila broker cadangan aktif dengan `Terima perintah` (`mqtt.backup.commands: true`, default), Edge
+juga subscribe topic `cmd/*` di broker itu. Command yang diterima dari sana masuk ke
+CommandManager yang sama dengan actor `ground-controller`: tanpa remote grant atau approval root
+per aksi, dengan validasi session/boot, expiry, clock, revision, health, jurnal, dan target helper
+fixed yang sama. Satu mutasi aktif berlaku bersama untuk broker utama, broker cadangan, dan panel
+lokal; mutasi lain saat itu ditolak `BUSY`.
+
+Akibatnya, setiap publisher yang diizinkan ACL broker cadangan ke `<prefix>/cmd/#` dapat meminta
+patch settings, start/stop/restart SDR, restart PPP, reboot, atau shutdown. Batasi ACL publish
+`cmd/#` di broker cadangan hanya untuk controller tepercaya, jangan izinkan anonymous publish, dan
+jangan aktifkan `Terima perintah` pada broker publik atau bersama. Untuk broker yang hanya
+menerima data, pilih `Terima perintah: Nonaktif` atau `commands: false`; Edge lalu tidak subscribe
+command di broker itu. Menutup seluruh akses write remote berarti mencabut ACL `cmd/#` di broker
+utama **dan**, untuk broker cadangan, mencabut ACL `cmd/#`-nya atau menonaktifkan `Terima perintah`.
+Menonaktifkan command cadangan saja tidak menutup jalur command Ground lewat broker utama.
+
+ACK command dari broker cadangan hanya dikirim ke broker cadangan; ACK command dari broker utama
+atau panel lokal dikirim ke semua broker yang READY. `config.get` dari broker cadangan memerlukan
+TLS pada broker cadangan, dan `settings/reported` hanya dikirim ke broker cadangan. Command
+cadangan memakai paling banyak separuh antrean inbound; kelebihannya dibuang tanpa ACK. Command
+yang masih antre dari sesi cadangan lama dibuang saat pengaturan cadangan disimpan ulang.
+
 ## Supported settings
 
 | Contract | Native | Batas helper |
