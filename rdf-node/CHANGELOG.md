@@ -25,6 +25,15 @@
   `config.mqtt_backup_configured`; `link.mqtt_topic_delivery` stays primary-only.
 - Commands still queued from a replaced MQTT session are now dropped by a per-broker connection
   epoch instead of draining the shared inbound queue on primary reconfigure.
+- Replaced MQTT clients are stopped (and their successors started) on a helper thread, so a client
+  stuck in DNS, TCP or TLS on one broker no longer pauses publishing on the other for up to 7 s.
+  Disabling or repointing the backup first publishes retained `availability`
+  `{online:false, reason:"BACKUP_DISABLED"|"BACKUP_RECONFIGURED"}` to the old backup broker.
+  Changing the primary base Client ID also reconnects the backup under the new
+  `<client_id>-backup`. A pending `config.get` report for a broker that dropped no longer blocks
+  `config.get` on the other broker. A blank `Pakai akun` save reuses the account in use, then the
+  panel account, then `mqtt.backup.credentials_file`; `GET /api/v2/mqtt/backup` reports which one
+  as `credentials_source`.
 - Online backup traffic follows the OS default route. If that route is PPP, the backup consumes T900
   bandwidth; check `ip route get <host>` before enabling it.
 

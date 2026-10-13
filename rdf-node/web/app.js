@@ -813,7 +813,7 @@ async function openMqttBackupSettings(){
   host.value=s.host??'';port.value=s.port==null?'':String(s.port);websocketPath.value=s.websocket_path||'/mqtt';
   commands.value=s.commands===false?'off':'on';auth.value=s.auth==='account'||s.auth==='config'?'account':'none';
   user.value='';password.value='';
-  user.placeholder=password.placeholder=s.credentials_set===true?(s.auth==='config'?'dari config':'tersimpan'):'wajib diisi';
+  user.placeholder=password.placeholder=s.credentials_set===true?(s.credentials_source==='config'?'dari config':'tersimpan'):'wajib diisi';
   clientHint.textContent=s.client_id?`Client ID: ${s.client_id} (otomatis, berbeda dari broker utama).`:'Client ID dibuat otomatis, berbeda dari broker utama.';
   updateForm();
  }

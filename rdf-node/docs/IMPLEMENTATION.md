@@ -78,13 +78,16 @@ API lokal Edge (Ground mengembalikan 404):
 
 - `GET /api/v2/mqtt/backup` memerlukan sesi Admin (401 `AUTHENTICATION_REQUIRED` bila tidak) dan
   mengembalikan `enabled`, `host`, `port`, `transport`, `websocket_path`, `tls`, `commands`,
-  `auth` (`none`/`account`), `credentials_set`, `trust_mode`
+  `auth` (`none`/`account`), `credentials_set`, `credentials_source` (`panel`/`config`/`null`:
+  akun yang dipakai bila `Pakai akun` disimpan dengan User/Pass kosong), `trust_mode`
   (`plaintext`/`system`/`custom`/`unavailable`), `client_id`, `editable` (`false` pada DEMO), dan
   `apply_pending`. Username/password tidak pernah dikembalikan.
 - `POST /api/v2/mqtt/backup` memerlukan sesi dan `X-CSRF-Token`, dengan body tepat
   `{enabled, host, port, transport, websocket_path, tls, commands, auth, username, password}`.
-  `auth: "none"` mewajibkan username/password kosong. `auth: "account"` dengan keduanya kosong
-  mempertahankan akun tersimpan (panel atau `config.yaml`); hanya satu yang diisi ditolak. `host`
+  `auth: "none"` mewajibkan username/password kosong; akun panel yang sudah tersimpan tidak dihapus.
+  `auth: "account"` dengan keduanya kosong memakai ulang akun yang ada, berurutan: akun yang sedang
+  dipakai, akun panel, lalu `mqtt.backup.credentials_file`; bila tidak ada dan cadangan aktif,
+  ditolak `MQTT_BACKUP_CREDENTIALS_REQUIRED`. Hanya satu yang diisi ditolak. `host`
   boleh kosong hanya bila `enabled: false`. Error 400 `{error}`: `INVALID_MQTT_BACKUP_SETTINGS`,
   `INVALID_MQTT_HOST`, `INVALID_MQTT_PORT`, `INVALID_MQTT_TRANSPORT`,
   `INVALID_MQTT_WEBSOCKET_PATH`, `INCOMPLETE_MQTT_CREDENTIALS`, `INVALID_MQTT_CREDENTIALS`,

@@ -62,8 +62,9 @@ patch settings, start/stop/restart SDR, restart PPP, reboot, atau shutdown. Bata
 `cmd/#` di broker cadangan hanya untuk controller tepercaya, jangan izinkan anonymous publish, dan
 jangan aktifkan `Terima perintah` pada broker publik atau bersama. Untuk broker yang hanya
 menerima data, pilih `Terima perintah: Nonaktif` atau `commands: false`; Edge lalu tidak subscribe
-command di broker itu. Menutup akses remote berarti mencabut ACL `cmd/#` di **kedua** broker atau
-menonaktifkan command cadangan.
+command di broker itu. Menutup seluruh akses write remote berarti mencabut ACL `cmd/#` di broker
+utama **dan**, untuk broker cadangan, mencabut ACL `cmd/#`-nya atau menonaktifkan `Terima perintah`.
+Menonaktifkan command cadangan saja tidak menutup jalur command Ground lewat broker utama.
 
 ACK command dari broker cadangan hanya dikirim ke broker cadangan; ACK command dari broker utama
 atau panel lokal dikirim ke semua broker yang READY. `config.get` dari broker cadangan memerlukan

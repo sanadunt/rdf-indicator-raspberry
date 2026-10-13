@@ -1,4 +1,4 @@
-import copy,http.client,json,os,stat,tempfile,threading,time,unittest,uuid
+import copy,http.client,json,os,socket,stat,tempfile,threading,time,unittest,uuid
 from pathlib import Path
 from unittest import mock
 from rdf_node.agent import Agent
@@ -1405,7 +1405,7 @@ def backup_body(**changes):
     body.update(changes);return body
 
 BACKUP_DEFAULT_VIEW={'enabled':False,'host':'','port':8883,'transport':'tcp','websocket_path':'/mqtt','tls':True,
-                     'commands':True,'auth':'none','credentials_set':False,'trust_mode':'system',
+                     'commands':True,'auth':'none','credentials_set':False,'credentials_source':None,'trust_mode':'system',
                      'client_id':'uav-01-backup','editable':True,'apply_pending':False}
 
 
@@ -1781,7 +1781,8 @@ class BackupApiTests(unittest.TestCase):
         self.assertEqual(code,200,response)
         self.assertNotIn(b'backup-secret',response);self.assertNotIn(b'backup-user',response)
         self.assertEqual(json.loads(response),dict(BACKUP_DEFAULT_VIEW,enabled=True,host='backup.example.net',
-                                                    auth='account',credentials_set=True,apply_pending=True))
+                                                    auth='account',credentials_set=True,credentials_source='panel',
+                                                    apply_pending=True))
         settings_file=self.state('mqtt-ui-backup-settings.json');account_file=self.state('mqtt-ui-backup-account.json')
         self.assertEqual(json.loads(settings_file.read_bytes()),
                          {'schema':1,'enabled':True,'host':'backup.example.net','port':8883,'transport':'tcp',
@@ -1806,7 +1807,8 @@ class BackupApiTests(unittest.TestCase):
         restored=Agent(copy.deepcopy(self.a.cfg))
         try:
             self.assertEqual(restored.mqtt_backup_view(),dict(BACKUP_DEFAULT_VIEW,enabled=True,host='backup.example.net',
-                                                              auth='account',credentials_set=True))
+                                                              auth='account',credentials_set=True,
+                                                              credentials_source='panel'))
             self.assertEqual(restored.backup_client.client_id,'uav-01-backup')
             self.assertEqual(restored.backup_client.credentials_file,str(account_file))
         finally:restored.journal.close()
@@ -1824,7 +1826,7 @@ class BackupApiTests(unittest.TestCase):
         self.assertEqual(account_file.read_bytes(),original)
         self.assertEqual(self.a.mqtt_backup_view()['host'],'backup2.example.net')
         code,view=self.post(backup_body(auth='none',username='',password=''))
-        self.assertEqual((code,view['auth'],view['credentials_set']),(200,'none',False))
+        self.assertEqual((code,view['auth'],view['credentials_set'],view['credentials_source']),(200,'none',True,'panel'))
         self.assertEqual(json.loads(self.state('mqtt-ui-backup-settings.json').read_bytes())['auth'],'none')
         self.a._apply_pending_backup();self.assertIsNone(self.a.backup_client.credentials_file)
         code,view=self.post(backup_body(username='',password=''))
@@ -1951,6 +1953,51 @@ class BackupBrokerEndToEndTests(unittest.TestCase):
                         [{k:c.status() for k,c in agent.clients.items()},
                          agent.backup_client.status() if agent.backup_client else None])
 
+    def silent_listener(self):
+        # Accepts TCP but never answers: a TLS handshake against it blocks until the client's timeout.
+        listener=socket.socket();listener.bind(('127.0.0.1',0));listener.listen(16);held=[]
+        def accept():
+            while True:
+                try:connection,_=listener.accept();held.append(connection)
+                except OSError:return
+        threading.Thread(target=accept,daemon=True).start()
+        self.addCleanup(lambda:([c.close() for c in held],listener.close()));return listener.getsockname()[1]
+
+    def test_backup_reconfigure_never_pauses_the_primary(self):
+        primary=self.broker();stuck=self.silent_listener()
+        agent=self.start_agent(primary,None)
+        agent.cfg['mqtt']['backup'].update(enabled=True,host='127.0.0.1',port=stuck,tls=True)
+        agent.backup_reconfigure.clear();agent.backup_desired=agent._backup_defaults()
+        agent.backup_pending=agent.backup_desired;agent.backup_reconfigure.set()
+        self.assertTrue(wait(lambda:agent.backup_client is not None and agent.clients and
+                             all(c.ready for c in agent.clients.values()),10))
+        time.sleep(1.5)  # the backup client is now blocked in its TLS handshake
+        before=len(self.received(primary,agent,'telemetry/health'))
+        agent.configure_mqtt_backup({'enabled':False,'host':'','port':8883,'transport':'tcp','websocket_path':'/mqtt',
+                                     'tls':True,'commands':True,'auth':'none','username':'','password':''})
+        time.sleep(4)
+        times=[m['time'] for m in self.received(primary,agent,'telemetry/health')]
+        self.assertGreater(len(times)-before,2)
+        gaps=[b-a for a,b in zip(times[before-1:],times[before:])]
+        self.assertLess(max(gaps),2.5,'backup reconfigure stalled primary telemetry')
+        self.assertIsNone(agent.backup_client)
+
+    def test_disabling_backup_publishes_offline_availability(self):
+        primary=self.broker();backup=self.broker(auth={'':''})
+        agent=self.start_agent(primary,backup)
+        self.wait_ready(agent)
+        self.assertTrue(wait(lambda:json.loads(backup.retained.get(agent.prefix+'/availability',b'{}') or b'{}').get('online') is True,8))
+        agent.configure_mqtt_backup({'enabled':False,'host':'127.0.0.1','port':backup.port,'transport':'tcp',
+                                     'websocket_path':'/mqtt','tls':False,'commands':True,'auth':'none',
+                                     'username':'','password':''})
+        def offline():
+            value=json.loads(backup.retained.get(agent.prefix+'/availability',b'{}') or b'{}')
+            return value.get('online') is False and value.get('reason')=='BACKUP_DISABLED'
+        self.assertTrue(wait(offline,8),backup.retained.get(agent.prefix+'/availability'))
+        self.assertTrue(wait(lambda:not backup.clients,8))
+        self.assertTrue(all(c.ready for c in agent.clients.values()))
+        self.assertFalse(primary.errors or backup.errors)
+
     def test_backup_mirrors_telemetry_and_survives_primary_outage(self):
         primary=self.broker();backup=self.broker(auth={'':''})
         agent=self.start_agent(primary,backup)
@@ -2066,13 +2113,24 @@ class BackupBrokerEndToEndTests(unittest.TestCase):
         self.assertIs(agent.clients['control'],control);self.assertIs(agent.clients['bulk'],bulk)
         self.assertTrue(control.ready and bulk.ready)
         self.assertEqual(primary.mqtt_connect_count,2,'backup reconfigure must not reconnect the primary clients')
-        current_backup=agent.backup_client
-        agent.configure_mqtt({'enabled':True,'host':'127.0.0.1','port':primary.port,'client_id':'uav-01b',
+        current_backup=agent.backup_client;base=agent.mqtt_desired['client_id']
+        agent.configure_mqtt({'enabled':True,'host':'127.0.0.1','port':primary.port,'client_id':base,
                               'transport':'tcp','tls':False,'websocket_path':'/mqtt',
                               'control':{'username':'','password':''},'bulk':{'username':'','password':''}})
         self.assertTrue(wait(lambda:agent.clients.get('control') not in (None,control) and
                              all(c.ready for c in agent.clients.values()),10))
-        self.assertEqual(agent.clients['control'].client_id,'uav-01b-control')
         self.assertIs(agent.backup_client,current_backup);self.assertTrue(current_backup.ready)
         self.assertEqual(replacement.mqtt_connect_count,1,'primary reconfigure must not reconnect the backup client')
+        # A new primary base id is also the backup's id: the backup reconnects under it.
+        second=agent.clients['control']
+        agent.configure_mqtt({'enabled':True,'host':'127.0.0.1','port':primary.port,'client_id':'uav-01b',
+                              'transport':'tcp','tls':False,'websocket_path':'/mqtt',
+                              'control':{'username':'','password':''},'bulk':{'username':'','password':''}})
+        self.assertTrue(wait(lambda:agent.clients.get('control') not in (None,second) and
+                             all(c.ready for c in agent.clients.values()) and
+                             agent.backup_client is not current_backup and agent.backup_client is not None and
+                             agent.backup_client.ready,10))
+        self.assertEqual(agent.clients['control'].client_id,'uav-01b-control')
+        self.assertEqual(agent.backup_client.client_id,'uav-01b-backup')
+        self.assertEqual(agent.mqtt_backup_view()['client_id'],'uav-01b-backup')
         self.assertFalse(primary.errors or backup.errors or replacement.errors)

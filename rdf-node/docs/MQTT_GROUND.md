@@ -101,7 +101,9 @@ atau broker online. Broker utama tetap jalur PPP/T900 ke Ground. Broker cadangan
 dan koneksi sendiri, tidak bergantung pada PPP/T900, dan tetap menerima data saat PPP, T900, atau
 broker utama mati. Ini mode **mirror**, bukan failover: saat kedua broker READY, telemetry dan
 state dikirim ke keduanya. Menyimpan pengaturan cadangan tidak me-restart client utama, dan
-sebaliknya. Bila `mqtt.enabled: false`, broker cadangan tetap dapat berjalan sendiri. Receiver
+sebaliknya; client lama dihentikan di thread terpisah sehingga koneksi yang macet (DNS, TCP, TLS)
+pada satu broker tidak menjeda publish ke broker lainnya. Satu pengecualian: mengubah Client ID dasar
+di `Data > Atur` juga menyambung ulang client cadangan dengan ID baru `{client_id}-backup`. Bila `mqtt.enabled: false`, broker cadangan tetap dapat berjalan sendiri. Receiver
 Ground bawaan hanya tersambung ke broker utama; consumer pada broker cadangan (dashboard LAN, dsb.)
 dikelola terpisah. Mode DEMO tidak pernah membuka koneksi cadangan.
 
@@ -144,9 +146,11 @@ mqtt:
 | `budget_bytes_s` | `8000` | Token bucket client cadangan, integer 1000..200000 B/s. Tidak masuk pemeriksaan `AGGREGATE_BUDGET_TOO_HIGH`. |
 
 `keepalive` dan `reconnect_max` mengikuti `mqtt.keepalive` dan `mqtt.reconnect_max`. Schema tetap
-strict: key tidak dikenal ditolak, dan nilai salah ditolak dengan `BOOLEAN_REQUIRED`,
-`INTEGER_OUT_OF_RANGE`, `INVALID_MQTT_TRANSPORT`, `INVALID_MQTT_WEBSOCKET_PATH`,
-`INVALID_MQTT_HOST`, `MQTT_BACKUP_HOST_REQUIRED`, `ABSOLUTE_PATH_REQUIRED`, atau
+strict: key tidak dikenal ditolak (`mqtt.backup.<key>: UNKNOWN_CONFIG_KEY`), tipe YAML yang salah
+ditolak dengan prefix path (`INTEGER_REQUIRED`, `STRING_REQUIRED`, `STRING_OR_NULL_REQUIRED`,
+`BOOLEAN_REQUIRED`), dan nilai salah ditolak dengan `BOOLEAN_REQUIRED`, `INTEGER_OUT_OF_RANGE`,
+`INVALID_MQTT_TRANSPORT`, `INVALID_MQTT_WEBSOCKET_PATH`, `INVALID_MQTT_HOST`,
+`MQTT_BACKUP_HOST_REQUIRED`, `ABSOLUTE_PATH_REQUIRED`, atau
 `PLAINTEXT_ONLY_EXPLICIT_LOOPBACK_TEST`. Perubahan `config.yaml` berlaku setelah
 `sudo systemctl restart rdf-edge.service`.
 
@@ -165,12 +169,15 @@ sama. Dialog **Broker cadangan** berisi:
 | Path WebSocket | Hanya tampil untuk WebSocket |
 | Terima perintah | `Aktif` / `Nonaktif` (lihat bagian perintah di bawah) |
 | Akun | `Tanpa akun` / `Pakai akun` |
-| User, Pass | Hanya untuk `Pakai akun`; kosongkan keduanya untuk mempertahankan akun tersimpan |
+| User, Pass | Hanya untuk `Pakai akun`; kosongkan keduanya untuk memakai ulang akun yang ada (akun yang sedang dipakai, akun panel, lalu `credentials_file` dari `config.yaml`). Placeholder `tersimpan` atau `dari config` menunjukkan akun mana yang akan dipakai |
 
 Client ID cadangan ditampilkan read-only. Petunjuk TLS menyebut mode trust (CA sistem, CA khusus
 `ca_file`, CA khusus tidak ditemukan, atau plaintext). `ca_file`, `credentials_file`, dan
 `budget_bytes_s` hanya dapat diatur di `config.yaml`. Simpan menerapkan perubahan langsung: client
-cadangan lama dihentikan dan client baru dibuat tanpa memutus broker utama.
+cadangan lama dihentikan dan client baru dibuat tanpa memutus broker utama. Saat cadangan
+dinonaktifkan atau dipindah ke broker lain, Edge lebih dulu mengirim `availability` retained
+`{online:false, reason:"BACKUP_DISABLED"|"BACKUP_RECONFIGURED"}` ke broker lama (bila masih
+tersambung), supaya consumer di sana tidak melihat node tetap online.
 
 Panel menyimpan pengaturan di `state_dir` (default `/var/lib/rdf-node`):
 
@@ -257,8 +264,9 @@ dipause oleh alasan khusus jalur T900 (`BULK_NOT_READY`, `CONTROL_BACKLOG`, `WAI
 tidak menunggu `resume_stable_seconds`. Alasan level source (`PROFILE_CONTROL`,
 `SOURCE_NOT_ELIGIBLE`, `CONTROL_IN_PROGRESS`) tetap memblokir Angular di kedua broker. Selama
 alasan source memblokir dan profile bukan `control`, cadangan menerima
-`telemetry/diagnostic/angular` dengan interval minimum 6 s (source tidak eligible) atau 30 s
-(command berjalan), diperpanjang sesuai ukuran payload dan budget cadangan.
+`telemetry/diagnostic/angular` dengan interval minimum 6 s selama detection tidak valid (termasuk
+UNVERIFIED) atau 30 s selama detection valid tetapi Angular diblokir (misalnya command berjalan),
+diperpanjang sesuai ukuran payload dan budget cadangan.
 
 ### Routing jaringan
 

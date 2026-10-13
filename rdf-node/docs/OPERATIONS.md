@@ -130,7 +130,9 @@ cadangan dijalankan **seperti command Ground**, termasuk reboot, shutdown, resta
 settings, tanpa approval root per aksi. Batasi ACL publish `<prefix>/cmd/#` di broker cadangan
 hanya untuk controller tepercaya dan jangan izinkan anonymous publish. Jangan aktifkan
 `Terima perintah` pada broker publik atau bersama. Untuk menutup seluruh akses write remote, cabut
-ACL `cmd/#` di kedua broker atau set `Terima perintah: Nonaktif`.
+ACL `cmd/#` di broker utama, lalu untuk broker cadangan cabut ACL `cmd/#`-nya atau set
+`Terima perintah: Nonaktif`. `Terima perintah: Nonaktif` saja tidak menutup jalur command Ground
+lewat broker utama.
 
 Broker dengan ACL publish-only harus dipasangkan dengan `Terima perintah: Nonaktif`; bila broker
 menolak subscribe `cmd/*`, client cadangan terus reconnect dengan error `SUBACK_REJECTED` dan

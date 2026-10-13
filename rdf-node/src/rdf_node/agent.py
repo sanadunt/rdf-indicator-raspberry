@@ -199,11 +199,14 @@ class Agent:
             # Commands still queued from the old primary session are dropped by epoch, not by draining
             # the shared queue (which also carries backup commands).
             self.link_epoch['primary']+=1
-            for client in old.values(): client.stop()
             self.cfg['mqtt']=self._resolved_mqtt_config(settings)
             self.clients=self._new_mqtt_clients(settings)
-            if self.mqtt_running:
-                for client in self.clients.values(): client.start()
+            self._retire(list(old.values()),list(self.clients.values()))
+            if self.backup_client and self.backup_client_id!=self._backup_client_id():
+                # The backup id derives from the primary base id; reconnect it under the new id.
+                with self.mqtt_config_lock:
+                    if not self.backup_reconfigure.is_set():
+                        self.backup_pending=self.backup_desired; self.backup_reconfigure.set()
             with self.settings_request_lock:
                 if self.settings_request_link=='primary':
                     self.settings_request_id=None; self.settings_request_payload=None
@@ -273,17 +276,29 @@ class Agent:
         return {**status,'enabled':bool(client),'commands':bool(active['commands']),
                 'bulk_pause':self.backup_bulk_reason if client else None,
                 'angular_aborted':self.backup_angular_abort,'topic_delivery':delivery}
+    def _reusable_backup_auth(self):
+        current=self.backup_desired['auth']
+        candidates=([current] if current in ('account','config') else [])+['account','config']
+        for auth in candidates:
+            path=self._backup_credentials_path({'auth':auth})
+            if path and self._credentials_ready(path): return auth
+        return None
     def mqtt_backup_view(self):
         with self.mqtt_config_lock:
             settings=dict(self.backup_desired); ca_file=self.cfg['mqtt']['backup']['ca_file']
             ca=bool(ca_file and Path(ca_file).is_file())
             trust='plaintext' if not settings['tls'] else 'custom' if ca else 'unavailable' if ca_file else 'system'
-            path=self._backup_credentials_path(settings)
+            # credentials_source: the account a blank 'Pakai akun' save would use (panel or config.yaml).
+            source=settings['auth'] if settings['auth']!='none' else self._reusable_backup_auth()
+            path=self._backup_credentials_path({'auth':source}) if source else None
+            ready=bool(path and self._credentials_ready(path))
             return {'enabled':settings['enabled'],'host':settings['host'],'port':settings['port'],
                     'transport':settings['transport'],'websocket_path':settings['websocket_path'],
                     'tls':settings['tls'],'commands':settings['commands'],
                     'auth':'none' if settings['auth']=='none' else 'account',
-                    'credentials_set':bool(path and self._credentials_ready(path)),'trust_mode':trust,
+                    'credentials_set':ready,
+                    'credentials_source':({'account':'panel','config':'config'}[source] if ready else None),
+                    'trust_mode':trust,
                     'client_id':self.backup_client_id if self.backup_client else self._backup_client_id(),
                     'editable':not self.demo,
                     'apply_pending':self.backup_reconfigure.is_set()}
@@ -308,9 +323,8 @@ class Agent:
                 account={'username':username,'password':password}
         with self.mqtt_config_lock:
             if value['auth']=='account' and account is None:
-                # Blank pair keeps whatever account is already in use (panel or config.yaml).
-                current=self.backup_desired['auth']
-                settings['auth']=current if current in ('account','config') else 'account'
+                # Blank pair reuses an existing account: the one in use, else the panel's, else config.yaml's.
+                settings['auth']=self._reusable_backup_auth() or 'account'
             if settings['enabled']:
                 ca_file=self.cfg['mqtt']['backup']['ca_file']
                 if settings['tls'] and ca_file and not Path(ca_file).is_file(): raise ValueError('MQTT_BACKUP_TLS_CA_UNAVAILABLE')
@@ -329,10 +343,12 @@ class Agent:
             if settings is None: return
             old=self.backup_client; self.backup_client=None
             self.link_epoch['backup']+=1
-            if old: old.stop()
             self.backup_active=settings
             self.backup_client=self._new_backup_client(settings)
-            if self.mqtt_running and self.backup_client: self.backup_client.start()
+            # Tell consumers on the old backup broker that this node left it (a clean DISCONNECT drops the Will).
+            farewell={'v':2,'sid':self.sid,'online':False,'t':now_ms(),
+                      'reason':'BACKUP_RECONFIGURED' if self.backup_client else 'BACKUP_DISABLED'}
+            self._retire([old],[self.backup_client],farewell=farewell if old and old.ready else None)
             with self.settings_request_lock:
                 if self.settings_request_link=='backup':
                     self.settings_request_id=None; self.settings_request_payload=None
@@ -340,6 +356,28 @@ class Agent:
                 self.mqtt_backup_topic_delivery.clear()
             self._backup_generation=-1; self.backup_last_angular_q=0
             self.backup_bulk_reason='MQTT_RECONFIGURED' if self.backup_client else None
+    def _retire(self,old,new,farewell=None):
+        # Stop replaced clients and start their successors off the scheduler thread, so a client stuck in
+        # connect/TLS/DNS on one link never pauses publishing on the other. Successors start only after the
+        # old session is gone, so the same client id never overlaps on one broker.
+        old=[c for c in old if c]; new=[c for c in new if c]
+        if farewell:
+            for c in old: c.offer('offline',self.prefix+'/availability',farewell,qos=1,retain=True,priority=0)
+        def run():
+            if farewell:
+                deadline=time.monotonic()+2
+                while time.monotonic()<deadline and any(c.connected and (c.outbox.data or c.pending_age_ms) for c in old):
+                    time.sleep(.05)
+            for c in old: c.stop_event.set()
+            for c in old: c.stop()
+            with self.mqtt_apply_lock:
+                if self.mqtt_running:
+                    for c in new:
+                        if c is self.backup_client or any(c is x for x in self.clients.values()): c.start()
+        if self.mqtt_running and (old or new):
+            threading.Thread(target=run,name='mqtt-retire',daemon=True).start()
+        else:
+            for c in old: c.stop()
     def start(self):
         self._apply_pending_mqtt(); self._apply_pending_backup()
         with self.mqtt_apply_lock:
@@ -493,10 +531,15 @@ class Agent:
         if not clients: return False
         data=payload if isinstance(payload,bytes) else compact(payload)
         accepted=False
+        def current(link,client):
+            return client is (self.backup_client if link=='backup' else self.clients.get('bulk' if bulk else 'control'))
         for link,client in clients:
             self._topic_delivery_update(suffix,'PENDING',qos,link=link)
-            def delivered(link=link): self._topic_delivery_update(suffix,'SENT',qos,link=link)
-            def failed(reason,link=link): self._topic_delivery_update(suffix,'ERROR',qos,error=reason,link=link)
+            # A retired client finishing in the background must not write into the new session's map.
+            def delivered(link=link,client=client):
+                if current(link,client): self._topic_delivery_update(suffix,'SENT',qos,link=link)
+            def failed(reason,link=link,client=client):
+                if current(link,client): self._topic_delivery_update(suffix,'ERROR',qos,error=reason,link=link)
             if client.offer(key,self.prefix+'/'+suffix,data,qos=qos,retain=retain,expiry=expiry,
                             priority=priority,on_sent=delivered,on_error=failed):
                 accepted=True
@@ -602,8 +645,9 @@ class Agent:
                 if backup_hello and not state_sent:
                     self._offer('state','state',state,1,True,priority=1,links=('backup',))
                 with self.settings_request_lock:
-                    # A report for a backup session that dropped can never be delivered; free the slot.
-                    if self.settings_request_id and self.settings_request_link=='backup' and not b_ready:
+                    # A report for a session that dropped can never be delivered; free the shared slot so the
+                    # link that is still up can ask. (Primary-only deployments never reach this while down.)
+                    if self.settings_request_id and (self.settings_request_link or 'primary') not in ready:
                         self.settings_request_id=None; self.settings_request_payload=None
                     settings_id=self.settings_request_id; settings_payload=self.settings_request_payload
                     settings_link=self.settings_request_link or 'primary'
