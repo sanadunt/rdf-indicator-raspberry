@@ -105,6 +105,7 @@ def doctor(args):
     from .monitor import run
     print('RDF Node preflight (read-only; tidak membuka SDR/serial)')
     print('Python:',sys.version.split()[0]); print('MQTT:', 'configured' if cfg['mqtt']['enabled'] else 'off')
+    print('MQTT cadangan (config.yaml; panel dapat menimpa):','configured' if cfg['mqtt']['backup']['enabled'] else 'off')
     print('Profile:',cfg['telemetry']['profile']); print('Runtime mode:',cfg['runtime_mode'])
     path=cfg['source']['share_dir']
     if path:

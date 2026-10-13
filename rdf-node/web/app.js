@@ -34,17 +34,18 @@ function icon(name,extra=''){
  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');svg.setAttribute('focusable','false');
  svg.setAttribute('class',`ico${extra?` ${extra}`:''}`);const path=document.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('d',ICONS[name]||'');svg.append(path);return svg;
 }
-// Rewrites a button only when its label changes, so a periodic render never swaps the node a
-// finger is currently pressing.
+// Rewrites a button only when its label or icon changes, so a periodic render never swaps the
+// node a finger is currently pressing.
 function setButtonLabel(button,label,iconName){
- if(!button||button.dataset.label===label)return;
- button.dataset.label=label;const span=document.createElement('span');span.textContent=label;
+ const key=`${label}\n${iconName||''}`;
+ if(!button||button.dataset.labelKey===key)return;
+ button.dataset.labelKey=key;button.dataset.label=label;const span=document.createElement('span');span.textContent=label;
  button.replaceChildren(...(iconName?[icon(iconName)]:[]),span);
 }
 function row(label,value,code,iconName){const r=document.createElement('div');r.className='row';const l=document.createElement('label');if(iconName)l.append(icon(iconName));l.append(label);const v=document.createElement('b');v.textContent=String(value??'--');if(code)v.className=good.includes(code)?'good':bad.includes(code)?'bad':'warn';r.append(l,v);return r;}
 function rows(id,values){const e=$(id);e.replaceChildren(...values.map(v=>row(...v)));}
 const mqttTopics=[
- ['KELUAR / RASPBERRY -> GROUND',[
+ ['KELUAR / RASPBERRY -> GROUND (STATUS UTAMA)',[
   ['availability','QoS 1 / retained','Online JSON: v,sid,online,t; offline LWT: v,sid,online,reason.'],
   ['capabilities','QoS 1 / retained','Payload includes local gates (config_patch,processing,restart,reboot,shutdown,ppp_restart) and Ground availability (remote_commands,remote_config_patch,remote_processing,remote_restart,remote_reboot,remote_shutdown,remote_ppp_restart).'],
   ['state','QoS 1 / retained','Payload: v,sid,boot,instance,t,run,daq,cfg,profile,clock.'],
@@ -79,7 +80,7 @@ function renderTopicList(){
   const heading=document.createElement('h3');heading.textContent=title;group.append(heading);
   if(outbound){
    const caption=document.createElement('p');caption.className='sr-only';
-   caption.textContent='Topik keluar dari Raspberry ke Ground. QoS 0 berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker, bukan konfirmasi pemrosesan Ground.';
+   caption.textContent='Topik keluar dari Raspberry ke Ground. Status kirim berlaku untuk broker utama, bukan broker cadangan. QoS 0 berarti write socket lokal tanpa ACK; QoS 1 berarti PUBACK broker, bukan konfirmasi pemrosesan Ground.';
    group.append(caption);
    for(const [suffix,quality,description] of topics){
     const item=document.createElement('details'),summary=document.createElement('summary');
@@ -139,6 +140,14 @@ function updateTopicStatuses(statuses){
 function mqttPairState(l){
  const states=[l.mqtt_control?.state||'DISABLED',l.mqtt_bulk?.state||'DISABLED'];
  return states.includes('ERROR')?'ERROR':states.every(value=>value==='CONNECTED')?'CONNECTED':states.every(value=>value==='DISABLED')?'':'CONNECTING';
+}
+// The backup broker mirrors the primary one. A missing block (older Edge) or a backup that is
+// switched off reads as DISABLED and stays neutral; an enabled backup shows its raw client state.
+function mqttBackupState(l){
+ const b=l?.mqtt_backup;
+ const enabled=!!b&&typeof b==='object'&&(b.enabled===true||(b.enabled==null&&typeof b.state==='string'&&b.state!=='DISABLED'));
+ const state=enabled?String(b.state||'UNKNOWN'):'DISABLED';
+ return {enabled,state,code:enabled?state:'',error:enabled&&b.error?String(b.error):''};
 }
 const SVG_NS='http://www.w3.org/2000/svg';
 const TRAIL_LENGTH=8,TRAIL_MAX_AGE_MS=30000;
@@ -233,6 +242,9 @@ function renderData(s){
  const l=s.link||{};
  const control=l.mqtt_control||{},bulk=l.mqtt_bulk||{};
  label('mqttclients',`${control.state||'DISABLED'} / ${bulk.state||'DISABLED'}`,mqttPairState(l));
+ const backup=mqttBackupState(l);label('mqttbackup',backup.state,backup.code);
+ const backupLabel=$('mqttbackup');if(backupLabel)backupLabel.title=backup.error;
+ setButtonLabel($('mqttbackupsettings'),'Cadangan',authenticated?'layers':'lock');
  setButtonLabel($('mqttsettings'),authenticated?'Atur':'Login',authenticated?'sliders':'lock');
  const node=s.node_id||'--',prefix=`${s.mode==='DEMO'?'sdr/demo/v2':'sdr/v2'}/${node}/`;
  if(prefix!==renderedTopicPrefix){renderedTopicPrefix=prefix;$('topicprefix').textContent=prefix;renderTopicList();}
@@ -265,7 +277,10 @@ function renderOperation(op){
 function tabAlerts(s){
  const l=s.link||{},h=s.host||{},q=s.daq||{},c=s.config||{},p=s.processing||{};
  const mqtt=[l.mqtt_control?.state,l.mqtt_bulk?.state];
- const link=mqtt.includes('ERROR')?'bad':(l.ppp!=='UP'||l.usb!=='PRESENT'||['NO_REPLY','ERROR'].includes(l.ppp_probe)||mqtt.includes('CONNECTING'))?'warn':'';
+ // An enabled backup that is not connected only asks for attention; it never outranks a primary
+ // ERROR, and an intentionally disabled backup adds nothing.
+ const backup=mqttBackupState(l),backupDown=backup.enabled&&backup.state!=='CONNECTED';
+ const link=mqtt.includes('ERROR')?'bad':(l.ppp!=='UP'||l.usb!=='PRESENT'||['NO_REPLY','ERROR'].includes(l.ppp_probe)||mqtt.includes('CONNECTING')||backupDown)?'warn':'';
  const system=(q.state==='DEGRADED'||p.observed==='ERROR'||h.undervoltage===true)?'bad':(q.state!=='HEALTHY'||p.observed!=='RUNNING'||h.clock_trusted!==true)?'warn':'';
  const config=c.source_configured?'':'warn';
  const data=Object.values(l.mqtt_topic_delivery||{}).some(entry=>entry?.state==='ERROR'&&!deliverySkipped(entry))?'bad':'';
@@ -306,8 +321,9 @@ function render(s){
  $('focusage').textContent=$('age').textContent;$('focusfreq').textContent=$('freq').textContent;
  label('focusppp',`PPP ${l.ppp||'--'}`,l.ppp);label('focusmqtt',`MQTT ${l.mqtt_control?.state||'DISABLED'}`,l.mqtt_control?.state);label('focusdaq',`DAQ ${q.state==='HEALTHY'?'SINKRON':q.state||'UNKNOWN'}`,q.state);
  $('focusalert').textContent=a?a.text:'';$('focusalert').className=`focus-alert ${a?(a.severity==='error'?'bad':'warn'):''}`;
- if(!linkData){rows('linkrows',[["T900 USB",l.usb,l.usb,'plug'],["PPP / interface",`${l.ppp||'--'} / ${l.interface||'--'}`,l.ppp,'chain'],[`Ping ${l.ppp_peer||'peer'}`,pppProbeNames[l.ppp_probe]||'BELUM DICEK',l.ppp_probe,'radar'],["MQTT CTRL / BULK",`${l.mqtt_control?.state||'--'} / ${l.mqtt_bulk?.state||'--'}`,mqttPairState(l),'cloud'],["TX / RX (PPP/IP)",`${fmt(l.tx_kbit_s,2)} / ${fmt(l.rx_kbit_s,2)} kbit/s`,'','updown']]);}
- else rows('linkrows',[["Profil diminta",l.profile,'','activity'],["Grafik pause",l.bulk_pause||'STREAMING','','pause'],["Queue CTRL / BULK",`${l.mqtt_control?.depth||0} / ${l.mqtt_bulk?.depth||0}`,'','layers'],["Parse / angular drop",`${d.parse_errors||0} / ${l.angular_aborted||0}`,'','xcircle']]);
+ const backup=mqttBackupState(l);
+ if(!linkData){rows('linkrows',[["T900 USB",l.usb,l.usb,'plug'],["PPP / interface",`${l.ppp||'--'} / ${l.interface||'--'}`,l.ppp,'chain'],[`Ping ${l.ppp_peer||'peer'}`,pppProbeNames[l.ppp_probe]||'BELUM DICEK',l.ppp_probe,'radar'],["MQTT CTRL / BULK",`${l.mqtt_control?.state||'--'} / ${l.mqtt_bulk?.state||'--'}`,mqttPairState(l),'cloud'],["MQTT cadangan",backup.state,backup.code,'layers'],["TX / RX (PPP/IP)",`${fmt(l.tx_kbit_s,2)} / ${fmt(l.rx_kbit_s,2)} kbit/s`,'','updown']]);}
+ else rows('linkrows',[["Profil diminta",l.profile,'','activity'],["Grafik pause",l.bulk_pause||'STREAMING','','pause'],["Queue CTRL / BULK",`${l.mqtt_control?.depth||0} / ${l.mqtt_bulk?.depth||0}`,'','layers'],["Parse / angular drop",`${d.parse_errors||0} / ${l.angular_aborted||0}`,'','xcircle'],["Error cadangan",backup.error||'--','','warn']]);
  const syn=q.sync||{},syncFlags=[syn.frame,syn.sample_delay,syn.iq];
  const syncCode=syncFlags.every(flag=>flag===true)?'SYNCED':syncFlags.includes(false)?'DEGRADED':'UNKNOWN';
  if(!hostPage) rows('sysrows',[["Engine / desired",`${p.observed||'--'} / ${p.desired||'BELUM DIAMBIL'}`,p.observed==='RUNNING'?'HEALTHY':p.observed,'cpu'],["Frame / Delay / IQ",`${syn.frame??'?'} / ${syn.sample_delay??'?'} / ${syn.iq??'?'}`,syncCode,'sync'],["Frame / progress",`${q.frame_index??'--'} / ${q.frame_progressing?'MAJU':'BELUM'}`,q.frame_progressing?'HEALTHY':'UNKNOWN','film'],["Drop total / delta",`${q.dropped_frames??'--'} / ${q.drop_delta??'--'}`,'','xcircle'],["DAQ umur / USB SDR",`${age(q.source_age_ms)} / ${h.usb_count??'--'} terdeteksi`,'','clock']]);
@@ -528,71 +544,19 @@ function mqttField(grid,title,value,type='text',placeholder='',maxLength=253){
  const input=document.createElement('input');input.type=type;input.value=value??'';input.placeholder=placeholder;
  input.maxLength=maxLength;input.setAttribute('aria-label',title);field.append(caption,input);grid.append(field);return input;
 }
-async function openMqttSettings(){
- if(needLogin())return;
- const box=modal('Pengaturan MQTT','cloud');text(box,'Memuat pengaturan MQTT...');let settings;
- try{settings=await get('/api/v2/mqtt/settings');}
- catch(e){if(e.message==='HTTP 401'){authenticated=false;csrf=null;lastAdminSessionRefresh=0;render(snapshot);login();return;}box.replaceChildren();text(box,`Pengaturan tidak termuat: ${e.message}. Tutup lalu coba lagi.`);return;}
- box.replaceChildren();
- if(!settings.editable){text(box,'Pengaturan MQTT tidak tersedia pada mode demo.');return;}
- const grid=document.createElement('div');grid.className='mqtt-settings-fields';
- const groupHeading=(title,iconName)=>{const heading=document.createElement('h4');heading.className='mqtt-group';heading.append(icon(iconName),title);grid.append(heading);};
- groupHeading('Koneksi broker','cloud');
- const statusField=document.createElement('label');statusField.className='mqtt-settings-field';
- const statusCaption=document.createElement('span');statusCaption.textContent='Status MQTT';
- const enabled=document.createElement('select');enabled.setAttribute('aria-label','Status MQTT');
- for(const [value,title] of [['off','Nonaktif'],['on','Aktif']]){const option=document.createElement('option');option.value=value;option.textContent=title;enabled.append(option);}
- enabled.value=settings.enabled?'on':'off';statusField.append(statusCaption,enabled);grid.append(statusField);
- const transportField=document.createElement('label');transportField.className='mqtt-settings-field';
- const transportCaption=document.createElement('span');transportCaption.textContent='Transport MQTT';
- const transport=document.createElement('select');transport.setAttribute('aria-label','Transport MQTT');
- for(const [value,title] of [['tcp','MQTT/TCP'],['websocket','WebSocket (WS)']]){
-  const option=document.createElement('option');option.value=value;option.textContent=title;transport.append(option);
- }
- transport.value=settings.transport||'tcp';transportField.append(transportCaption,transport);grid.append(transportField);
- const tlsField=document.createElement('label');tlsField.className='mqtt-settings-field';
- const tlsCaption=document.createElement('span');tlsCaption.textContent='Enkripsi TLS';
- const tls=document.createElement('select');tls.setAttribute('aria-label','Enkripsi TLS');
- for(const [value,title] of [['on','Aktif'],['off','Nonaktif']]){
-  const option=document.createElement('option');option.value=value;option.textContent=title;tls.append(option);
- }
- tls.value=settings.tls===false?'off':'on';tlsField.append(tlsCaption,tls);grid.append(tlsField);
- const host=mqttField(grid,'IP / host',settings.host,'text','10.90.0.1',253);
- const port=mqttField(grid,'Port',String(settings.port),'number','8883',5);port.min='1';port.max='65535';port.step='1';
- const clientId=mqttField(grid,'Client ID dasar',settings.client_id,'text','rdf-node',48);
- const websocketPath=mqttField(grid,'Path WebSocket',settings.websocket_path||'/mqtt','text','/mqtt',256);
- const websocketPathField=websocketPath.closest('label');
- groupHeading('Akun CTRL / BULK','lock');
- const controlUser=mqttField(grid,'User CTRL','','text','tidak diubah',128);controlUser.autocomplete='off';
- const controlPassword=mqttField(grid,'Pass CTRL','','password','tidak diubah',512);controlPassword.autocomplete='new-password';
- const bulkUser=mqttField(grid,'User BULK','','text','tidak diubah',128);bulkUser.autocomplete='off';
- const bulkPassword=mqttField(grid,'Pass BULK','','password','tidak diubah',512);bulkPassword.autocomplete='new-password';
- box.append(grid);
- function updateTransportVisibility(){websocketPathField.hidden=transport.value!=='websocket';}
- transport.addEventListener('change',updateTransportVisibility);
- updateTransportVisibility();
- const saveButton=action(box,'Simpan',async()=>{
-  const saved=await post('/api/v2/mqtt/settings',{
-   enabled:enabled.value==='on',host:host.value,port:Number(port.value),client_id:clientId.value,
-   transport:transport.value,tls:tls.value==='on',websocket_path:websocketPath.value,
-   control:{username:controlUser.value,password:controlPassword.value},
-   bulk:{username:bulkUser.value,password:bulkPassword.value}
-  });
-  controlUser.value='';controlPassword.value='';bulkUser.value='';bulkPassword.value='';
-  $('modalmsg').textContent=saved.apply_pending?'Tersimpan; koneksi MQTT diperbarui. Tunggu telemetry dan source evidence yang baru.':'Tersimpan.';
-  renderData(snapshot);
- },false,'check');
- saveButton.classList.add('primary');
- const entries=[
-  {key:'host',name:'IP / host',input:host,field:host.closest('label')},
-  {key:'port',name:'Port',input:port,field:port.closest('label')},
-  {key:'client-id',name:'Client ID dasar',input:clientId,field:clientId.closest('label')},
-  {key:'websocket-path',name:'Path WebSocket',input:websocketPath,field:websocketPathField},
-  {key:'control-user',name:'User CTRL',input:controlUser,field:controlUser.closest('label')},
-  {key:'control-password',name:'Pass CTRL',input:controlPassword,field:controlPassword.closest('label')},
-  {key:'bulk-user',name:'User BULK',input:bulkUser,field:bulkUser.closest('label')},
-  {key:'bulk-password',name:'Pass BULK',input:bulkPassword,field:bulkPassword.closest('label')}
- ];
+function mqttSelect(grid,title,choices,current){
+ const field=document.createElement('label');field.className='mqtt-settings-field';
+ const caption=document.createElement('span');caption.textContent=title;
+ const select=document.createElement('select');select.setAttribute('aria-label',title);
+ for(const [value,name] of choices){const option=document.createElement('option');option.value=value;option.textContent=name;select.append(option);}
+ select.value=current;field.append(caption,select);grid.append(field);return select;
+}
+function mqttGroupHeading(grid,title,iconName){const heading=document.createElement('h4');heading.className='mqtt-group';heading.append(icon(iconName),title);grid.append(heading);return heading;}
+// On-screen keyboard shared by the MQTT dialogs (the kiosk has no physical keyboard). Entries are
+// {key,name,input,field}. The edited field is lifted into the keyboard editor and later put back
+// into its own parent, so a dialog may use any number of grids. Hidden fields are left out of
+// the picker. Closing with Selesai/Escape restores the dialog scroll and keeps the field visible.
+function attachMqttKeyboard(box,entries){
  const keyboard=document.createElement('section');keyboard.id='mqtt-keyboard';keyboard.hidden=true;
  keyboard.setAttribute('role','group');keyboard.setAttribute('aria-label','Keyboard layar sentuh');
  const bar=document.createElement('div');bar.className='mqtt-keyboard-bar';
@@ -604,10 +568,15 @@ async function openMqttSettings(){
  const keyboardRows=document.createElement('div');keyboardRows.className='mqtt-keyboard-rows';
  const keyboardStatus=document.createElement('span');keyboardStatus.className='sr-only';keyboardStatus.setAttribute('role','status');keyboardStatus.setAttribute('aria-live','polite');
  keyboard.append(bar,editor,keyboardRows,keyboardStatus);box.append(keyboard);
- let active=null,mode='letters',shifted=false,pointerField=null,suppressKeyboardFocus=false;
+ let active=null,mode='letters',shifted=false,pointerField=null,suppressKeyboardFocus=false,returnScroll=0;
  const dialog=box.closest('.dialog'),closeButton=$('closemodal'),dialogHead=dialog.querySelector('.dialoghead');
  function restoreField(entry){
-  if(entry.field.parentNode===editor)grid.insertBefore(entry.field,entry.next&&entry.next.parentNode===grid?entry.next:null);
+  if(entry.field.parentNode===editor&&entry.parent)entry.parent.insertBefore(entry.field,entry.next&&entry.next.parentNode===entry.parent?entry.next:null);
+ }
+ function revealField(field){
+  const view=box.getBoundingClientRect(),rect=field.getBoundingClientRect();
+  if(rect.top<view.top)box.scrollTop-=view.top-rect.top;
+  else if(rect.bottom>view.bottom)box.scrollTop+=rect.bottom-view.bottom;
  }
  function updateKeyboardAction(){
   if(!active)return;
@@ -692,8 +661,8 @@ async function openMqttSettings(){
   if(active===entry)return;
   let selection=null;
   if(entry.input.type!=='number')selection=[entry.input.selectionStart,entry.input.selectionEnd];
-  if(active)restoreField(active);
-  entry.next=entry.field.nextSibling;editor.append(entry.field);active=entry;mqttKeyboardDismiss=hideKeyboard;bar.append(closeButton);
+  if(active)restoreField(active);else returnScroll=box.scrollTop;
+  entry.parent=entry.field.parentNode;entry.next=entry.field.nextSibling;editor.append(entry.field);active=entry;mqttKeyboardDismiss=hideKeyboard;bar.append(closeButton);
   keyboard.hidden=false;box.classList.add('keyboard-open');dialog.classList.add('keyboard-open');
   mode=entry.input.type==='number'?'numeric':'letters';shifted=false;updatePicker();renderKeyboard();
   keyboardStatus.textContent=`Keyboard layar sentuh untuk ${entry.name}`;
@@ -704,6 +673,9 @@ async function openMqttSettings(){
   if(!active)return;
   const entry=active;restoreField(entry);active=null;keyboard.hidden=true;dialogHead.append(closeButton);
   box.classList.remove('keyboard-open');dialog.classList.remove('keyboard-open');mqttKeyboardDismiss=null;
+  // refocus=false means the dialog is being closed or replaced; only a user close returns to
+  // the scroll position the field was opened from.
+  if(refocus){box.scrollTop=returnScroll;revealField(entry.field);}
   if(refocus){suppressKeyboardFocus=true;try{entry.input.focus({preventScroll:true});}finally{suppressKeyboardFocus=false;}}
  }
  fieldPicker.addEventListener('change',()=>{const entry=entries.find(value=>value.key===fieldPicker.value);if(entry)activate(entry);});
@@ -725,9 +697,153 @@ async function openMqttSettings(){
   entry.input.addEventListener('focus',event=>{if(event.isTrusted&&!suppressKeyboardFocus&&pointerField!==entry.input)activate(entry);});
   entry.input.addEventListener('click',event=>{if(event.isTrusted)activate(entry);});
  }
+ return {hide:hideKeyboard};
+}
+async function openMqttSettings(){
+ if(needLogin())return;
+ const box=modal('Pengaturan MQTT','cloud');text(box,'Memuat pengaturan MQTT...');let settings;
+ try{settings=await get('/api/v2/mqtt/settings');}
+ catch(e){if(e.message==='HTTP 401'){authenticated=false;csrf=null;lastAdminSessionRefresh=0;render(snapshot);login();return;}box.replaceChildren();text(box,`Pengaturan tidak termuat: ${e.message}. Tutup lalu coba lagi.`);return;}
+ box.replaceChildren();
+ if(!settings.editable){text(box,'Pengaturan MQTT tidak tersedia pada mode demo.');return;}
+ const grid=document.createElement('div');grid.className='mqtt-settings-fields';
+ mqttGroupHeading(grid,'Koneksi broker','cloud');
+ const enabled=mqttSelect(grid,'Status MQTT',[['off','Nonaktif'],['on','Aktif']],settings.enabled?'on':'off');
+ const transport=mqttSelect(grid,'Transport MQTT',[['tcp','MQTT/TCP'],['websocket','WebSocket (WS)']],settings.transport||'tcp');
+ const tls=mqttSelect(grid,'Enkripsi TLS',[['on','Aktif'],['off','Nonaktif']],settings.tls===false?'off':'on');
+ const host=mqttField(grid,'IP / host',settings.host,'text','10.90.0.1',253);
+ const port=mqttField(grid,'Port',String(settings.port),'number','8883',5);port.min='1';port.max='65535';port.step='1';
+ const clientId=mqttField(grid,'Client ID dasar',settings.client_id,'text','rdf-node',48);
+ const websocketPath=mqttField(grid,'Path WebSocket',settings.websocket_path||'/mqtt','text','/mqtt',256);
+ const websocketPathField=websocketPath.closest('label');
+ mqttGroupHeading(grid,'Akun CTRL / BULK','lock');
+ const controlUser=mqttField(grid,'User CTRL','','text','tidak diubah',128);controlUser.autocomplete='off';
+ const controlPassword=mqttField(grid,'Pass CTRL','','password','tidak diubah',512);controlPassword.autocomplete='new-password';
+ const bulkUser=mqttField(grid,'User BULK','','text','tidak diubah',128);bulkUser.autocomplete='off';
+ const bulkPassword=mqttField(grid,'Pass BULK','','password','tidak diubah',512);bulkPassword.autocomplete='new-password';
+ box.append(grid);
+ function updateTransportVisibility(){websocketPathField.hidden=transport.value!=='websocket';}
+ transport.addEventListener('change',updateTransportVisibility);
+ updateTransportVisibility();
+ const saveButton=action(box,'Simpan',async()=>{
+  const saved=await post('/api/v2/mqtt/settings',{
+   enabled:enabled.value==='on',host:host.value,port:Number(port.value),client_id:clientId.value,
+   transport:transport.value,tls:tls.value==='on',websocket_path:websocketPath.value,
+   control:{username:controlUser.value,password:controlPassword.value},
+   bulk:{username:bulkUser.value,password:bulkPassword.value}
+  });
+  controlUser.value='';controlPassword.value='';bulkUser.value='';bulkPassword.value='';
+  $('modalmsg').textContent=saved.apply_pending?'Tersimpan; koneksi MQTT diperbarui. Tunggu telemetry dan source evidence yang baru.':'Tersimpan.';
+  renderData(snapshot);
+ },false,'check');
+ saveButton.classList.add('primary');
+ attachMqttKeyboard(box,[
+  {key:'host',name:'IP / host',input:host,field:host.closest('label')},
+  {key:'port',name:'Port',input:port,field:port.closest('label')},
+  {key:'client-id',name:'Client ID dasar',input:clientId,field:clientId.closest('label')},
+  {key:'websocket-path',name:'Path WebSocket',input:websocketPath,field:websocketPathField},
+  {key:'control-user',name:'User CTRL',input:controlUser,field:controlUser.closest('label')},
+  {key:'control-password',name:'Pass CTRL',input:controlPassword,field:controlPassword.closest('label')},
+  {key:'bulk-user',name:'User BULK',input:bulkUser,field:bulkUser.closest('label')},
+  {key:'bulk-password',name:'Pass BULK',input:bulkPassword,field:bulkPassword.closest('label')}
+ ]);
  enabled.focus({preventScroll:true});
 }
 $('mqttsettings').onclick=openMqttSettings;
+// Backup broker (mirror of the primary, LAN or online). It is saved through its own endpoint so
+// that changing it never reconnects the PPP/T900 primary. Error codes stay raw, with a short hint.
+const mqttBackupErrors={
+ INVALID_MQTT_BACKUP_SETTINGS:'pengaturan cadangan ditolak.',
+ INVALID_MQTT_HOST:'isi IP / host yang valid tanpa spasi.',
+ INVALID_MQTT_PORT:'port harus 1-65535.',
+ INVALID_MQTT_TRANSPORT:'pilih MQTT/TCP atau WebSocket.',
+ INVALID_MQTT_WEBSOCKET_PATH:'path WebSocket harus diawali /.',
+ INCOMPLETE_MQTT_CREDENTIALS:'isi user dan pass, atau kosongkan keduanya.',
+ INVALID_MQTT_CREDENTIALS:'user atau pass tidak valid.',
+ MQTT_BACKUP_CREDENTIALS_REQUIRED:'belum ada akun tersimpan; isi user dan pass.',
+ MQTT_BACKUP_TLS_CA_UNAVAILABLE:'file CA khusus (ca_file) tidak ditemukan.'
+};
+async function openMqttBackupSettings(){
+ if(needLogin())return;
+ const box=modal('Broker cadangan','layers');text(box,'Memuat pengaturan broker cadangan...');let settings;
+ try{settings=await get('/api/v2/mqtt/backup');}
+ catch(e){
+  if(e.message==='HTTP 401'){authenticated=false;csrf=null;lastAdminSessionRefresh=0;render(snapshot);login();return;}
+  box.replaceChildren();
+  text(box,e.message==='HTTP 404'?'Broker cadangan belum didukung oleh layanan Edge ini.':`Pengaturan tidak termuat: ${e.message}. Tutup lalu coba lagi.`);return;
+ }
+ if($('modal').hidden)return;
+ box.replaceChildren();
+ if(!settings||typeof settings!=='object'){text(box,'Pengaturan broker cadangan tidak valid. Tutup lalu coba lagi.');return;}
+ if(!settings.editable){text(box,'Broker cadangan tidak tersedia pada mode demo.');return;}
+ const grid=document.createElement('div');grid.className='mqtt-settings-fields';
+ mqttGroupHeading(grid,'Koneksi cadangan','cloud');
+ const enabled=mqttSelect(grid,'Status cadangan',[['off','Nonaktif'],['on','Aktif']],'off');
+ const transport=mqttSelect(grid,'Transport MQTT',[['tcp','MQTT/TCP'],['websocket','WebSocket (WS)']],'tcp');
+ const tls=mqttSelect(grid,'Enkripsi TLS',[['on','Aktif'],['off','Nonaktif']],'on');
+ const host=mqttField(grid,'IP / host','','text','192.168.1.10',253);
+ const port=mqttField(grid,'Port','','number','8883',5);port.min='1';port.max='65535';port.step='1';
+ const websocketPath=mqttField(grid,'Path WebSocket','/mqtt','text','/mqtt',256);
+ const websocketPathField=websocketPath.closest('label');
+ const tlsHint=text(grid,'');const clientHint=text(grid,'');tlsHint.className=clientHint.className='hint';
+ mqttGroupHeading(grid,'Perintah dan akun','lock');
+ const commands=mqttSelect(grid,'Terima perintah',[['on','Aktif'],['off','Nonaktif']],'on');
+ const auth=mqttSelect(grid,'Akun',[['none','Tanpa akun'],['account','Pakai akun']],'none');
+ const user=mqttField(grid,'User','','text','',128);user.autocomplete='off';
+ const password=mqttField(grid,'Pass','','password','',512);password.autocomplete='new-password';
+ const commandHint=text(grid,'');commandHint.className='hint';
+ box.append(grid);
+ function updateForm(){
+  const tlsOn=tls.value==='on',trust=settings.trust_mode;
+  websocketPathField.hidden=transport.value!=='websocket';
+  user.closest('label').hidden=password.closest('label').hidden=auth.value!=='account';
+  port.placeholder=tlsOn?'8883':'1883';
+  tlsHint.textContent=!tlsOn?'TLS nonaktif: akun dan payload tidak terenkripsi; hanya untuk jaringan tepercaya.'
+   :trust==='custom'?'TLS: sertifikat broker diverifikasi dengan CA khusus (ca_file).'
+   :trust==='unavailable'?'TLS: file CA khusus (ca_file) tidak ditemukan; koneksi cadangan akan gagal.'
+   :trust==='system'?'TLS: sertifikat diverifikasi dengan CA sistem. Broker LAN self-signed perlu ca_file di config.yaml atau TLS nonaktif.'
+   :'TLS: sertifikat diverifikasi dengan CA sistem, atau ca_file bila diatur di config.yaml.';
+  tlsHint.classList.toggle('warn',!tlsOn||trust==='unavailable');
+  commandHint.textContent=commands.value==='on'
+   ?'Edge subscribe cmd/* di broker ini; perintahnya diproses seperti dari Ground. Batasi lewat ACL broker.'
+   :'Hanya publish; Edge tidak subscribe perintah di broker ini.';
+ }
+ function applySettings(s){
+  enabled.value=s.enabled===true?'on':'off';transport.value=s.transport==='websocket'?'websocket':'tcp';tls.value=s.tls===false?'off':'on';
+  host.value=s.host??'';port.value=s.port==null?'':String(s.port);websocketPath.value=s.websocket_path||'/mqtt';
+  commands.value=s.commands===false?'off':'on';auth.value=s.auth==='account'||s.auth==='config'?'account':'none';
+  user.value='';password.value='';
+  user.placeholder=password.placeholder=s.credentials_set===true?(s.auth==='config'?'dari config':'tersimpan'):'wajib diisi';
+  clientHint.textContent=s.client_id?`Client ID: ${s.client_id} (otomatis, berbeda dari broker utama).`:'Client ID dibuat otomatis, berbeda dari broker utama.';
+  updateForm();
+ }
+ for(const select of [transport,tls,commands,auth])select.addEventListener('change',updateForm);
+ applySettings(settings);
+ const saveButton=action(box,'Simpan',async()=>{
+  const account=auth.value==='account';let saved;
+  try{
+   saved=await post('/api/v2/mqtt/backup',{
+    enabled:enabled.value==='on',host:host.value.trim(),port:Number(port.value),transport:transport.value,
+    websocket_path:websocketPath.value,tls:tls.value==='on',commands:commands.value==='on',
+    auth:auth.value,username:account?user.value:'',password:account?password.value:''
+   });
+  }catch(e){const hint=mqttBackupErrors[e.message];if(hint)e.message=`${e.message}: ${hint}`;throw e;}
+  const valid=saved&&typeof saved==='object';
+  if(valid){settings=saved;applySettings(saved);}else{user.value='';password.value='';}
+  $('modalmsg').textContent=(valid?saved.enabled===true:enabled.value==='on')?'Tersimpan; koneksi cadangan diperbarui tanpa memutus broker utama.':'Tersimpan; broker cadangan nonaktif.';
+  renderData(snapshot);
+ },false,'check');
+ saveButton.classList.add('primary');
+ attachMqttKeyboard(box,[
+  {key:'host',name:'IP / host',input:host,field:host.closest('label')},
+  {key:'port',name:'Port',input:port,field:port.closest('label')},
+  {key:'websocket-path',name:'Path WebSocket',input:websocketPath,field:websocketPathField},
+  {key:'user',name:'User',input:user,field:user.closest('label')},
+  {key:'password',name:'Pass',input:password,field:password.closest('label')}
+ ]);
+ enabled.focus({preventScroll:true});
+}
+$('mqttbackupsettings').onclick=openMqttBackupSettings;
 async function command(op,extras={}){
  const r={v:2,id:`local-${Date.now()}-${crypto.randomUUID().slice(0,8)}`,sid:snapshot.sid,boot:snapshot.boot_id,issued_ms:Date.now(),expires_ms:Date.now()+15000,base_rev:snapshot.config?.sdr_revision??null,op,...extras};
  try{const result=await post('/api/v2/commands',r);if(op==='system.shutdown.execute')result.requestId=r.id;$('modalmsg').textContent=`${result.stage}: ${result.id||''}`;return result;}

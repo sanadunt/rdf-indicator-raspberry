@@ -43,6 +43,7 @@ header{height:28px;padding:0 8px 0 10px;display:flex;align-items:center;justify-
 .details,.data-page{padding:0 10px}
 .pagetitle{height:46px;display:flex;align-items:center;justify-content:space-between;gap:8px}
 .pagetitle>b{font-size:12px;letter-spacing:.8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pagetitle-actions{display:flex;align-items:center;gap:6px;flex-shrink:0}
 .smallbtn{height:36px;min-width:72px;padding:0 14px;font-size:13px;font-weight:600;border-radius:18px}
 .seg{display:flex;padding:2px;gap:2px;border:1px solid var(--line);border-radius:20px;background:var(--surface);flex-shrink:0}
 .seg button{height:34px;min-width:72px;padding:0 12px;border:0;border-radius:17px;background:transparent;color:var(--dim);font-size:13px;font-weight:600}
@@ -117,6 +118,8 @@ header{height:28px;padding:0 8px 0 10px;display:flex;align-items:center;justify-
 .rows b.good::before,.rows b.warn::before,.rows b.bad::before{content:'';flex:0 0 7px;width:7px;height:7px;border-radius:50%;background:currentColor}
 #config .pagetitle{height:40px}
 .configrows .row{height:33px}
+/* Koneksi holds 6 rows (incl. MQTT cadangan): 6 x 33 = 198 = 244 page - 46 title. */
+#linkrows .row{height:33px}
 .configbuttons{display:grid;grid-template-columns:repeat(4,1fr);height:54px;gap:6px;margin:8px 0 0}
 .configbuttons button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0 4px;font-size:11.5px;font-weight:600;white-space:nowrap}
 .configbuttons svg,nav svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
@@ -137,7 +140,8 @@ nav button[data-alert="bad"]::before{background:var(--bad)}
 
 /* Data / MQTT */
 .data-page .pagetitle{height:42px}
-.data-summary{height:28px;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 10px;border-radius:var(--radius);background:var(--surface)}
+.data-summary{height:28px;display:grid;grid-template-columns:auto minmax(0,1.4fr) auto minmax(0,1fr);align-items:center;gap:6px;padding:0 10px;border-radius:var(--radius);background:var(--surface)}
+.data-summary small+b+small{padding-left:8px;border-left:1px solid var(--line);line-height:16px}
 .data-summary b{font-size:12.5px;white-space:nowrap}
 .data-summary b::before{content:'';flex:0 0 7px;width:7px;height:7px;border-radius:50%;background:currentColor}
 .topic-heading{height:22px;display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--dim);white-space:nowrap;overflow:hidden}
@@ -212,6 +216,8 @@ nav button[data-alert="bad"]::before{background:var(--bad)}
 .mqtt-group{grid-column:1/-1;display:flex;align-items:center;gap:6px;margin:6px 0 1px;font-size:10.5px;letter-spacing:.6px;text-transform:uppercase;color:var(--dim)}
 .mqtt-group .ico{width:14px;height:14px;color:var(--accent)}
 .mqtt-settings-field{display:grid;gap:2px;min-width:0;color:var(--dim);font-size:10px}
+.dialog .mqtt-settings-fields p.hint{grid-column:1/-1;margin:2px 0 1px}
+.dialog p.hint.warn{color:var(--warn)}
 .dialog .mqtt-settings-fields input,.dialog .mqtt-settings-fields select{height:38px;margin:1px 0;padding:5px 8px;font-size:13px;border-color:var(--faint)}
 .dialog.keyboard-open{max-height:100%;padding:4px}
 .dialog.keyboard-open .dialoghead{height:24px;margin-bottom:0;border-bottom:0}

@@ -28,9 +28,10 @@ class CommandManager:
     def stop(self): self.stop_event.set(); self.thread.join(3)
     def _helper(self,r,timeout=8):
         return call_helper(self.cfg['control']['helper_socket'],r,timeout)
-    def _send(self,id,op,stage,result=None):
-        self.agent.operation_changed(id,op,stage,result or {})
-    def submit(self,request,actor,*,retained=False,topic=None):
+    def _send(self,id,op,stage,result=None,link=None):
+        self.agent.operation_changed(id,op,stage,result or {},link=link)
+    def submit(self,request,actor,*,retained=False,topic=None,link='primary'):
+        # link: broker the command arrived on ('primary' Ground link or 'backup'); ACKs go back there.
         a=self.agent
         try:
             if retained: raise ValueError('RETAINED_COMMAND_REJECTED')
@@ -47,7 +48,7 @@ class CommandManager:
             old=self.journal.lookup(id)
             if old:
                 if old['hash']!=digest(request): raise ValueError('COMMAND_ID_CONFLICT')
-                self._send(id,op,old['stage'],old['result'])
+                self._send(id,op,old['stage'],old['result'],link=link)
                 return self.public(old)
             if request.get('sid')!=a.sid or request.get('boot')!=a.boot: raise ValueError('SESSION_MISMATCH')
             n=now_ms()
@@ -55,11 +56,11 @@ class CommandManager:
             if expires<=n or issued>n+1000 or not 0<expires-issued<=30000: raise ValueError('EXPIRED_OR_INVALID_DEADLINE')
             if op in READ_OPS:
                 # Bound remote GET traffic; no disk or parser probes on request.
-                if time.monotonic()-self.last_rate.get(actor,0)<1: raise ValueError('REQUEST_RATE_LIMIT')
-                self.last_rate[actor]=time.monotonic()
+                if time.monotonic()-self.last_rate.get((actor,link),0)<1: raise ValueError('REQUEST_RATE_LIMIT')
+                self.last_rate[(actor,link)]=time.monotonic()
                 if op=='config.get':
                     source=a.source
-                    if not a.cfg['mqtt']['tls']: raise ValueError('TLS_REQUIRED_FOR_SETTINGS_REPORT')
+                    if not a.link_tls(link): raise ValueError('TLS_REQUIRED_FOR_SETTINGS_REPORT')
                     if source.config_error or source.raw_settings is None or source.settings_seen is None:
                         raise ValueError('SETTINGS_UNAVAILABLE')
                     if time.monotonic()-source.settings_seen>self.cfg['freshness']['source_status_ms']/1000:
@@ -73,11 +74,12 @@ class CommandManager:
                         if a.settings_request_id is not None: raise ValueError('SETTINGS_REQUEST_PENDING')
                         self.journal.accept(request,actor); self.journal.update(id,'APPLIED',result)
                         a.settings_request_id=id; a.settings_request_payload=settings_payload
+                        a.settings_request_link=link
                 else:
                     target=self.journal.lookup(str(request.get('target_id','')))
                     result={'operation':self.public(target) if target else None}
                     self.journal.accept(request,actor); self.journal.update(id,'APPLIED',result)
-                self._send(id,op,'APPLIED',result)
+                self._send(id,op,'APPLIED',result,link=link)
                 return {'id':id,'stage':'APPLIED','result':result}
             if a.demo: raise ValueError('DEMO_NO_HARDWARE_CONTROL')
             if actor=='ground-controller' and not a.capabilities()['remote_commands']:
@@ -112,13 +114,13 @@ class CommandManager:
                 if self.busy: raise ValueError('BUSY')
                 self.journal.accept(request,actor)
                 self.busy=True; self.active_id=id
-                self.queue.put_nowait((request,actor))
-            self._send(id,op,'ACCEPTED')
+                self.queue.put_nowait((request,actor,link))
+            self._send(id,op,'ACCEPTED',link=link)
             return {'id':id,'stage':'ACCEPTED'}
         except Exception as e:
             code=str(e) if isinstance(e,ValueError) and str(e).isupper() else 'JOURNAL_OR_REQUEST_ERROR'
             if isinstance(request,dict) and isinstance(request.get('id'),str) and len(request['id'])<=80:
-                self._send(request['id'],str(request.get('op','unknown')),'REJECTED',{'error':code})
+                self._send(request['id'],str(request.get('op','unknown')),'REJECTED',{'error':code},link=link)
             return {'id':request.get('id') if isinstance(request,dict) else None,'stage':'REJECTED','result':{'error':code}}
     @staticmethod
     def public(op):
@@ -130,19 +132,19 @@ class CommandManager:
         self.journal.update(r['id'],stage,result)
     def _worker(self):
         while not self.stop_event.is_set():
-            try: r,actor=self.queue.get(timeout=0.2)
+            try: r,actor,link=self.queue.get(timeout=0.2)
             except queue.Empty: continue
             try:
                 self._stage(r,'APPLYING')
                 stage,result=self._execute(r,actor)
                 self._stage(r,stage,result)
-                self._send(r['id'],r['op'],stage,result)
+                self._send(r['id'],r['op'],stage,result,link=link)
             except Exception as e:
                 err=str(e) if isinstance(e,ValueError) and str(e).isupper() else type(e).__name__.upper()
                 # Helper timeout after side effect may mean unknown, not failed.
                 stage='OUTCOME_UNKNOWN' if isinstance(e,(TimeoutError,OSError)) else 'FAILED'
                 try:
-                    self._stage(r,stage,{'error':err}); self._send(r['id'],r['op'],stage,{'error':err})
+                    self._stage(r,stage,{'error':err}); self._send(r['id'],r['op'],stage,{'error':err},link=link)
                 except Exception: pass
             finally:
                 with self.lock: self.busy=False; self.active_id=None
