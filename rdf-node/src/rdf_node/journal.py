@@ -59,8 +59,10 @@ class Journal:
         return self.lookup(id)
     def latest(self,n=20):
         with self.lock:
-            ids=[r[0] for r in self.db.execute('SELECT id FROM operations ORDER BY updated DESC LIMIT ?',(n,))]
-            return [self.lookup(i) for i in ids]
+            rows=self.db.execute('SELECT id, hash, request, actor, stage, result, updated, link, meta FROM operations '
+                                 'ORDER BY updated DESC LIMIT ?',(n,)).fetchall()
+            return [dict(id=r[0],hash=r[1],request=json.loads(r[2]),actor=r[3],stage=r[4],result=json.loads(r[5]),
+                         updated_ms=r[6],link=r[7],meta=json.loads(r[8] or '{}')) for r in rows]
     def pending_shutdowns(self):
         failures={'FAILED','REJECTED','EXPIRED','CONFLICT','CANCELLED'}
         with self.lock:

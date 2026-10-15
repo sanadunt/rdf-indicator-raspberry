@@ -824,7 +824,7 @@ class CommandTests(unittest.TestCase):
             return {'requested':True,'service':'t900-ppp.service'}
         with mock.patch.object(self.a.commands,'_helper',side_effect=helper):
             accepted=self.a.commands.submit(request,'ground-controller')
-            self.a.commands.queue.join()
+            self.a.commands.join_ppp()
         self.assertEqual(accepted['stage'],'ACCEPTED')
         self.assertEqual(observed,[('APPLYING',{'op':'ppp.restart','origin':'ground-controller'})])
         operation=self.a.journal.lookup(request['id'])
@@ -838,7 +838,7 @@ class CommandTests(unittest.TestCase):
         request=self.request('ppp.restart')
         with mock.patch.object(self.a.commands,'_helper',side_effect=TimeoutError('RPC_TIMEOUT')) as helper:
             accepted=self.a.commands.submit(request,'ground-controller')
-            self.a.commands.queue.join()
+            self.a.commands.join_ppp()
             self.assertEqual(accepted['stage'],'ACCEPTED')
             self.assertEqual(self.a.journal.lookup(request['id'])['stage'],'OUTCOME_UNKNOWN')
             duplicate=self.a.commands.submit(request,'ground-controller')
@@ -853,6 +853,194 @@ class CommandTests(unittest.TestCase):
     def test_unrecognized_actor_is_rejected(self):
         result=self.a.commands.submit(self.request('stream.set',profile='balanced'),'untrusted-caller')
         self.assertEqual(result['result']['error'],'INVALID_COMMAND_ACTOR')
+
+class PppRecoveryTests(unittest.TestCase):
+    """Local T900 restart lane, link recovery observer, and operator-visible command origin."""
+    HELPER_OK={'requested':True,'service':'t900-ppp.service'}
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.a=make_agent(Path(os.path.realpath(self.tmp.name)));self.addCleanup(self.a.journal.close)
+        a=self.a;a.cfg['runtime_mode']='controlled';a.cfg['control']['ppp_restart_enabled']=True
+        a.helper_status={'allow_ppp_restart':True}
+        self.ctrl=capture_client('cap-control');self.ctrl.generation=3;self.kicks=[]
+        self.ctrl.kick=lambda:self.kicks.append(1)
+        a.clients={'control':self.ctrl}
+        self.service={'state':'ACTIVE','substate':'running','restarts':0,'since':'100'}
+        a.monitor.data.update(ppp='UP',interface='ppp0',ppp_probe='REPLY',ppp_service=dict(self.service))
+        a._snapshot();self.kicks.clear()
+    def request(self,op='ppp.restart',**extras):
+        request=dict(v=2,id='ppp-'+uuid.uuid4().hex,sid=self.a.sid,boot=self.a.boot,issued_ms=now_ms(),
+                     expires_ms=now_ms()+15000,base_rev=self.a.source.revision,op=op)
+        request.update(extras);return request
+    def restart(self,actor='local-admin',link='primary',helper=None,**extras):
+        request=self.request(**extras)
+        with mock.patch.object(self.a.commands,'_helper',side_effect=helper,
+                               return_value=self.HELPER_OK) as call:
+            result=self.a.commands.submit(request,actor,link=link);self.a.commands.join_ppp()
+        return request,result,call
+    def host(self,**state):
+        self.a.monitor.data.update(state);self.a._snapshot();return self.a.snapshot()['link']['ppp_recovery']
+
+    def test_local_restart_needs_no_trusted_clock_or_current_revision(self):
+        self.a.monitor.data['clock_trusted']=False
+        request,result,call=self.restart(base_rev=None)
+        self.assertEqual(result['stage'],'ACCEPTED',result)
+        call.assert_called_once_with({'op':'ppp.restart','origin':'local-admin'})
+        self.assertEqual(self.a.journal.lookup(request['id'])['stage'],'PPP_RESTART_REQUESTED')
+        self.a.commands.ppp_last=None;self.a.ppp_recovery=None
+        for actor,op,extras in (('ground-controller','ppp.restart',{}),('local-admin','stream.set',{'profile':'balanced'})):
+            with self.subTest(actor=actor,op=op):
+                result=self.a.commands.submit(self.request(op,**extras),actor)
+                self.assertEqual(result['result']['error'],'CLOCK_UNTRUSTED')
+
+    def test_local_restart_is_not_blocked_by_sdr_operation(self):
+        self.a.commands.busy=True
+        try:
+            self.assertEqual(self.a.commands.submit(self.request('stream.set',profile='balanced'),'local-admin')['result']['error'],'BUSY')
+            request,result,_=self.restart()
+        finally:self.a.commands.busy=False
+        self.assertEqual(result['stage'],'ACCEPTED',result)
+
+    def test_local_restart_still_needs_root_approval(self):
+        self.a.helper_status={'allow_ppp_restart':False}
+        request,result,call=self.restart()
+        self.assertEqual(result['result']['error'],'CAPABILITY_DISABLED')
+        call.assert_not_called()
+
+    def test_restart_rejects_overlap_and_rapid_repeat(self):
+        self.restart()
+        self.assertTrue(self.a.ppp_recovery_active())
+        for actor in ('local-admin','ground-controller'):
+            self.assertEqual(self.restart(actor)[1]['result']['error'],'PPP_RESTART_IN_PROGRESS')
+        self.a.ppp_recovery=None
+        self.assertEqual(self.restart()[1]['result']['error'],'PPP_RESTART_TOO_SOON')
+        self.a.commands.ppp_last-=60
+        self.assertEqual(self.restart()[1]['stage'],'ACCEPTED')
+
+    def test_observer_shows_each_step_and_proves_reconnect(self):
+        request,_,_=self.restart()
+        view=self.a.snapshot()['link']['ppp_recovery'] if self.a.snapshot()['link']['ppp_recovery'] else self.host()
+        self.assertEqual((view['id'],view['origin'],view['phase'],view['stage']),
+                         (request['id'],'local','REQUESTED','PPP_RESTART_REQUESTED'))
+        self.assertEqual(view['steps'],{'requested':True,'cycled':False,'ppp_up':False,'peer_reply':False,'mqtt_ready':False})
+        self.assertEqual(view['timeout_s'],120)
+        self.assertEqual(self.host(ppp='DOWN',interface=None,ppp_probe='NO_INTERFACE')['phase'],'RESTARTING')
+        self.ctrl.ready=False
+        view=self.host(ppp='UP',interface='ppp0',ppp_probe='NO_REPLY',ppp_service=dict(self.service,since='200'))
+        self.assertEqual((view['phase'],view['steps']['ppp_up'],view['steps']['peer_reply']),('PPP_UP',True,False))
+        self.assertEqual(len(self.kicks),1)
+        view=self.host(ppp_probe='REPLY')
+        self.assertEqual((view['phase'],view['steps']['mqtt_ready']),('PEER_OK',False))
+        self.assertEqual(len(self.kicks),2)
+        self.ctrl.ready=True;self.ctrl.generation=4
+        view=self.host()
+        self.assertEqual((view['phase'],view['stage'],view['steps']['mqtt_ready']),('DONE','APPLIED',True))
+        operation=self.a.journal.lookup(request['id'])
+        self.assertEqual(operation['stage'],'APPLIED')
+        self.assertEqual(operation['result']['proof'],{'ppp':'UP','peer':'REPLY','mqtt':'READY','cycled':True})
+        last=self.a.snapshot()['last_operation']
+        self.assertEqual((last['op'],last['stage'],last['origin'],last['summary']['kind']),('ppp.restart','APPLIED','local','ppp'))
+        self.assertIsNone(self.a.snapshot()['last_remote_operation'])
+        self.a.ppp_recovery['finished']-=self.a.PPP_RECOVERY_LINGER_S+1
+        self.assertIsNone(self.host())
+
+    def test_mqtt_traffic_after_ppp_returns_proves_reconnect_without_new_session(self):
+        self.restart()
+        self.ctrl.rx_bytes=10
+        self.host(ppp='DOWN',interface=None,ppp_probe='NO_INTERFACE')
+        self.host(ppp='UP',interface='ppp0',ppp_probe='REPLY')
+        self.assertEqual(self.host()['phase'],'PEER_OK')
+        self.ctrl.rx_bytes=12
+        self.assertEqual(self.host()['phase'],'DONE')
+
+    def test_disabled_primary_mqtt_finishes_on_peer_reply(self):
+        self.a.clients={}
+        request,_,_=self.restart()
+        self.assertIsNone(self.host()['steps']['mqtt_ready'])
+        self.host(ppp='DOWN',interface=None,ppp_probe='NO_INTERFACE')
+        view=self.host(ppp='UP',interface='ppp0',ppp_probe='REPLY')
+        self.assertEqual(view['phase'],'DONE')
+        self.assertEqual(self.a.journal.lookup(request['id'])['result']['proof']['mqtt'],'DISABLED')
+
+    def test_observer_times_out_as_unknown(self):
+        for cycle,reason in ((False,'PPP_CYCLE_NOT_OBSERVED'),(True,'PPP_RECOVERY_TIMEOUT')):
+            with self.subTest(reason=reason):
+                self.a.ppp_recovery=None;self.a.commands.ppp_last=None
+                self.a.monitor.data.update(ppp='UP',interface='ppp0',ppp_probe='REPLY',ppp_service=dict(self.service))
+                request,_,_=self.restart(actor='ground-controller')
+                if cycle:self.host(ppp='DOWN',interface=None,ppp_probe='NO_INTERFACE')
+                self.a.ppp_recovery['started']-=self.a.PPP_RECOVERY_TIMEOUT_S+1
+                view=self.host()
+                self.assertEqual((view['phase'],view['stage'],view['reason'],view['origin']),
+                                 ('TIMEOUT','OUTCOME_UNKNOWN',reason,'ground'))
+                operation=self.a.journal.lookup(request['id'])
+                self.assertEqual((operation['stage'],operation['result']['reason']),('OUTCOME_UNKNOWN',reason))
+                self.assertFalse(self.a.ppp_recovery_active())
+
+    def test_failed_restart_request_is_shown_with_reason(self):
+        request,result,_=self.restart(helper=ValueError('PPP_SERVICE_NOT_ACTIVE'))
+        self.assertEqual(result['stage'],'ACCEPTED')
+        self.assertEqual(self.a.journal.lookup(request['id'])['stage'],'FAILED')
+        view=self.host()
+        self.assertEqual((view['phase'],view['stage'],view['reason']),('FAILED','FAILED','PPP_SERVICE_NOT_ACTIVE'))
+        self.assertFalse(self.a.ppp_recovery_active())
+
+    def test_ppp_return_kicks_mqtt_without_restart_request(self):
+        self.host(ppp='DOWN',interface=None,ppp_probe='NO_INTERFACE');self.assertEqual(self.kicks,[])
+        self.host(ppp='UP',interface='ppp0',ppp_probe='NO_REPLY');self.assertEqual(len(self.kicks),1)
+        self.host(ppp_probe='REPLY');self.assertEqual(len(self.kicks),2)
+        self.host();self.assertEqual(len(self.kicks),2)
+
+    def test_link_snapshot_and_health_detail_show_ppp_service(self):
+        self.a.monitor.data['ppp_service']=dict(self.service,state='FAILED',restarts=4)
+        self.a._snapshot();link=self.a.snapshot()['link']
+        self.assertEqual(link['ppp_service'],{'state':'FAILED','substate':'running','restarts':4})
+        self.a.profile='balanced';snap=self.a.snapshot();self.a.stop_event.clear()
+        def one_snapshot():
+            self.a.stop_event.set();return snap
+        with mock.patch.object(self.a,'snapshot',side_effect=one_snapshot):self.a._schedule()
+        detail=[json.loads(payload) for _,topic,payload,_ in self.ctrl.sent if topic.endswith('/telemetry/health/detail')]
+        self.assertTrue(detail)
+        self.assertEqual({k:detail[0][k] for k in ('ppp','peer','ppp_svc','ppp_restarts')},
+                         {'ppp':'UP','peer':'REPLY','ppp_svc':'FAILED','ppp_restarts':4})
+
+    def test_remote_operations_carry_origin_summary_and_rejections(self):
+        a=self.a;seq=a.snapshot()['operation_seq'];a.commands.start();self.addCleanup(a.commands.stop)
+        request=self.request('stream.set',profile='graph_u8')
+        before=a.profile
+        self.assertEqual(a.commands.submit(request,'ground-controller',link='backup')['stage'],'ACCEPTED')
+        a.commands.queue.join()
+        read=self.request('operation.get',target_id=request['id'])
+        self.assertEqual(a.commands.submit(read,'ground-controller')['stage'],'APPLIED')
+        a._snapshot();snap=a.snapshot()
+        for key in ('last_operation','last_remote_operation'):
+            with self.subTest(key=key):
+                op=snap[key]
+                self.assertEqual((op['id'],op['op'],op['stage'],op['origin']),(request['id'],'stream.set','APPLIED','backup'))
+                self.assertEqual(op['summary'],{'kind':'profile','changes':{'profile':{'from':before,'to':'graph_u8'}}})
+                self.assertIsNone(op['reason'])
+        self.assertGreater(snap['operation_seq'],seq)
+        stale=self.request('stream.set',profile='balanced',base_rev='stale-revision')
+        self.assertEqual(a.commands.submit(stale,'ground-controller')['result']['error'],'CONFIG_REVISION_CONFLICT')
+        a.commands.submit(self.request('stream.set',profile='nope'),'local-admin')
+        a._snapshot();rejects=a.snapshot()['remote_rejects']
+        self.assertEqual(len(rejects),1)
+        self.assertEqual({k:rejects[0][k] for k in ('origin','op','error')},
+                         {'origin':'ground','op':'stream.set','error':'CONFIG_REVISION_CONFLICT'})
+        for _ in range(7):a.commands.submit(self.request('stream.set',profile='x'),'ground-controller')
+        self.assertEqual(len(a.snapshot()['remote_rejects']),1)
+        a._snapshot();self.assertEqual(len(a.snapshot()['remote_rejects']),5)
+
+    def test_config_patch_summary_reports_previous_value(self):
+        a=self.a;request=self.request('config.patch',changes={'vfo0_frequency_hz':434000000})
+        before=a.source.safe.get('vfo0_frequency_hz')
+        a.journal.accept(request,'ground-controller','ground',a.commands._before('config.patch',request))
+        op=a.commands.public(a.journal.lookup(request['id']))
+        self.assertEqual((op['origin'],op['summary']),
+                         ('ground',{'kind':'config','changes':{'vfo0_frequency_hz':{'from':before,'to':434000000}}}))
+        legacy=dict(a.journal.lookup(request['id']),link=None,meta={})
+        self.assertIsNone(a.commands.public(legacy)['origin'])
+        self.assertEqual(a.commands.public(legacy)['summary']['changes']['vfo0_frequency_hz']['from'],None)
 
 class AuthTests(unittest.TestCase):
     def test_session_expiry_slides_on_authenticated_activity(self):
@@ -1479,7 +1667,7 @@ class BackupLinkTests(unittest.TestCase):
                 a.profile='balanced';a.bulk_resume_after=0;a.last_angular_q=0;a.backup_last_angular_q=0
                 control,bulk,backup=self.links(bulk=reason!='BULK_NOT_READY')
                 a._generation=control.generation;a._backup_generation=backup.generation
-                if reason=='CONTROL_BACKLOG':control.pending_age_ms=1000
+                if reason=='CONTROL_BACKLOG':control.pending_age_ms=6000
                 if reason=='WAIT_STABLE':a.bulk_resume_after=time.monotonic()+60
                 self.run_once()
                 self.assertEqual(a.bulk_reason,reason)
@@ -1488,6 +1676,18 @@ class BackupLinkTests(unittest.TestCase):
                 self.assertIn('telemetry/angular',self.suffixes(backup))
                 self.assertNotIn('telemetry/diagnostic/angular',self.suffixes(backup))
                 self.assertEqual(len(self.payloads(backup,'telemetry/angular')[0]['values']),360)
+
+    def test_control_backlog_waits_for_queued_age_not_one_slow_puback(self):
+        a=self.a
+        for pending,queued,expected in ((1000,0,None),(6000,0,'CONTROL_BACKLOG'),(0,4000,'CONTROL_BACKLOG')):
+            with self.subTest(pending=pending,queued=queued):
+                a.profile='balanced';a.bulk_resume_after=0;a.last_angular_q=0;a.backup_last_angular_q=0
+                control,bulk,backup=self.links(backup=False)
+                a._generation=control.generation;control.pending_age_ms=pending
+                with mock.patch.object(Client,'queue_age_ms',new_callable=mock.PropertyMock,return_value=queued):
+                    self.run_once()
+                self.assertEqual(a.bulk_reason,expected)
+                self.assertEqual('telemetry/angular' in self.suffixes(bulk),expected is None)
 
     def test_source_level_reasons_pause_angular_on_both_links(self):
         a=self.a;live=a.snapshot()

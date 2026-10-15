@@ -336,6 +336,29 @@ class CodecTests(unittest.TestCase):
     def test_non_json_frame_rejected(self):
         with self.assertRaises(ValueError): decode(b'RDF2'+b'\0'*100)
 
+    def test_ppp_service_state_reads_fixed_unit(self):
+        out=os.linesep.join(('LoadState=loaded','ActiveState=activating','SubState=auto-restart','NRestarts=3',
+                             'ActiveEnterTimestampMonotonic=123'))
+        with mock.patch.object(monitor,'run',return_value=out) as command:
+            state=monitor.ppp_service_state()
+        self.assertIn('t900-ppp.service',command.call_args.args[0])
+        self.assertEqual(state,{'state':'ACTIVATING','substate':'auto-restart','restarts':3,'since':'123'})
+        with mock.patch.object(monitor,'run',return_value='LoadState=not-found'):
+            self.assertEqual(monitor.ppp_service_state()['state'],'NOT_LOADED')
+        with mock.patch.object(monitor,'run',return_value=None):
+            self.assertEqual(monitor.ppp_service_state()['state'],'UNKNOWN')
+    def test_fast_probe_checks_link_every_loop_while_recovering(self):
+        host=monitor.Monitor(load_config());calls=[]
+        def command(args,timeout=2):
+            calls.append(args[:2]);return None
+        with mock.patch.object(monitor,'run',side_effect=command), \
+                mock.patch.object(monitor,'probe_peer',return_value='NO_INTERFACE') as peer:
+            host.probe(1)
+            self.assertNotIn(['ip','-j'],calls);peer.assert_not_called()
+            host.fast_probe(30);host.probe(1)
+        self.assertIn(['ip','-j'],calls);self.assertIn(['systemctl','show'],calls)
+        peer.assert_called_once()
+
 class JournalTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.j=Journal(Path(self.tmp.name)/'j.db');self.addCleanup(self.j.close)
@@ -353,6 +376,24 @@ class JournalTests(unittest.TestCase):
         self.j.update('shutdown','SHUTDOWN_SCHEDULED')
         self.j.recover('new')
         self.assertEqual(self.j.lookup('shutdown')['stage'],'OUTCOME_UNKNOWN')
+    def test_operation_origin_and_meta_are_stored(self):
+        self.j.accept({'id':'x','op':'stream.set'},'ground-controller','backup',{'before':{'profile':'balanced'}})
+        self.j.update('x','APPLIED',{})
+        op=self.j.lookup('x')
+        self.assertEqual((op['link'],op['meta']),('backup',{'before':{'profile':'balanced'}}))
+        self.assertEqual(self.j.latest(1),[op])
+    def test_existing_database_gains_origin_columns(self):
+        import sqlite3
+        path=Path(self.tmp.name)/'old.db';db=sqlite3.connect(path)
+        db.execute('CREATE TABLE operations (id TEXT PRIMARY KEY, hash TEXT NOT NULL, request TEXT NOT NULL, actor TEXT NOT NULL, stage TEXT NOT NULL, result TEXT NOT NULL, updated INTEGER NOT NULL)')
+        db.execute('INSERT INTO operations VALUES (?,?,?,?,?,?,?)',('old',digest({'id':'old'}),'{"id":"old","op":"stream.set"}','local-admin','APPLIED','{}',1))
+        db.commit();db.close()
+        j=Journal(path);self.addCleanup(j.close)
+        old=j.lookup('old')
+        self.assertEqual((old['stage'],old['link'],old['meta']),('APPLIED',None,{}))
+        j.accept({'id':'new','op':'ppp.restart'},'local-admin','local')
+        self.assertEqual([op['id'] for op in j.latest(5)],['new','old'])
+        self.assertEqual(j.lookup('new')['link'],'local')
     def test_revision_stable(self):self.assertEqual(self.j.config_revision('a'),self.j.config_revision('a'));self.assertEqual(self.j.config_revision('b'),2)
 
 class LifecycleSetupTests(unittest.TestCase):
@@ -504,6 +545,29 @@ class HelperTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,error):
                     self.ctrl.dispatch(request,os.getuid())
             restart.assert_not_called()
+    def test_ppp_restart_recovers_failed_or_auto_restarting_unit_and_local_starts_inactive(self):
+        self.p['allow_ppp_restart']=True
+        def show(active,sub):
+            return mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded',f'ActiveState={active}',
+                                                                   f'SubState={sub}','Job=0')))
+        for origin,active,sub,error in (
+                ('ground-controller','failed','failed',None),
+                ('ground-controller','activating','auto-restart',None),
+                ('local-admin','failed','failed',None),
+                ('local-admin','inactive','dead',None),
+                ('ground-controller','inactive','dead','PPP_SERVICE_NOT_ACTIVE'),
+                ('ground-controller','activating','start','PPP_SERVICE_NOT_ACTIVE'),
+                ('local-admin','deactivating','stop-sigterm','PPP_SERVICE_NOT_ACTIVE')):
+            with self.subTest(origin=origin,active=active,sub=sub), \
+                    mock.patch('rdf_node.helper.subprocess.run',return_value=show(active,sub)), \
+                    mock.patch.object(self.ctrl,'_run') as restart:
+                request={'op':'ppp.restart','origin':origin}
+                if error:
+                    with self.assertRaisesRegex(ValueError,error):self.ctrl.dispatch(request,os.getuid())
+                    restart.assert_not_called()
+                else:
+                    self.assertEqual(self.ctrl.dispatch(request,os.getuid()),{'requested':True,'service':'t900-ppp.service'})
+                    restart.assert_called_once_with(['/usr/bin/systemctl','--no-block','restart','t900-ppp.service'])
     def test_ground_ppp_restart_needs_no_root_permission_but_checks_unit(self):
         request={'op':'ppp.restart','origin':'ground-controller'}
         status=mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=0')))
@@ -519,7 +583,7 @@ class HelperTests(unittest.TestCase):
                 mock.patch.object(self.ctrl,'_run') as restart:
             result=self.ctrl.dispatch({'op':'ppp.restart','origin':'local-admin'},os.getuid())
         self.assertEqual(result,{'requested':True,'service':'t900-ppp.service'})
-        ready.assert_called_once_with()
+        ready.assert_called_once_with('local-admin')
         restart.assert_called_once_with(['/usr/bin/systemctl','--no-block','restart','t900-ppp.service'])
     def test_local_ppp_restart_still_requires_persistent_approval(self):
         with mock.patch('rdf_node.helper.require_ppp_service_ready') as ready:
@@ -548,7 +612,7 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(result,{'requested':True,'service':'t900-ppp.service'})
         self.assertEqual(show.call_args.args[0],
                          ['/usr/bin/systemctl','show','--no-pager',
-                          '--property=LoadState,ActiveState,Job','t900-ppp.service'])
+                          '--property=LoadState,ActiveState,SubState,Job','t900-ppp.service'])
         restart.assert_called_once_with(
             ['/usr/bin/systemctl','--no-block','restart','t900-ppp.service'])
 
@@ -819,7 +883,7 @@ class ControlApprovalTests(unittest.TestCase):
             self.assertTrue(approved['control']['ppp_restart_enabled'])
             self.assertEqual(systemctl.call_args_list[0].args[0],
                              ['/usr/bin/systemctl','show','--no-pager',
-                              '--property=LoadState,ActiveState,Job','t900-ppp.service'])
+                              '--property=LoadState,ActiveState,SubState,Job','t900-ppp.service'])
 
 class MqttWireTests(unittest.TestCase):
     def test_varints(self):
