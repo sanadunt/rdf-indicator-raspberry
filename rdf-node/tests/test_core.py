@@ -55,6 +55,28 @@ class PppProbeTests(unittest.TestCase):
         state=host.snapshot()
         self.assertEqual(state['ppp'],'UP')
         self.assertEqual(state['interface'],'ppp0')
+    def test_ppp_service_state_reads_fixed_unit(self):
+        out=os.linesep.join(('LoadState=loaded','ActiveState=activating','SubState=auto-restart','NRestarts=3',
+                             'ActiveEnterTimestampMonotonic=123'))
+        with mock.patch.object(monitor,'run',return_value=out) as command:
+            state=monitor.ppp_service_state()
+        self.assertIn('t900-ppp.service',command.call_args.args[0])
+        self.assertEqual(state,{'state':'ACTIVATING','substate':'auto-restart','restarts':3,'since':'123'})
+        with mock.patch.object(monitor,'run',return_value='LoadState=not-found'):
+            self.assertEqual(monitor.ppp_service_state()['state'],'NOT_LOADED')
+        with mock.patch.object(monitor,'run',return_value=None):
+            self.assertEqual(monitor.ppp_service_state()['state'],'UNKNOWN')
+    def test_fast_probe_checks_link_every_loop_while_recovering(self):
+        host=monitor.Monitor(load_config());calls=[]
+        def command(args,timeout=2):
+            calls.append(args[:2]);return None
+        with mock.patch.object(monitor,'run',side_effect=command), \
+                mock.patch.object(monitor,'probe_peer',return_value='NO_INTERFACE') as peer:
+            host.probe(1)
+            self.assertNotIn(['ip','-j'],calls);peer.assert_not_called()
+            host.fast_probe(30);host.probe(1)
+        self.assertIn(['ip','-j'],calls);self.assertIn(['systemctl','show'],calls)
+        peer.assert_called_once()
 
 class ConfigTests(unittest.TestCase):
     def test_default_config(self):
@@ -335,29 +357,6 @@ class CodecTests(unittest.TestCase):
         with self.assertRaises(ValueError): decode(self.frame(flags=64))
     def test_non_json_frame_rejected(self):
         with self.assertRaises(ValueError): decode(b'RDF2'+b'\0'*100)
-
-    def test_ppp_service_state_reads_fixed_unit(self):
-        out=os.linesep.join(('LoadState=loaded','ActiveState=activating','SubState=auto-restart','NRestarts=3',
-                             'ActiveEnterTimestampMonotonic=123'))
-        with mock.patch.object(monitor,'run',return_value=out) as command:
-            state=monitor.ppp_service_state()
-        self.assertIn('t900-ppp.service',command.call_args.args[0])
-        self.assertEqual(state,{'state':'ACTIVATING','substate':'auto-restart','restarts':3,'since':'123'})
-        with mock.patch.object(monitor,'run',return_value='LoadState=not-found'):
-            self.assertEqual(monitor.ppp_service_state()['state'],'NOT_LOADED')
-        with mock.patch.object(monitor,'run',return_value=None):
-            self.assertEqual(monitor.ppp_service_state()['state'],'UNKNOWN')
-    def test_fast_probe_checks_link_every_loop_while_recovering(self):
-        host=monitor.Monitor(load_config());calls=[]
-        def command(args,timeout=2):
-            calls.append(args[:2]);return None
-        with mock.patch.object(monitor,'run',side_effect=command), \
-                mock.patch.object(monitor,'probe_peer',return_value='NO_INTERFACE') as peer:
-            host.probe(1)
-            self.assertNotIn(['ip','-j'],calls);peer.assert_not_called()
-            host.fast_probe(30);host.probe(1)
-        self.assertIn(['ip','-j'],calls);self.assertIn(['systemctl','show'],calls)
-        peer.assert_called_once()
 
 class JournalTests(unittest.TestCase):
     def setUp(self):
