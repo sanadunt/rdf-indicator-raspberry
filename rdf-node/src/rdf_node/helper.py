@@ -123,11 +123,16 @@ def call_helper(sock_path,request,timeout=8):
             raise HelperError(error)
         return result['result']
 
-def require_ppp_service_ready():
-    """Fail closed unless the fixed PPP unit is loaded, active, and has no job."""
+def require_ppp_service_ready(origin='ground-controller'):
+    """Fail closed unless the fixed PPP unit is loaded and has no job.
+
+    A restart is what recovers a crashed or auto-restarting link, so `failed` and
+    `activating/auto-restart` are accepted from any origin. `inactive` may be an operator's
+    deliberate stop, so only the local panel may start it again.
+    """
     try:
         result=subprocess.run(['/usr/bin/systemctl','show','--no-pager',
-            '--property=LoadState,ActiveState,Job','t900-ppp.service'],timeout=5,
+            '--property=LoadState,ActiveState,SubState,Job','t900-ppp.service'],timeout=5,
             stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
     except (OSError,subprocess.TimeoutExpired) as error:
         raise HelperError('PPP_SERVICE_STATUS_UNKNOWN') from error
@@ -138,7 +143,11 @@ def require_ppp_service_ready():
         raise HelperError('PPP_SERVICE_STATUS_UNKNOWN')
     if state['LoadState']!='loaded':
         raise HelperError('PPP_SERVICE_NOT_LOADED')
-    if state['ActiveState']!='active':
+    active=state['ActiveState']
+    restartable=(active in ('active','failed') or
+                 (active=='activating' and state.get('SubState')=='auto-restart') or
+                 (active=='inactive' and origin=='local-admin'))
+    if not restartable:
         raise HelperError('PPP_SERVICE_NOT_ACTIVE')
     if state['Job']!='0':
         raise HelperError('PPP_RESTART_PENDING')
@@ -261,7 +270,7 @@ class Controller:
             if op=='ppp.restart':
                 if origin!='ground-controller' and not self.policy['allow_ppp_restart']:
                     raise HelperError('PPP_RESTART_NOT_APPROVED')
-                require_ppp_service_ready()
+                require_ppp_service_ready(origin)
                 try:
                     self._run(['/usr/bin/systemctl','--no-block','restart','t900-ppp.service'])
                 except (OSError,TimeoutError,subprocess.TimeoutExpired,HelperError) as error:

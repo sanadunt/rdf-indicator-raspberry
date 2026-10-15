@@ -15,6 +15,10 @@ class Journal:
         self.db.execute('PRAGMA synchronous=FULL')
         self.db.execute('CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, hash TEXT NOT NULL, request TEXT NOT NULL, actor TEXT NOT NULL, stage TEXT NOT NULL, result TEXT NOT NULL, updated INTEGER NOT NULL)')
+        # Additive columns for existing Pi databases: where a command came from and what it changed.
+        columns={row[1] for row in self.db.execute('PRAGMA table_info(operations)')}
+        if 'link' not in columns: self.db.execute('ALTER TABLE operations ADD COLUMN link TEXT')
+        if 'meta' not in columns: self.db.execute("ALTER TABLE operations ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'")
         self.db.commit()
     def close(self):
         with self.lock: self.db.close()
@@ -34,18 +38,19 @@ class Journal:
             return rev
     def lookup(self,id):
         with self.lock:
-            r=self.db.execute('SELECT hash, request, actor, stage, result, updated FROM operations WHERE id=?',(id,)).fetchone()
+            r=self.db.execute('SELECT hash, request, actor, stage, result, updated, link, meta FROM operations WHERE id=?',(id,)).fetchone()
             if not r: return None
-            return dict(id=id,hash=r[0],request=json.loads(r[1]),actor=r[2],stage=r[3],result=json.loads(r[4]),updated_ms=r[5])
-    def accept(self,request,actor):
+            return dict(id=id,hash=r[0],request=json.loads(r[1]),actor=r[2],stage=r[3],result=json.loads(r[4]),updated_ms=r[5],
+                        link=r[6],meta=json.loads(r[7] or '{}'))
+    def accept(self,request,actor,link=None,meta=None):
         with self.lock,self.db:
             old=self.lookup(request['id'])
             h=digest(request)
             if old:
                 if old['hash']!=h: raise ValueError('COMMAND_ID_CONFLICT')
                 return False,old
-            self.db.execute('INSERT INTO operations VALUES (?,?,?,?,?,?,?)',
-                (request['id'],h,compact(request).decode(),actor,'ACCEPTED','{}',now_ms()))
+            self.db.execute('INSERT INTO operations (id,hash,request,actor,stage,result,updated,link,meta) VALUES (?,?,?,?,?,?,?,?,?)',
+                (request['id'],h,compact(request).decode(),actor,'ACCEPTED','{}',now_ms(),link,compact(meta or {}).decode()))
             return True,self.lookup(request['id'])
     def update(self,id,stage,result=None):
         with self.lock,self.db:

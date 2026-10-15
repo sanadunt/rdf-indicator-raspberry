@@ -17,6 +17,11 @@ OPS={
     'operation.get':'cmd/operation/get', 'stream.set':'cmd/stream/set',
 }
 READ_OPS={'config.get','operation.get'}
+SUMMARY_KIND={'config.patch':'config','stream.set':'profile','processing.set':'processing','service.restart':'restart',
+              'ppp.restart':'ppp','system.reboot.prepare':'reboot','system.reboot.execute':'reboot',
+              'system.shutdown.prepare':'shutdown','system.shutdown.execute':'shutdown',
+              'config.get':'read','operation.get':'read'}
+PPP_RESTART_MIN_GAP_S=15
 class CommandManager:
     def __init__(self,agent):
         self.agent=agent; self.cfg=agent.cfg; self.journal=agent.journal
@@ -24,15 +29,27 @@ class CommandManager:
         self.queue=queue.Queue(1); self.stop_event=threading.Event()
         self.thread=threading.Thread(target=self._worker,daemon=True,name='command-worker')
         self.last_rate={}
+        # PPP restart has its own lane: an SDR verification (BUSY) must never block link recovery.
+        self.ppp_lock=threading.Lock(); self.ppp_active=None; self.ppp_last=None; self.ppp_thread=None
     def start(self): self.thread.start()
     def stop(self): self.stop_event.set(); self.thread.join(3)
     def _helper(self,r,timeout=8):
         return call_helper(self.cfg['control']['helper_socket'],r,timeout)
     def _send(self,id,op,stage,result=None,link=None):
         self.agent.operation_changed(id,op,stage,result or {},link=link)
+    @staticmethod
+    def origin(actor,link):
+        return 'local' if actor=='local-admin' else 'backup' if link=='backup' else 'ground'
+    def _before(self,op,request):
+        a=self.agent
+        if op=='config.patch' and isinstance(request.get('changes'),dict):
+            return {'before':{k:a.source.safe.get(k) for k in request['changes']}}
+        if op=='stream.set': return {'before':{'profile':a.profile}}
+        if op=='processing.set': return {'before':{'desired':a.helper_status.get('desired')}}
+        return {}
     def submit(self,request,actor,*,retained=False,topic=None,link='primary'):
         # link: broker the command arrived on ('primary' Ground link or 'backup'); ACKs go back there.
-        a=self.agent
+        a=self.agent; origin=self.origin(actor,link)
         try:
             if retained: raise ValueError('RETAINED_COMMAND_REJECTED')
             if actor not in ('ground-controller','local-admin'): raise ValueError('INVALID_COMMAND_ACTOR')
@@ -72,21 +89,24 @@ class CommandManager:
                     result={'revision':source.revision,'proof':a.config_proof}
                     with a.settings_request_lock:
                         if a.settings_request_id is not None: raise ValueError('SETTINGS_REQUEST_PENDING')
-                        self.journal.accept(request,actor); self.journal.update(id,'APPLIED',result)
+                        self.journal.accept(request,actor,origin); self.journal.update(id,'APPLIED',result)
                         a.settings_request_id=id; a.settings_request_payload=settings_payload
                         a.settings_request_link=link
                 else:
                     target=self.journal.lookup(str(request.get('target_id','')))
                     result={'operation':self.public(target) if target else None}
-                    self.journal.accept(request,actor); self.journal.update(id,'APPLIED',result)
+                    self.journal.accept(request,actor,origin); self.journal.update(id,'APPLIED',result)
                 self._send(id,op,'APPLIED',result,link=link)
                 return {'id':id,'stage':'APPLIED','result':result}
             if a.demo: raise ValueError('DEMO_NO_HARDWARE_CONTROL')
             if actor=='ground-controller' and not a.capabilities()['remote_commands']:
                 raise ValueError('REMOTE_COMMANDS_DISABLED')
-            if not a.monitor.snapshot()['clock_trusted']: raise ValueError('CLOCK_UNTRUSTED')
+            # A Pi without RTC gets NTP over the PPP link, so the clock is untrusted exactly when a local
+            # PPP restart is needed; its deadline uses the same host clock. It also never touches settings.
+            local_ppp=op=='ppp.restart' and actor=='local-admin'
+            if not local_ppp and not a.monitor.snapshot()['clock_trusted']: raise ValueError('CLOCK_UNTRUSTED')
             # Revision must be explicit; never replace the caller's stale revision.
-            if request.get('base_rev')!=a.source.revision: raise ValueError('CONFIG_REVISION_CONFLICT')
+            if not local_ppp and request.get('base_rev')!=a.source.revision: raise ValueError('CONFIG_REVISION_CONFLICT')
             if op=='stream.set':
                 if request.get('profile') not in PROFILES: raise ValueError('UNSUPPORTED_PROFILE')
             else:
@@ -110,15 +130,22 @@ class CommandManager:
                     changes=request.get('changes')
                     if not isinstance(changes,dict) or not changes or set(changes)-set(FIELD_MAP): raise ValueError('INVALID_PATCH')
                     for v in changes.values(): finite(v,-200,5e9)
+            meta=self._before(op,request)
+            if op=='ppp.restart':
+                return self._submit_ppp(request,actor,link,origin,meta)
             with self.lock:
                 if self.busy: raise ValueError('BUSY')
-                self.journal.accept(request,actor)
+                self.journal.accept(request,actor,origin,meta)
                 self.busy=True; self.active_id=id
                 self.queue.put_nowait((request,actor,link))
             self._send(id,op,'ACCEPTED',link=link)
             return {'id':id,'stage':'ACCEPTED'}
         except Exception as e:
             code=str(e) if isinstance(e,ValueError) and str(e).isupper() else 'JOURNAL_OR_REQUEST_ERROR'
+            if actor=='ground-controller':
+                op_name=request.get('op') if isinstance(request,dict) and request.get('op') in OPS else 'unknown'
+                remember=getattr(a,'remote_rejected',None)
+                if remember: remember(origin,op_name,code)
             if isinstance(request,dict) and isinstance(request.get('id'),str) and len(request['id'])<=80:
                 self._send(request['id'],str(request.get('op','unknown')),'REJECTED',{'error':code},link=link)
             return {'id':request.get('id') if isinstance(request,dict) else None,'stage':'REJECTED','result':{'error':code}}
@@ -127,7 +154,52 @@ class CommandManager:
         if not op: return None
         result=dict(op['result'])
         result.pop('challenge',None)
-        return dict(id=op['id'],op=op['request']['op'],stage=op['stage'],result=result,updated_ms=op['updated_ms'])
+        request=op['request']; name=request.get('op'); before=(op.get('meta') or {}).get('before',{})
+        changes={}
+        if name=='config.patch' and isinstance(request.get('changes'),dict):
+            changes={k:{'from':before.get(k),'to':v} for k,v in request['changes'].items()}
+        elif name=='stream.set': changes={'profile':{'from':before.get('profile'),'to':request.get('profile')}}
+        elif name=='processing.set': changes={'desired':{'from':before.get('desired'),'to':request.get('desired')}}
+        reason=result.get('error') or result.get('reason')
+        return dict(id=op['id'],op=name,stage=op['stage'],result=result,updated_ms=op['updated_ms'],
+                    origin=op.get('link') if op.get('link') in ('local','ground','backup') else None,
+                    summary={'kind':SUMMARY_KIND.get(name,'other'),'changes':changes},
+                    reason=reason if isinstance(reason,str) else None)
+    def _submit_ppp(self,request,actor,link,origin,meta):
+        a=self.agent; id=request['id']
+        with self.ppp_lock:
+            recovering=getattr(a,'ppp_recovery_active',lambda:False)()
+            if self.ppp_active or recovering: raise ValueError('PPP_RESTART_IN_PROGRESS')
+            if self.ppp_last is not None and time.monotonic()-self.ppp_last<PPP_RESTART_MIN_GAP_S:
+                raise ValueError('PPP_RESTART_TOO_SOON')
+            self.journal.accept(request,actor,origin,meta)
+            self.ppp_active=id; self.ppp_last=time.monotonic()
+        self._send(id,'ppp.restart','ACCEPTED',link=link)
+        self.ppp_thread=threading.Thread(target=self._run_ppp,args=(request,actor,link,origin),daemon=True,name='ppp-restart')
+        self.ppp_thread.start()
+        return {'id':id,'stage':'ACCEPTED'}
+    def join_ppp(self,timeout=10):
+        thread=self.ppp_thread
+        if thread: thread.join(timeout)
+    def _run_ppp(self,r,actor,link,origin):
+        a=self.agent
+        try:
+            self._stage(r,'APPLYING')
+            stage,result=self._execute(r,actor)
+            self._stage(r,stage,result); self._send(r['id'],r['op'],stage,result,link=link)
+            begin=getattr(a,'ppp_recovery_begin',None)
+            if begin: begin(r['id'],origin,link)
+        except Exception as e:
+            err=str(e) if isinstance(e,ValueError) and str(e).isupper() else type(e).__name__.upper()
+            if isinstance(e,TimeoutError) and str(e).isupper(): err=str(e)
+            stage='OUTCOME_UNKNOWN' if isinstance(e,(TimeoutError,OSError)) else 'FAILED'
+            try:
+                self._stage(r,stage,{'error':err}); self._send(r['id'],r['op'],stage,{'error':err},link=link)
+            except Exception: pass
+            failed=getattr(a,'ppp_recovery_failed',None)
+            if failed: failed(r['id'],origin,stage,err)
+        finally:
+            with self.ppp_lock: self.ppp_active=None
     def _stage(self,r,stage,result=None):
         self.journal.update(r['id'],stage,result)
     def _worker(self):
