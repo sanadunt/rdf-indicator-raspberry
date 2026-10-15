@@ -30,7 +30,8 @@ const ICONS={
  drop:'M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z',check:'M5 12l5 5 9-10',sliders:'M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M16 4v4M10 10v4M18 16v4',
  backspace:'M9 5h11v14H9l-6-7zM12 9l5 6M17 9l-5 6',
  radio:'M4 10h16v10H4zM7.5 10 16 4.5M9 13.2a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6zM14 14h3M14 17h3',
- x:'M6 6l12 12M18 6 6 18',minus:'M6 12h12',history:'M3.5 12a8.5 8.5 0 1 0 2.5-6M3 4v4.5h4.5M12 7.5V12l3 2'
+ x:'M6 6l12 12M18 6 6 18',minus:'M6 12h12',history:'M3.5 12a8.5 8.5 0 1 0 2.5-6M3 4v4.5h4.5M12 7.5V12l3 2',
+ question:'M9.2 9a2.9 2.9 0 1 1 4 2.7c-.8.4-1.2 1-1.2 1.8v.6M12 17.5v.5'
 };
 function icon(name,extra=''){
  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');svg.setAttribute('focusable','false');
@@ -277,6 +278,7 @@ const CONFIG_FIELDS={vfo0_frequency_hz:['Frekuensi VFO',1e6,3,'MHz'],center_freq
 // Short Indonesian hints; the raw code stays available (title / Riwayat) for troubleshooting.
 const REASONS={
  PPP_RECOVERY_TIMEOUT:'PPP/Ground belum pulih',PPP_CYCLE_NOT_OBSERVED:'PPP tidak terlihat restart',
+ T900_USB_MISSING:'T900 USB tidak terdeteksi',MQTT_NOT_RECOVERED:'PPP & ping pulih, MQTT utama belum',
  PPP_SERVICE_NOT_LOADED:'unit t900-ppp tidak ada',PPP_SERVICE_STATUS_UNKNOWN:'status unit t900-ppp tidak diketahui',
  PPP_SERVICE_NOT_ACTIVE:'unit t900-ppp tidak aktif',PPP_RESTART_PENDING:'job systemd t900-ppp masih antre',
  PPP_RESTART_NOT_APPROVED:'belum ada approval root --ppp-restart',PPP_RESTART_IN_PROGRESS:'restart T900 sebelumnya masih dipantau',
@@ -284,7 +286,7 @@ const REASONS={
  CLOCK_UNTRUSTED:'jam sistem belum tepercaya',SESSION_MISMATCH:'sesi/boot Edge berbeda',CONFIG_REVISION_CONFLICT:'revisi config sudah berubah',
  REMOTE_COMMANDS_DISABLED:'perintah remote nonaktif',EXPIRED_OR_INVALID_DEADLINE:'perintah kedaluwarsa',CAPABILITY_DISABLED:'fitur dinonaktifkan',
  AGENT_RESTARTED_RECONCILE_NO_REPLAY:'agent restart; hasil tidak diketahui',SYSTEMD_ACTION_FAILED:'aksi systemd gagal',
- SYSTEMD_ACTION_OUTCOME_UNKNOWN:'hasil systemd tidak diketahui',LIFECYCLE_VERIFICATION_TIMEOUT:'verifikasi SDR timeout',
+ SYSTEMD_ACTION_OUTCOME_UNKNOWN:'hasil systemd tidak diketahui',RPC_TIMEOUT:'helper tidak menjawab (timeout)',TIMEOUTERROR:'helper tidak menjawab (timeout)',HELPER_CLOSED:'koneksi helper terputus',LIFECYCLE_VERIFICATION_TIMEOUT:'verifikasi SDR timeout',
  CONFIG_CHANGED_BEFORE_WRITE:'config berubah sebelum ditulis',NATIVE_RUNTIME_EVIDENCE_INCOMPLETE:'bukti runtime belum lengkap',
  DEMO_NO_HARDWARE_CONTROL:'mode demo, tanpa kontrol hardware',REQUEST_RATE_LIMIT:'permintaan terlalu cepat'
 };
@@ -358,7 +360,13 @@ function renderOperation(op,s){
  setOriginChip($('cmdorigin'),op?.origin);
  $('command').textContent=op?opLabel(op):'Belum ada operasi';
  $('command').title=op?`${opSummary(op)} (${op.op})`:'';
- if(reasonEl){reasonEl.textContent=reason?reasonLabel(reason):'';reasonEl.title=reason;reasonEl.className=`cmdreason ${op?stageTone(op.stage):''}`.trim();}
+ // A restart that recovered after the 120 s limit keeps its journal stage (chip stays verbatim);
+ // while the Edge still shows that recovery, the hint says it recovered instead of the timeout text.
+ const recoveryNow=currentRecovery(s),lateRecovery=!!op&&op.op==='ppp.restart'&&recoveryLate(recoveryNow,op.id);
+ if(reasonEl){
+  reasonEl.textContent=lateRecovery?`pulih setelah batas ${Number.isFinite(recoveryNow.timeout_s)?recoveryNow.timeout_s:120} dtk`:reason?reasonLabel(reason):'';reasonEl.title=reason;
+  reasonEl.className=`cmdreason ${lateRecovery?'good':op?stageTone(op.stage):''}`.trim();
+ }
  chip.hidden=!op;
  if(op){chip.textContent=op.stage;chip.className=`stagechip ${stageTone(op.stage)}`;}
  // Only a real snapshot sets the baseline, so a reload never toasts an old operation.
@@ -370,21 +378,27 @@ function renderOperation(op,s){
  if(!op||READ_OPS.has(op.op)||stageTone(op.stage)==='progress')return;
  // Ground/backup mutations are announced by the remote banner, which stays above dialogs.
  if(remoteFieldsSupported(s)&&(op.origin==='ground'||op.origin==='backup'))return;
+ // The T900 recovery card already shows this restart's result.
+ if(op.op==='ppp.restart'&&recoveryCardShows(s,op.id))return;
  showToast(`${opLabel(op)}: ${op.stage}${reason?` · ${reasonLabel(reason)}`:''}`,stageTone(op.stage));
 }
 // ---- Remote-command banner: Ground or the backup broker changed something on this Edge. ----
 // The host is created if a stale index.html lacks it, so a mismatched page never stops loading.
 const noticesHost=$('notices')||document.querySelector('.shell').appendChild(Object.assign(document.createElement('div'),{id:'notices'}));
-let remoteSeen=undefined,remoteTimer=null;
+// The toast lives in the same column (CSS order puts it last), so a banner or the recovery card
+// pushes it down instead of covering it. While a dialog is open it stays hidden, as before.
+noticesHost.append($('toast'));
+let remoteSeen=undefined,remoteTimer=null,rejectSeen=undefined;
 const remoteBanner=(()=>{
  const root=document.createElement('section');root.className='notice remote';root.hidden=true;root.setAttribute('role','status');root.setAttribute('aria-live','polite');
  const chip=document.createElement('span');
  const body=document.createElement('div');body.className='notice-text';
  const title=document.createElement('b');title.className='notice-title';
  const titleText=document.createElement('span'),time=document.createElement('time');title.append(titleText,time);
- const line=document.createElement('span');line.className='notice-body';
- const summary=document.createElement('span'),stage=document.createElement('em');line.append(summary,' · ',stage);
- body.append(title,line);
+ // Only the summary is clamped (with an ellipsis); the outcome has its own line and is never cut.
+ const summary=document.createElement('span');summary.className='notice-body';
+ const stage=document.createElement('em');stage.className='notice-stage';
+ body.append(title,summary,stage);
  const close=document.createElement('button');close.type='button';close.className='notice-close';close.textContent='Tutup';
  root.append(chip,body,close);noticesHost.append(root);
  return {root,chip,titleText,time,summary,stage,close};
@@ -397,31 +411,52 @@ function showRemoteBanner(op){
  b.root.dataset.tone=tone;
  b.titleText.textContent=`Perintah dari ${origin?origin.upper:'REMOTE'}`;
  b.time.textContent=clockText(op.updated_ms);
- b.summary.textContent=opSummary(op);
- b.stage.textContent=`${stageText(op)}${reason?`: ${reasonLabel(reason)}`:''}`;b.stage.className=tone;
+ const summary=opSummary(op);
+ b.summary.textContent=summary;b.summary.title=summary;
+ b.stage.textContent=`${stageText(op)}${reason?`: ${reasonLabel(reason)}`:''}`;b.stage.className=`notice-stage ${tone}`;
  b.stage.title=reason;
  b.root.hidden=false;
  if(remoteTimer){clearTimeout(remoteTimer);remoteTimer=null;}
  if(op.stage==='APPLIED')remoteTimer=setTimeout(hideRemoteBanner,10000);
  wakeScreen();
 }
+// Returns the operation it announced (or null) so a rejection in the same snapshot can compare times.
 function renderRemoteBanner(s){
- if(s.snapshot_seq==null||!remoteFieldsSupported(s))return;
+ if(s.snapshot_seq==null||!remoteFieldsSupported(s))return null;
  const raw=s.last_remote_operation,op=raw&&typeof raw==='object'&&raw.id?raw:null;
  const key=op?`${op.id}:${op.stage}`:null;
  // Baseline from the first real snapshot: a reload or a new panel never re-announces.
- if(remoteSeen===undefined){remoteSeen=key;return;}
- if(key===remoteSeen)return;
+ if(remoteSeen===undefined){remoteSeen=key;return null;}
+ if(key===remoteSeen)return null;
  remoteSeen=key;
- if(op&&!READ_OPS.has(op.op))showRemoteBanner(op);
+ if(op&&!READ_OPS.has(op.op)){showRemoteBanner(op);return op;}
+ return null;
+}
+// A rejected Ground/backup command is never journaled, so it only appears in remote_rejects.
+// Entries are matched by identity, not by time, so a clock step cannot hide or replay one.
+function rejectKey(entry){return `${entry.t}|${entry.origin}|${entry.op}|${entry.error}`;}
+function renderRemoteRejects(s,announced){
+ if(s.snapshot_seq==null||!Array.isArray(s.remote_rejects))return;
+ const list=s.remote_rejects.filter(entry=>entry&&typeof entry==='object'),keys=new Set(list.map(rejectKey));
+ if(rejectSeen===undefined){rejectSeen=keys;return;}
+ const fresh=list.filter(entry=>!rejectSeen.has(rejectKey(entry))&&!READ_OPS.has(entry.op));
+ rejectSeen=keys;
+ if(!fresh.length)return;
+ const time=entry=>typeof entry.t==='number'&&Number.isFinite(entry.t)?entry.t:-Infinity;
+ const latest=fresh.reduce((a,b)=>time(b)>time(a)?b:a);
+ if(announced&&typeof announced.updated_ms==='number'&&announced.updated_ms>time(latest))return;
+ showRemoteBanner({id:`rej-${latest.t}`,op:String(latest.op||''),origin:latest.origin,stage:'REJECTED',reason:String(latest.error||''),updated_ms:latest.t,summary:null});
 }
 // ---- T900/PPP recovery progress (link.ppp_recovery). Inside the open dialog when there is
-// one, otherwise a banner above the page. It lingers 90 s after it finishes. ----
+// one, otherwise a banner above the page. The Edge keeps it 90 s after it finishes. ----
 const RECOVERY_STEPS=[['requested','Restart diminta'],['cycled','PPP turun/naik'],['ppp_up','PPP UP'],['peer_reply','Ping Ground'],['mqtt_ready','MQTT utama']];
 const RECOVERY_END=new Set(['DONE','TIMEOUT','FAILED']);
 const RECOVERY_HEAD={REQUESTED:'Menunggu PPP turun/naik…',RESTARTING:'PPP sedang restart…',PPP_UP:'PPP UP, ping Ground…',PEER_OK:'Ground membalas, tunggu MQTT…',DONE:'Tersambung ke Ground ✓',FAILED:'Restart T900 gagal'};
-const RECOVERY_LINGER_MS=90000;
-let recoveryDismissed=null,recoveryNote={id:null,text:'',at:0};
+// A PPP restart cannot help while the radio itself is gone (pppd cannot even open the device).
+// Only a missing alias means the radio is gone; IDENTITY_MISMATCH is usually a site VID/PID/port setting.
+const USB_HINTS={MISSING:'T900 USB tidak terdeteksi — restart PPP tidak membantu; cek kabel/daya radio.'};
+const PPP_APPROVAL_HINT='Perlu approval root: sudo rdf-node controls approve --ppp-restart',HELPER_MISSING_HINT='Helper kontrol belum tersedia.';
+let recoveryDismissed=null,recoveryNote={id:null,text:'',at:0},recoveryWokeId=null;
 const recovery=(()=>{
  // Only the headline is live: the elapsed counter changes every poll and must not be re-read aloud.
  const root=document.createElement('section');root.className='recovery';root.hidden=true;root.setAttribute('aria-label','Progres restart T900');
@@ -437,21 +472,35 @@ const recovery=(()=>{
   dot.className='rdot';caption.className='rlabel';caption.textContent=name;sub.className='rsub';sub.textContent='nonaktif';sub.hidden=true;
   item.append(dot,caption,sub);list.append(item);return {key,name,item,dot,sub,state:null};
  });
+ // Reason, retry note and hints are separate lines that wrap; none of them is clamped.
  const foot=document.createElement('div');foot.className='recovery-foot';
- const reason=document.createElement('span');reason.className='recovery-reason';
+ const reason=document.createElement('div');reason.className='recovery-reason';
  const retry=document.createElement('button');retry.type='button';retry.className='recovery-retry';
  const retryLabel=document.createElement('span');retryLabel.textContent='Coba lagi';retry.append(icon('sync'),retryLabel);
  foot.append(reason,retry);root.append(head,list,foot);noticesHost.append(root);
- return {root,origin,headline,elapsed,close,steps,foot,reason,retry};
+ return {root,origin,headline,elapsed,close,steps,foot,reason,retry,linesKey:''};
 })();
+// No wall-clock linger test here: the Pi has no RTC and NTP over the restored link can step the
+// clock by hours. The Edge drops the record 90 s after it ends, on its monotonic clock.
 function currentRecovery(s){
  const r=s?.link?.ppp_recovery;
- if(!r||typeof r!=='object'||typeof r.phase!=='string')return null;
- if(RECOVERY_END.has(r.phase)&&typeof r.started_ms==='number'&&typeof r.elapsed_s==='number'&&typeof s.snapshot_ms==='number'&&
-  s.snapshot_ms-(r.started_ms+r.elapsed_s*1000)>RECOVERY_LINGER_MS)return null;
- return r;
+ return r&&typeof r==='object'&&typeof r.phase==='string'?r:null;
 }
 function recoveryRunning(){const r=currentRecovery(snapshot);return !!r&&!RECOVERY_END.has(r.phase);}
+// The helper timed out or its socket failed: systemd may still have restarted the unit.
+function recoveryUncertain(r){return !!r&&r.phase==='FAILED'&&r.stage==='OUTCOME_UNKNOWN';}
+// The link came back after the 120 s limit; the journal/ACK keep their timeout stage.
+function recoveryLate(r,id){return !!r&&r.phase==='DONE'&&r.late===true&&(id===undefined||r.id===id);}
+// Hiding a running card only lasts until it finishes, so the outcome is always seen.
+function recoveryHidden(r){return !r||(recoveryDismissed?.id===r.id&&(recoveryDismissed.end||!RECOVERY_END.has(r.phase)));}
+function recoveryCardShows(s,id){const r=currentRecovery(s);return !!r&&r.id===id&&!recoveryHidden(r);}
+function usbHint(s){return USB_HINTS[s?.link?.usb]||'';}
+// The primary link is fully back: PPP up, Ground answers ping and primary MQTT is ready (or off).
+function linkHealthy(s){
+ const l=s?.link||{},ctrl=l.mqtt_control||{};
+ return l.ppp==='UP'&&l.ppp_probe==='REPLY'&&(ctrl.ready===true||(ctrl.state||'DISABLED')==='DISABLED');
+}
+function pppRestartBlockedHint(caps){return caps.ppp_restart?'':caps.helper_available?PPP_APPROVAL_HINT:HELPER_MISSING_HINT;}
 function placeRecovery(){
  const slot=$('modalrecovery'),modalOpen=!!slot&&!$('modal').hidden,host=modalOpen?slot:noticesHost;
  if(recovery.root.parentNode!==host)host.append(recovery.root);
@@ -461,44 +510,61 @@ function placeRecovery(){
 function setStepState(step,state){
  if(step.state===state)return;
  step.state=state;step.item.dataset.state=state;
- const glyph={done:'check',fail:'x',off:'minus'}[state];
+ const glyph={done:'check',fail:'x',off:'minus',unknown:'question'}[state];
  step.dot.replaceChildren(...(glyph?[icon(glyph)]:[]));
  step.sub.hidden=state!=='off';
 }
+function setRecoveryLines(c,lines){
+ const key=JSON.stringify(lines);if(key===c.linesKey)return;c.linesKey=key;
+ c.reason.replaceChildren(...lines.map(([text,tone,title])=>{const line=document.createElement('span');line.className=`rline${tone?` ${tone}`:''}`;line.textContent=text;if(title)line.title=title;return line;}));
+}
 function renderRecovery(s){
  const c=recovery,r=currentRecovery(s),end=!!r&&RECOVERY_END.has(r.phase);
- // Hiding a running card only lasts until it finishes, so the outcome is always seen.
- const hidden=!r||(recoveryDismissed?.id===r.id&&(recoveryDismissed.end||!end));
+ const hidden=recoveryHidden(r);
  c.root.hidden=hidden;placeRecovery();
  if(hidden)return;
- const tone=r.phase==='DONE'?'good':r.phase==='TIMEOUT'?'warn':r.phase==='FAILED'?'bad':'progress';
+ const uncertain=recoveryUncertain(r),late=recoveryLate(r);
+ const tone=r.phase==='DONE'?'good':r.phase==='TIMEOUT'||uncertain?'warn':r.phase==='FAILED'?'bad':'progress';
  c.root.dataset.tone=tone;c.root.dataset.phase=r.phase;
  setOriginChip(c.origin,r.origin);
  const limit=Number.isFinite(r.timeout_s)?r.timeout_s:120,seconds=Number.isFinite(r.elapsed_s)?Math.floor(r.elapsed_s):null;
- c.headline.textContent=r.phase==='TIMEOUT'?`Belum tersambung dalam ${limit} dtk`:RECOVERY_HEAD[r.phase]||r.phase;
+ c.headline.textContent=r.phase==='TIMEOUT'?`Belum tersambung dalam ${limit} dtk`:uncertain?'Hasil restart T900 belum pasti':RECOVERY_HEAD[r.phase]||r.phase;
  c.elapsed.textContent=seconds==null?'':end?`${seconds} dtk`:`${seconds} / ${limit} dtk`;
  const steps=r.steps&&typeof r.steps==='object'?r.steps:{};let pointer=false;
  for(const step of c.steps){
   const value=steps[step.key];let state;
   if(step.key==='mqtt_ready'&&value===null&&r.phase!=='FAILED')state='off';
   else if(value===true)state='done';
-  else if(!pointer){pointer=true;state=r.phase==='TIMEOUT'||r.phase==='FAILED'?'fail':end?'pending':'active';}
+  else if(!pointer){pointer=true;state=uncertain?'unknown':r.phase==='TIMEOUT'||r.phase==='FAILED'?'fail':end?'pending':'active';}
   else state='pending';
   setStepState(step,state);
  }
+ const caps=s.capabilities||{},healthy=linkHealthy(s),usb=usbHint(s);
  const reason=typeof r.reason==='string'&&r.reason?r.reason:'';
  const note=recoveryNote.id===r.id&&Date.now()-recoveryNote.at<15000?recoveryNote.text:'';
- c.reason.textContent=[reason?(REASONS[reason]?`${REASONS[reason]} · ${reason}`:reason):'',note].filter(Boolean).join(' — ');
- const retry=r.phase==='TIMEOUT',caps=s.capabilities||{};
- c.retry.hidden=!retry;
- if(retry&&!c.retry.dataset.busy){c.retry.disabled=!caps.ppp_restart;c.retry.title=caps.ppp_restart?'':caps.helper_available?'Perlu approval root: sudo rdf-node controls approve --ppp-restart':'Helper kontrol belum tersedia.';}
- c.foot.hidden=!retry&&!c.reason.textContent;
+ const lines=[];
+ if(late)lines.push([`Tersambung lagi setelah batas ${limit} dtk; CMD tetap ${r.stage||'OUTCOME_UNKNOWN'}.`,'good',reason]);
+ else if(reason&&!(reason==='T900_USB_MISSING'&&usb))lines.push([REASONS[reason]?`${REASONS[reason]} · ${reason}`:reason,tone==='progress'?'':tone,reason]);
+ if(usb)lines.push([usb,'warn',s.link.usb]);
+ // 'Coba lagi' re-sends ppp.restart. It is offered only when it can run and the link is still
+ // down: restarting a link that just came back would drop it again.
+ const retryPhase=r.phase==='TIMEOUT'||uncertain,busy=!!c.retry.dataset.busy;
+ const canRetry=retryPhase&&!healthy&&!!caps.ppp_restart;
+ if(retryPhase&&healthy&&!late)lines.push(['Link sudah sehat lagi (PPP, ping, MQTT) — tidak perlu restart.','good']);
+ else if(retryPhase&&!caps.ppp_restart)lines.push([pppRestartBlockedHint(caps),'']);
+ if(note)lines.push([note,'']);
+ setRecoveryLines(c,lines);
+ c.retry.hidden=!(canRetry||busy);
+ if(!busy){c.retry.disabled=false;c.retry.removeAttribute('title');}
+ c.foot.hidden=c.retry.hidden&&!lines.length;
 }
 recovery.close.onclick=()=>{const r=currentRecovery(snapshot);if(r)recoveryDismissed={id:r.id,end:RECOVERY_END.has(r.phase)};renderRecovery(snapshot);};
 recovery.retry.onclick=async()=>{
  if(needLogin())return;
  const r=currentRecovery(snapshot),button=recovery.retry;
- if(!r||!snapshot.capabilities?.ppp_restart||button.dataset.busy)return;
+ if(!r||!snapshot.capabilities?.ppp_restart||linkHealthy(snapshot)||button.dataset.busy)return;
+ // Without the radio on USB a fresh pppd cannot open the device; ask first, with the warning.
+ if(usbHint(snapshot)){confirmPppRestart();return;}
  button.dataset.busy='1';button.disabled=true;recoveryNote={id:r.id,text:'Mengirim restart T900…',at:Date.now()};renderRecovery(snapshot);
  try{const result=await command('ppp.restart');recoveryNote={id:r.id,text:`Terkirim: ${result.stage}`,at:Date.now()};}
  catch(e){
@@ -626,8 +692,9 @@ function render(s){
  document.body.dataset.accent=prefs.accent;document.body.dataset.font=prefs.font;
  renderData(s);
  renderTabAlerts(s);
- renderRemoteBanner(s);
+ renderRemoteRejects(s,renderRemoteBanner(s));
  renderRecovery(s);
+ const usbWarn=$('pppusbwarn');if(usbWarn)setUsbWarning(usbWarn,s);
  refreshHistory(s);
 }
 async function get(path){const response=await fetch(path,{cache:'no-store',signal:AbortSignal.timeout(1200)});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json();}
@@ -719,7 +786,16 @@ function updateBlankClock(){
 }
 function enterBlank(){blankErrors=errorAlertCodes();updateBlankClock();$('blank').hidden=false;}
 function wakeScreen(){if($('blank').hidden)return false;$('blank').hidden=true;lastTouch=Date.now();void refreshSpectrum(snapshot);return true;}
-setInterval(()=>{const stale=Date.now()-lastProgress>5000;$('stale').hidden=!stale;if(stale)$('stalereason').textContent=Date.now()-lastApi>5000?'API lokal tidak merespons.':'API hidup, snapshot tidak bergerak.';const sec=snapshot.config?.preferences?.blank_after_seconds||0,errors=errorAlertCodes(),recovering=recoveryRunning();if($('blank').hidden){if(sec>0&&Date.now()-lastTouch>sec*1000&&!errors.size&&!recovering)enterBlank();}else if(recovering||[...errors].some(code=>!blankErrors.has(code)))wakeScreen();else updateBlankClock();},250);
+// A running recovery wakes the screen once per restart id; a manual 'Layar hitam' afterwards
+// sticks, while automatic blanking stays off until the recovery ends.
+setInterval(()=>{
+ const stale=Date.now()-lastProgress>5000;$('stale').hidden=!stale;
+ if(stale)$('stalereason').textContent=Date.now()-lastApi>5000?'API lokal tidak merespons.':'API hidup, snapshot tidak bergerak.';
+ const sec=snapshot.config?.preferences?.blank_after_seconds||0,errors=errorAlertCodes(),running=currentRecovery(snapshot),recovering=recoveryRunning();
+ if(recovering&&running.id!==recoveryWokeId){recoveryWokeId=running.id;wakeScreen();}
+ if($('blank').hidden){if(sec>0&&Date.now()-lastTouch>sec*1000&&!errors.size&&!recovering)enterBlank();}
+ else if([...errors].some(code=>!blankErrors.has(code)))wakeScreen();else updateBlankClock();
+},250);
 const tabOrder=Array.from(document.querySelectorAll('nav button'),button=>button.dataset.tab);
 function selectTab(tab,direction=0){
  for(const page of document.querySelectorAll('.page')){
@@ -757,7 +833,7 @@ function segmented(id,onChange){
 }
 segmented('linkpage',value=>{linkData=value;render(snapshot);});
 segmented('syspage',value=>{hostPage=value;$('systitle').textContent=hostPage?'RASPBERRY / HOST':'RDF / DAQ';render(snapshot);});
-function modal(title,iconName='',tone=''){if(mqttKeyboardDismiss){mqttKeyboardDismiss(false);mqttKeyboardDismiss=null;}const dialog=$('modal').querySelector('.dialog');dialog.querySelector('.dialoghead').append($('closemodal'));dialog.classList.remove('keyboard-open');$('modalbody').classList.remove('keyboard-open');modalReturnFocus=document.activeElement;pinKeyHandler=null;$('modaltitle').replaceChildren(...(iconName?[icon(iconName,tone)]:[]),title);$('modalbody').replaceChildren();$('modalmsg').textContent='';historyView=null;$('modal').dataset.recovery='full';$('modal').hidden=false;placeRecovery();return $('modalbody');}
+function modal(title,iconName='',tone=''){if(mqttKeyboardDismiss){mqttKeyboardDismiss(false);mqttKeyboardDismiss=null;}const dialog=$('modal').querySelector('.dialog');dialog.querySelector('.dialoghead').append($('closemodal'));dialog.classList.remove('keyboard-open');$('modalbody').classList.remove('keyboard-open');modalReturnFocus=document.activeElement;pinKeyHandler=null;$('modaltitle').replaceChildren(...(iconName?[icon(iconName,tone)]:[]),title);$('modalbody').replaceChildren();$('modalbody').scrollTop=0;$('modalmsg').textContent='';historyView=null;$('modal').dataset.recovery='full';$('modal').hidden=false;placeRecovery();return $('modalbody');}
 function dismissModal(){if(mqttKeyboardDismiss)mqttKeyboardDismiss(false);$('modal').hidden=true;historyView=null;placeRecovery();pinKeyHandler=null;const target=modalReturnFocus;modalReturnFocus=null;if(target&&typeof target.focus==='function')target.focus();}
 $('closemodal').onclick=dismissModal;
 function modalKeydown(event){
@@ -1226,8 +1302,27 @@ $('controlbtn').onclick=()=>{if(needLogin())return;const box=modal('Kontrol RDF'
   for(const reason of new Set([rebootReason,pppReason].filter(Boolean))){const note=text(host,reason);note.className='hint';}
 };
 function confirmOperation(label,op,extra,message='Pemrosesan RDF akan terhenti.'){const box=modal(label,'warn','bad');text(box,message);cancelAction(box);action(box,'Konfirmasi',()=>command(op,extra).catch(error=>{throw withReasonHint(error);}),true,'check');}
+// Live while the confirmation is open: replugging the radio clears the warning.
+function setUsbWarning(el,s){
+ const hint=usbHint(s);el.hidden=!hint;
+ if(el.dataset.text!==hint){el.dataset.text=hint;el.replaceChildren(...(hint?[icon('warn'),hint]:[]));}
+}
 // PPP restart cuts only the primary (T900) MQTT path; progress then shows in this dialog.
-function confirmPppRestart(){confirmOperation('Restart T900','ppp.restart',{},'Restart PPP T900? MQTT utama putus beberapa detik sampai PPP tersambung lagi. Broker cadangan (LAN/internet) tidak terpengaruh.');}
+function confirmPppRestart(){
+ const box=modal('Restart T900','warn','bad');
+ text(box,'Restart PPP T900? MQTT utama putus beberapa detik sampai PPP tersambung lagi. Broker cadangan (LAN/internet) tidak terpengaruh.');
+ const warning=document.createElement('p');warning.id='pppusbwarn';warning.className='usb-warning';warning.setAttribute('role','alert');
+ box.append(warning);setUsbWarning(warning,snapshot);
+ cancelAction(box);
+ action(box,'Konfirmasi',async()=>{
+  let result;try{result=await command('ppp.restart');}catch(error){throw withReasonHint(error);}
+  if(warning.isConnected&&$('modal').dataset.recovery==='compact'){$('modal').dataset.recovery='full';placeRecovery();}
+  return result;
+ },true,'check');
+ // An earlier card shows only its headline here so the warning and buttons stay in view; once
+ // this restart is accepted the dialog shows its full progress.
+ if(currentRecovery(snapshot)){$('modal').dataset.recovery='compact';placeRecovery();}
+}
 // The kiosk has no physical keyboard, so frequency entry uses an on-screen keypad. Range and
 // policy checks stay on the Edge; this only builds a well-formed MHz number.
 function frequency(){

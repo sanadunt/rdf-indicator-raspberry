@@ -14,13 +14,35 @@
 - The helper now also restarts a `failed` unit and one in `activating/auto-restart` (any origin),
   and starts an `inactive` unit for the local panel only. A pending job is still refused
   (`PPP_RESTART_PENDING`).
+- The helper reads the idle unit's `Job=` correctly. `systemctl show -p Job` prints an empty value
+  for a unit with no job, never `Job=0`, so before this fix every real `ppp.restart` and the
+  `controls approve --ppp-restart` preflight failed with `PPP_SERVICE_STATUS_UNKNOWN`. An empty or
+  `0` job now means no job; any job number is `PPP_RESTART_PENDING`. `LoadState` and `ActiveState`
+  must still be present and non-empty.
 - PPP recovery observer on the Edge for local, Ground, and backup restarts: after
   `PPP_RESTART_REQUESTED` it probes the link about every second and reports `APPLIED` with proof
   (PPP cycled, interface up, peer ping reply, primary MQTT ready over the new link) or, after
-  120 s, `OUTCOME_UNKNOWN` with `PPP_RECOVERY_TIMEOUT` or `PPP_CYCLE_NOT_OBSERVED`. The panel shows
-  the steps (`Restart diminta`, `PPP turun/naik`, `PPP UP`, `Ping Ground`, `MQTT utama`) and
-  `Tersambung ke Ground ✓`, with `Coba lagi` after a timeout. The built-in Ground receiver keeps its
-  own health-based reconcile and does not adopt the observer's final ACK.
+  120 s, `OUTCOME_UNKNOWN` with a reason chosen from the evidence, in priority order:
+  `T900_USB_MISSING` (T900 USB alias `MISSING`), `MQTT_NOT_RECOVERED` (PPP and peer ping back,
+  primary MQTT not), `PPP_RECOVERY_TIMEOUT` (cycle seen, PPP/ping not back), or
+  `PPP_CYCLE_NOT_OBSERVED`. The panel shows the steps (`Restart diminta`, `PPP turun/naik`,
+  `PPP UP`, `Ping Ground`, `MQTT utama`) and `Tersambung ke Ground ✓`, with `Coba lagi` after a
+  timeout. The built-in Ground receiver keeps its own health-based reconcile and does not adopt the
+  observer's final ACK.
+- Late recovery: while a timed-out record is still shown (90 s), the observer keeps evaluating the
+  link and updating the steps. If the peer ping and primary MQTT (or MQTT disabled) recover late,
+  `link.ppp_recovery` switches to `phase: "DONE"` with the new `late: true`; `stage` stays
+  `OUTCOME_UNKNOWN`, `reason` keeps the timeout reason, and the journal and ACK are not rewritten.
+  The panel shows the card green and hides `Coba lagi` while the snapshot shows the link healthy
+  (PPP `UP`, peer `REPLY`, primary MQTT ready or disabled). The 90 s linger uses the Edge's
+  monotonic clock only, so an NTP clock step on an RTC-less Pi no longer hides the result early.
+- A helper timeout or socket error during `ppp.restart` stays `OUTCOME_UNKNOWN` (systemd may have
+  restarted the unit); the panel shows it amber as `Hasil restart T900 belum pasti` with
+  `Coba lagi`, not as a red failure.
+- The `Restart T900` confirmation and the progress card warn while `link.usb` is `MISSING`
+  (`T900 USB tidak terdeteksi — restart PPP tidak membantu; cek kabel/daya radio.`): a freshly
+  restarted pppd cannot open a missing device. When `Coba lagi` is not allowed, the card hides it
+  and shows the approval or helper hint instead.
 - Snapshot adds `link.ppp_service` (`state`, `substate`, `restarts` of `t900-ppp.service`) and
   `link.ppp_recovery` (kept 90 s after it finishes). The Link tab `Rincian` view shows
   `Layanan PPP`. `telemetry/health/detail` adds `ppp`, `peer`, `ppp_svc`, and `ppp_restarts`
@@ -32,21 +54,44 @@
   rejected SUBACK/PUBACK no longer reconnects every second. PINGREQ is also sent after `keepalive`
   seconds without receiving anything, even while QoS 0 telemetry keeps the transmit side busy.
   New `queue_age_ms` status field.
-- `CONTROL_BACKLOG` now pauses primary Angular only when the oldest queued Control message is older
-  than 3 s or an in-flight QoS 1 PUBLISH has waited more than 5 s for PUBACK, instead of on any
+- MQTT client: a PINGRESP that is late only because the PINGREQ is queued behind the client's own
+  backlog no longer resets the session. When `keepalive` has passed since the PINGREQ, the client
+  waits up to 4x `keepalive` while TCP is still draining: unacknowledged bytes in the kernel send
+  queue (`TIOCOUTQ`) or the PINGREQ not yet handed to the kernel, and a TCP ACK from the peer within
+  the last `keepalive` seconds (`TCP_INFO` `tcpi_last_ack_recv`). This covers TCP, TLS, and
+  WebSocket. A dead link sends no ACKs and still resets `keepalive` after the PINGREQ, or after the
+  last TCP ACK if that is later; if the probe fails, the old rule applies. This stops false
+  `PING_TIMEOUT` resets, offline LWTs, and a flapping `MQTT utama` on a slow but working T900 link.
+- `CONTROL_BACKLOG` now pauses primary Angular when the oldest queued Control message is older
+  than 3 s or an in-flight QoS 1 PUBLISH has waited more than 2.5 s for PUBACK, instead of on any
   PUBACK slower than 500 ms.
 - Remote-command indicator: the Edge journal records each command's origin (`local`, `ground`,
-  `backup`) and before-values (new `link` and `meta` columns, migrated in place on existing
-  databases). Public operation records add `origin`, `summary` (`{kind, changes:{field:{from,to}}}`),
-  and `reason`. The snapshot adds `last_remote_operation`, `operation_seq`, and `remote_rejects` (up
-  to five recent remote rejections); `last_operation` skips read-only operations. The panel shows a
-  `Perintah dari GROUND` / `Perintah dari CADANGAN` banner with an Indonesian summary and stage,
-  origin chips `[G]`/`[C]`/`[L]` and reasons in the CMD row, and a `Riwayat` dialog with the last 10
-  mutations. Old operations no longer toast on page load.
+  `backup`) and before-values in a new side table `operation_meta`. The `operations` table keeps
+  its original seven columns, so `scripts/rollback.sh` to the previous release still journals
+  commands on the same database (the previous release ignores the side table). Databases written
+  by pre-release builds of this change, which added `link`/`meta` columns to `operations`, keep
+  working with this build but are not usable by the previous release. Public operation records add
+  `origin`, `summary` (`{kind, changes:{field:{from,to}}}`), and `reason`. The snapshot adds
+  `last_remote_operation`, `operation_seq`, and `remote_rejects` (up to five recent remote
+  rejections); `last_operation` skips read-only operations. `operation_seq` also increases on
+  journal-only stages (`APPLYING`, `VERIFYING`, `REBOOT_SCHEDULED`, `SHUTDOWN_SCHEDULED`), so an
+  open `Riwayat` dialog refreshes during verification. The panel shows a `Perintah dari GROUND` /
+  `Perintah dari CADANGAN` banner with an Indonesian summary and stage, also for rejected remote
+  commands (`ditolak` plus reason), origin chips `[G]`/`[C]`/`[L]` and reasons in the CMD row, and
+  a `Riwayat` dialog with the last 10 mutations. The banner's stage/result text is no longer
+  clipped by a long summary, and toasts are no longer hidden under the banner or recovery card.
+  Old operations no longer toast on page load.
 - Docs: new `docs/T900_PPP.md` (pre-flight procedure, progress steps, why unplugging the T900
   helps, hardening both ends, diagnostics). New examples under `deploy/examples/t900/` (udev rules
   for both hosts, pppd options, a `Restart=always` drop-in); they are not installed by
-  `install.sh`.
+  `install.sh`. The drop-in suits `Type=simple`/`exec` (pppd `nodetach`) or `Type=forking` without
+  `updetach`. systemd refuses `Restart=always` for a `Type=oneshot` unit (common `pon` wrapper),
+  which then becomes `bad-setting`; the example carries an opt-in block that turns such a unit into
+  `Type=simple` + `nodetach`, and the docs add `-p Type` before and `-p LoadState` after
+  installation. `Type=notify` with `up_sdnotify` or `forking` with `updetach` keeps the unit in
+  `activating/start` while the radio is down, so `Restart T900` is refused with
+  `PPP_SERVICE_NOT_ACTIVE`; the docs recommend `Type=simple` + `nodetach`. Operators are told to
+  check the Link tab before pressing `Coba lagi`.
 
 - Add an optional backup MQTT broker on the Edge (`mqtt.backup`, panel `Data > Cadangan`). A third
   client, `<client_id>-backup`, mirrors every Edge publish to a LAN or online broker under the same

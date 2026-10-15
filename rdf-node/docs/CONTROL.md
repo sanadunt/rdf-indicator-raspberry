@@ -132,7 +132,7 @@ Prosedur operator, arti progres, dan pengerasan link kedua sisi ada di [T900_PPP
 | Asal | Gate |
 |---|---|
 | Panel Edge lokal (`local-admin`) | Sesi PIN Admin + CSRF dan konfirmasi layar; `runtime_mode: controlled`, `control.ppp_restart_enabled`, dan helper `allow_ppp_restart` (`sudo rdf-node controls approve --ppp-restart`). Bila belum lengkap: `CAPABILITY_DISABLED`. Panel tidak mengirim field operasi tambahan; `base_rev` diabaikan dan gate `CLOCK_UNTRUSTED` tidak berlaku, karena Pi tanpa RTC sering mendapat NTP lewat PPP yang justru sedang putus. Deadline memakai jam host yang sama. |
-| Ground / broker cadangan (`ground-controller`) | Tanpa remote grant atau approval root. Session/boot, expiry, clock, dan `base_rev` tetap diperiksa seperti command Ground lain; `REMOTE_COMMANDS_DISABLED` di DEMO. |
+| Ground / broker cadangan (`ground-controller`) | Tanpa remote grant atau approval root. Session/boot, expiry, clock, dan `base_rev` tetap diperiksa seperti command Ground lain; di DEMO ditolak `DEMO_NO_HARDWARE_CONTROL`. |
 
 Capability `ppp_restart` melaporkan gate lokal; `remote_ppp_restart` hanya berarti helper tersedia
 di luar DEMO, bukan bukti unit siap.
@@ -155,6 +155,8 @@ di luar DEMO, bukan bukti unit siap.
 Pada setiap request helper membaca `LoadState`, `ActiveState`, `SubState`, dan `Job` lewat
 `systemctl show`. Pemeriksaan dan pemanggilan tetap
 `/usr/bin/systemctl --no-block restart t900-ppp.service` berjalan di bawah lock helper yang sama.
+Untuk unit tanpa job, systemd menulis `Job=` dengan nilai kosong (bukan `Job=0`); helper
+memperlakukan `Job=` kosong atau `0` sebagai tidak ada job, dan nomor job lain sebagai job antre.
 
 | Keadaan unit | Ground/cadangan | Panel lokal |
 |---|---|---|
@@ -163,15 +165,22 @@ Pada setiap request helper membaca `LoadState`, `ActiveState`, `SubState`, dan `
 | `activating` dengan SubState `auto-restart` | diterima | diterima |
 | `inactive` | `PPP_SERVICE_NOT_ACTIVE` | diterima (`restart` menyalakan unit yang berhenti) |
 | `activating` lain, `deactivating`, atau state lain | `PPP_SERVICE_NOT_ACTIVE` | `PPP_SERVICE_NOT_ACTIVE` |
-| `Job` bukan `0` | `PPP_RESTART_PENDING` | `PPP_RESTART_PENDING` |
+| `Job` berisi nomor job (job antre) | `PPP_RESTART_PENDING` | `PPP_RESTART_PENDING` |
 | Unit tidak dimuat | `PPP_SERVICE_NOT_LOADED` | `PPP_SERVICE_NOT_LOADED` |
-| `systemctl show` gagal/tidak lengkap | `PPP_SERVICE_STATUS_UNKNOWN` | `PPP_SERVICE_STATUS_UNKNOWN` |
+| `systemctl show` gagal, `LoadState`/`ActiveState` kosong, atau baris `Job` tidak ada | `PPP_SERVICE_STATUS_UNKNOWN` | `PPP_SERVICE_STATUS_UNKNOWN` |
 
 `inactive` dibatasi ke panel lokal karena unit berhenti dapat berasal dari `systemctl stop` yang
 disengaja. Panel lokal tanpa policy helper ditolak `PPP_RESTART_NOT_APPROVED`. Error setelah
 pemanggilan systemd menjadi `SYSTEMD_ACTION_OUTCOME_UNKNOWN` (`OUTCOME_UNKNOWN`), bukan gagal pasti.
 Preflight `controls approve --ppp-restart` memakai aturan Ground/cadangan, jadi unit `inactive`
 tidak dapat di-approve sebelum dinyalakan.
+
+Unit PPP milik site. Unit `Type=notify` dengan pppd `up_sdnotify`, atau `Type=forking` dengan
+`updetach`, tetap `activating/start` dengan job start antre sampai link PPP pertama terbentuk.
+Selama radio putus, restart karena itu ditolak `PPP_SERVICE_NOT_ACTIVE`. Menerima keadaan itu
+juga tidak membantu: `--no-block restart` digabung systemd ke job start yang sedang berjalan.
+Gunakan `Type=simple` dengan pppd `nodetach`; lihat
+[T900_PPP.md](T900_PPP.md#63-systemd-unit-ppp-hidup-lagi-sendiri).
 
 ### Stage dan pemantau pemulihan Edge
 
@@ -191,17 +200,35 @@ ACCEPTED -> APPLYING (jurnal saja) -> FAILED | OUTCOME_UNKNOWN   (request helper
   setelah PPP naik; `null` bila MQTT utama nonaktif).
 - `APPLIED` setelah `peer_reply` dan `mqtt_ready` tidak `false`, dengan
   `proof: {ppp:"UP", peer:"REPLY", mqtt:"READY"|"DISABLED", cycled:true}` dan `elapsed_ms`.
-- Tanpa bukti itu dalam 120 s: `OUTCOME_UNKNOWN` dengan `reason` `PPP_RECOVERY_TIMEOUT` (siklus
-  terlihat) atau `PPP_CYCLE_NOT_OBSERVED`, ditambah `phase`, `steps`, dan `elapsed_ms`.
-- Snapshot Edge memuat `link.ppp_recovery` selama pemantauan dan 90 s sesudahnya, serta
-  `link.ppp_service` (`state`, `substate`, `restarts`). Pemantau berada di memori; restart
-  `rdf-edge` membuat operasi yang belum final menjadi `OUTCOME_UNKNOWN`
-  (`AGENT_RESTARTED_RECONCILE_NO_REPLAY`) dan tidak diulang.
+- Tanpa bukti itu dalam 120 s: `OUTCOME_UNKNOWN` dengan `phase`, `steps`, `elapsed_ms`, dan
+  `reason` yang dipilih dari bukti saat batas waktu, dengan urutan prioritas:
+  `T900_USB_MISSING` (alias USB T900 `MISSING`), `MQTT_NOT_RECOVERED` (PPP naik dan ping peer
+  dibalas, tetapi MQTT utama belum terbukti siap), `PPP_RECOVERY_TIMEOUT` (siklus terlihat, PPP/ping
+  belum pulih), atau `PPP_CYCLE_NOT_OBSERVED` (tidak ada bukti siklus).
+- Selama record `TIMEOUT` masih ditampilkan (90 s), pemantau tetap menilai bukti dan memperbarui
+  `steps`. Bila ping peer dan MQTT utama (atau MQTT nonaktif) terbukti pulih terlambat, tampilan
+  snapshot menjadi `phase: "DONE"` dengan `late: true`; `stage` tetap `OUTCOME_UNKNOWN` dan
+  `reason` tetap alasan timeout. Jurnal dan ACK tidak ditulis ulang, dan tidak ada ACK baru.
+- Bila request helper sendiri timeout atau socket-nya gagal, stage menjadi `OUTCOME_UNKNOWN` dengan
+  `error` (misalnya `SYSTEMD_ACTION_OUTCOME_UNKNOWN` atau `TIMEOUTERROR`), karena systemd mungkin
+  sudah me-restart unit. `link.ppp_recovery` lalu berfase `FAILED` dengan `stage`
+  `OUTCOME_UNKNOWN`; panel menampilkannya sebagai hasil belum pasti, bukan gagal pasti. Penolakan
+  helper yang pasti tetap `FAILED`.
+- Snapshot Edge memuat `link.ppp_recovery` selama pemantauan dan 90 s sesudahnya (jam monotonic
+  Edge, tidak terpengaruh lompatan jam NTP), serta `link.ppp_service` (`state`, `substate`,
+  `restarts`). Pemantau berada di memori; restart `rdf-edge` membuat operasi yang belum final
+  menjadi `OUTCOME_UNKNOWN` (`AGENT_RESTARTED_RECONCILE_NO_REPLAY`) dan tidak diulang.
 - Saat interface PPP kembali `UP` atau ping peer kembali dibalas, Agent memanggil `kick()` pada
   client MQTT utama agar reconnect tanpa menunggu sisa backoff.
 
 `APPLIED` membuktikan PPP berganti siklus, Ground membalas ping, dan MQTT utama tersambung lewat
 link baru. Ia tidak membuktikan radio T900 di-reset atau receiver Ground memproses telemetry.
+
+Panel Edge memberi peringatan di konfirmasi Restart T900 dan di kartu progres selama `link.usb`
+bernilai `MISSING`, karena pppd yang baru di-restart tidak dapat membuka device yang tidak ada.
+Tombol **Coba lagi** pada hasil `TIMEOUT` atau hasil belum pasti hanya tampil bila
+`capabilities.ppp_restart` aktif dan snapshot belum menunjukkan link sehat (`link.ppp` `UP`,
+`link.ppp_probe` `REPLY`, dan MQTT Control utama siap atau nonaktif).
 
 ### Ground
 
@@ -220,16 +247,23 @@ Verifikasi nama/state unit dan waktu pemulihan memerlukan acceptance pada Raspbe
 ## Asal perintah di panel Edge
 
 Jurnal Edge menyimpan asal setiap command: `local` (panel), `ground` (broker utama), atau `backup`
-(broker cadangan), serta nilai sebelum perubahan. Record operasi publik (snapshot,
+(broker cadangan), serta nilai sebelum perubahan. Keduanya ada di tabel samping `operation_meta`;
+tabel `operations` tetap tujuh kolom seperti rilis sebelumnya, sehingga rollback kode tetap dapat
+menulis jurnal yang sama. Record operasi publik (snapshot,
 `GET /api/v2/operations/latest`, dan hasil `operation.get`) menambah field aditif `origin`,
 `summary` (`{kind, changes:{field:{from,to}}}`), dan `reason` (dari `result.error` atau
 `result.reason`).
 
 Snapshot Edge juga memuat `last_remote_operation` (mutasi terbaru dari Ground atau cadangan),
-`operation_seq` (naik pada setiap perubahan stage), dan `remote_rejects` (sampai lima penolakan
-remote terakhir: `t`, `origin`, `op`, `error`). `last_operation` tidak lagi menampilkan operasi baca
-(`config.get`, `operation.get`). Panel memakai field ini untuk banner **Perintah dari GROUND** /
-**Perintah dari CADANGAN**, chip asal `[G]`/`[C]`/`[L]`, dan dialog **Riwayat** di tab Config.
+`operation_seq`, dan `remote_rejects` (sampai lima penolakan remote terakhir: `t`, `origin`, `op`,
+`error`). `operation_seq` naik setiap kali stage operasi berubah, termasuk stage yang hanya ditulis
+ke jurnal (`APPLYING`, `VERIFYING`, `REBOOT_SCHEDULED`, `SHUTDOWN_SCHEDULED`); satu perubahan dapat
+menaikkannya lebih dari satu, jadi pakai hanya untuk mendeteksi perubahan, bukan menghitung stage.
+`last_operation` tidak lagi menampilkan operasi baca (`config.get`, `operation.get`). Panel memakai
+field ini untuk banner **Perintah dari GROUND** / **Perintah dari CADANGAN**, chip asal
+`[G]`/`[C]`/`[L]`, dan dialog **Riwayat** di tab Config. Penolakan remote baru (selain operasi baca)
+juga memunculkan banner yang sama dengan status `ditolak` dan alasannya; banner selain `diterapkan`
+tetap tampil sampai `Tutup` disentuh.
 Karena Edge tidak mengautentikasi publisher MQTT, banner asal adalah sinyal keamanan: perintah
 dari CADANGAN berarti ada publisher yang diizinkan ACL broker cadangan.
 
@@ -296,6 +330,6 @@ Crash dengan operasi accepted/applying/verifying menjadi OUTCOME_UNKNOWN, bukan 
 otomatis. Command ID dan result disimpan; Ground dapat query `operation.get` berdasarkan ID.
 Hasil reboot berstatus scheduled direkonsiliasi dengan boot baru.
 
-Batas retained terminal journal2,000/30hari; unresolved unknown tidak dibuang otomatis.
+Batas retained terminal journal 2.000 record/30 hari; unresolved unknown tidak dibuang otomatis.
 Pantau penggunaan storage dan rekonsiliasi unknown dalam maintenance; release tidak
 menjalankan cleanup agresif terhadap bukti operasi yang belum selesai.

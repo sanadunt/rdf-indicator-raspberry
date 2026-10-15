@@ -81,7 +81,9 @@ sudo cat /etc/ppp/options /etc/ppp/peers/*
 Gabungkan baris yang relevan dari `ppp-options.example`. Hal yang wajib sama di kedua sisi: baud
 serial, `lcp-echo-interval`/`lcp-echo-failure`, `mtu`/`mru`, dan pilihan `crtscts`/`nocrtscts`.
 Ganti device, alamat IP, dan `GANTI_BAUD` sesuai sisi. Pastikan `nodetach` cocok dengan `Type=`
-unit. Lalu, dalam jendela maintenance:
+unit (`systemctl show t900-ppp.service -p Type`): `Type=simple` + `nodetach` disarankan. Jangan
+pakai `updetach` atau `up_sdnotify`; dengan keduanya unit tetap `activating/start` selama radio
+putus dan tombol Restart T900 ditolak `PPP_SERVICE_NOT_ACTIVE`. Lalu, dalam jendela maintenance:
 
 ```bash
 sudo systemctl restart t900-ppp.service          # Ubuntu: unit PPP Ground milik site
@@ -90,12 +92,40 @@ journalctl -u t900-ppp.service -n 40 --no-pager -o short-precise
 
 ## 4. Drop-in systemd
 
+Periksa `Type=` unit lebih dulu:
+
+```bash
+systemctl show t900-ppp.service -p Type -p LoadState
+```
+
+| `Type=` | Tindakan |
+|---|---|
+| `simple`/`exec` (pppd `nodetach`) atau `forking` (tanpa `updetach`) | Pasang drop-in apa adanya. |
+| `notify` (pppd `up_sdnotify`) atau `forking` dengan `updetach` | Drop-in dimuat, tetapi tipe ini membuat Restart T900 ditolak selama radio putus. Ubah ke `Type=simple` + `nodetach` dengan blok `Type=simple` di drop-in, lalu hapus `up_sdnotify`/`updetach` dari file peer. |
+| `oneshot` (wrapper `pon`) | systemd **menolak** `Restart=always` untuk `Type=oneshot` dan unit menjadi `bad-setting`. Hapus tanda `#` pada blok `Type=simple` di drop-in dan ganti `GANTI_PEER`, sehingga unit menjadi `Type=simple` + `nodetach`. |
+
+`Restart=on-failure` memang diterima systemd untuk `Type=oneshot`, tetapi pada wrapper `pon` ia
+hanya mengulang bila perintah start sendiri gagal, bukan bila pppd keluar belakangan. Penjelasan
+lengkap: [T900_PPP.md bagian 6.3](../../../docs/T900_PPP.md#63-systemd-unit-ppp-hidup-lagi-sendiri).
+
 ```bash
 sudo install -d /etc/systemd/system/t900-ppp.service.d
 sudo install -m 0644 t900-ppp.service.d-10-recovery.conf /etc/systemd/system/t900-ppp.service.d/10-recovery.conf
 sudo systemctl daemon-reload
-systemctl show t900-ppp.service -p Restart -p RestartUSec -p NRestarts
+systemctl show t900-ppp.service -p Type -p LoadState -p Restart -p RestartUSec -p NRestarts
 ```
+
+`LoadState` harus `loaded`. Bila `bad-setting`, `systemctl status t900-ppp.service` menampilkan
+`Loaded: bad-setting`; cari baris `Refusing`:
+
+```bash
+journalctl -u t900-ppp.service -b --no-pager | grep -i refusing
+```
+
+Perbaiki atau hapus drop-in, lalu `daemon-reload` lagi. pppd yang sedang berjalan tidak langsung
+berhenti, jadi tanpa pemeriksaan ini kesalahan mudah terlewat sampai boot berikutnya, saat PPP
+tidak start. Tanda lainnya: tab Link langsung menampilkan `Layanan PPP` `NOT_LOADED`, dan Restart
+T900 ditolak `PPP_SERVICE_NOT_LOADED`.
 
 Di Ubuntu, ganti `t900-ppp.service` dengan nama unit PPP Ground. Alternatif:
 `sudo systemctl edit <unit>` lalu tempel isinya.

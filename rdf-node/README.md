@@ -41,14 +41,17 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
 - **Indikator perintah remote:** perintah dari Ground atau broker cadangan memunculkan banner
   `Perintah dari GROUND` / `Perintah dari CADANGAN` dengan ringkasan perubahan (misalnya
   `Frekuensi VFO 433,920 → 434,000 MHz`) dan status (diproses, diterapkan, tersimpan belum
-  terbukti, gagal). Banner tampil di atas dialog dan membangunkan layar hitam; banner `diterapkan`
-  hilang sendiri setelah 10 detik, lainnya sampai disentuh. Tombol `Config > Riwayat` menampilkan
+  terbukti, gagal). Perintah remote yang ditolak Edge juga memunculkan banner dengan status
+  `ditolak` dan alasannya. Banner tampil di atas dialog dan membangunkan layar hitam; banner
+  `diterapkan` hilang sendiri setelah 10 detik, lainnya sampai `Tutup` disentuh. Tombol `Config > Riwayat` menampilkan
   10 perubahan terakhir beserta asal, status, alasan, dan jumlah perintah remote yang ditolak.
 - **Restart T900** di `Config > Login > Kontrol > Raspberry` me-restart `t900-ppp.service` lokal,
   juga saat MQTT/PPP putus total, lalu menampilkan progres `Restart diminta → PPP turun/naik →
-  PPP UP → Ping Ground → MQTT utama` sampai **Tersambung ke Ground ✓** atau batas 120 detik. Tab
-  Link > Rincian menampilkan status `Layanan PPP`. Prosedur pra-terbang dan pencegahan cabut-colok
-  T900: [T900_PPP.md](docs/T900_PPP.md).
+  PPP UP → Ping Ground → MQTT utama` sampai **Tersambung ke Ground ✓** atau batas 120 detik. Bila
+  T900 USB tidak terdeteksi, konfirmasi dan kartu progres memberi peringatan bahwa restart PPP
+  tidak membantu. Link yang pulih sedikit setelah 120 detik tetap ditandai hijau; lihat tab Link
+  sebelum menekan **Coba lagi**. Tab Link > Rincian menampilkan status `Layanan PPP`. Prosedur
+  pra-terbang dan pencegahan cabut-colok T900: [T900_PPP.md](docs/T900_PPP.md).
 - `Config > Tampilan` menyimpan mode gelap/terang/malam (merah), aksen warna, font lokal, dan
   **layar hitam otomatis** (mati, 1, 5, atau 15 menit tanpa sentuhan). Tombol `Config > Layar hitam`
   menghitamkan layar seketika. Layar hitam hanya menampilkan jam redup (jam sistem Pi; ditandai
@@ -415,8 +418,10 @@ Ubuntu serta broker cadangan tidak disentuh. Restart PPP lokal tidak ditolak kar
 sinkron dan tidak menunggu verifikasi SDR yang sedang berjalan; satu restart PPP aktif sekaligus
 dan jeda minimum 15 detik berlaku untuk semua asal. Kartu progres baru menampilkan
 **Tersambung ke Ground ✓** setelah PPP berganti siklus, ping `10.90.0.1` dibalas, dan MQTT utama
-tersambung; tanpa bukti itu dalam 120 detik hasilnya `OUTCOME_UNKNOWN`. Bila tombol nonaktif,
-panel menulis `Helper kontrol belum tersedia.` atau
+tersambung; tanpa bukti itu dalam 120 detik hasilnya `OUTCOME_UNKNOWN` dengan alasan dari bukti
+yang terlihat. Bila link pulih sesudahnya, kartu berubah hijau tetapi stage tetap
+`OUTCOME_UNKNOWN`, dan **Coba lagi** disembunyikan selama link sehat. Bila tombol nonaktif, panel
+menulis `Helper kontrol belum tersedia.` atau
 `Perlu approval root: sudo rdf-node controls approve --ppp-restart`.
 Reboot lokal memerlukan approval `--reboot`, challenge satu kali 30 detik, jurnal durable, dan
 konfirmasi akhir pada layar. Ground reboot memakai jalur terpisah dan tidak memerlukan approval
@@ -482,7 +487,7 @@ Tidak ada perintah reboot atau shutdown nyata dari test suite. Jalankan tanpa su
 | Grafik tidak mulai | Tab Link: gate source/angle, backlog/stabilisasi, CONTROL profile |
 | CAPABILITY DISABLED | Panel Edge lokal: pastikan mode controlled dan approval root satu kali untuk aksi; Ground: periksa helper target fixed/audited, health/session, dan kesiapan MQTT Control. |
 | PPP restart tidak tersedia | Panel Edge: `sudo rdf-node controls approve --ppp-restart` dan helper aktif. Ground: cek capability, health fresh, MQTT Control, dan status unit fixed pada Raspberry |
-| PPP/T900 putus sebelum terbang | Panel Edge `Kontrol > Restart T900`, tunggu **Tersambung ke Ground ✓**; bila `OUTCOME_UNKNOWN`, periksa pppd Ubuntu, daya, kabel, antena. Lihat [T900_PPP.md](docs/T900_PPP.md) |
+| PPP/T900 putus sebelum terbang | Panel Edge `Kontrol > Restart T900`, tunggu **Tersambung ke Ground ✓**; bila `OUTCOME_UNKNOWN`, baca alasan di kartu (`T900_USB_MISSING`, `MQTT_NOT_RECOVERED`, `PPP_RECOVERY_TIMEOUT`, `PPP_CYCLE_NOT_OBSERVED`) dan lihat tab Link sebelum **Coba lagi**. Lihat [T900_PPP.md](docs/T900_PPP.md) |
 | `PPP_RESTART_TOO_SOON` / `PPP_RESTART_IN_PROGRESS` | Tunggu 15 detik atau sampai pemantauan restart sebelumnya selesai (maks. 120 detik) |
 | PERSISTED_UNVERIFIED | Settings tersimpan; runtime evidence belum lengkap, bukan masalah ACK MQTT |
 | Browser tidak muncul | Jalankan `rdf-kiosk-session` dari desktop grafis; launcher memakai `--disable-gpu`. Pastikan `rdf-edge.service` aktif pada `127.0.0.1:8790`. |

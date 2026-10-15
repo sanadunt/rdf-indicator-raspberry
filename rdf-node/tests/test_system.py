@@ -1718,7 +1718,21 @@ class BackupLinkTests(unittest.TestCase):
                 with mock.patch.object(Client,'queue_age_ms',new_callable=mock.PropertyMock,return_value=queued):
                     self.run_once()
                 self.assertEqual(a.bulk_reason,expected)
-                self.assertEqual('telemetry/angular' in self.suffixes(bulk),expected is None)
+                # Below the pause thresholds a late PUBACK only holds the next frame (see the yield test).
+                self.assertEqual('telemetry/angular' in self.suffixes(bulk),expected is None and pending<=1000)
+
+    def test_bulk_yields_to_late_control_or_unacked_bulk_without_pause(self):
+        a=self.a
+        for pending,backlog,sent in ((900,None,True),(900,2048,True),(1500,None,False),(0,3000,False)):
+            with self.subTest(pending=pending,backlog=backlog):
+                a.profile='balanced';a.bulk_resume_after=0;a.last_angular_q=0;a.backup_last_angular_q=0
+                control,bulk,backup=self.links(backup=False)
+                a._generation=control.generation;control.pending_age_ms=pending
+                with mock.patch.object(Client,'socket_backlog',new_callable=mock.PropertyMock,return_value=backlog):
+                    self.run_once()
+                self.assertIsNone(a.bulk_reason)
+                self.assertEqual(a.bulk_resume_after,0)
+                self.assertEqual('telemetry/angular' in self.suffixes(bulk),sent)
 
     def test_source_level_reasons_pause_angular_on_both_links(self):
         a=self.a;live=a.snapshot()

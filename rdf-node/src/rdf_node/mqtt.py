@@ -5,6 +5,8 @@ retained state, LWT, Message Expiry, PING, verified TLS, and MQTT binary frames
 over WebSocket. Not implemented: QoS 2, persistent broker sessions,
 topic aliases, enhanced authentication or a broker. Only one outbound publish
 is in flight. No offline replay: each reconnect creates a fresh protocol session.
+PINGREQ goes out on TX or RX silence; a PINGRESP later than keepalive resets the session unless
+TCP is still draining our own backlog (slow link), which is tolerated up to 4x keepalive.
 Plaintext transports do not encrypt credentials or MQTT payloads.
 """
 from __future__ import annotations
@@ -21,8 +23,12 @@ import time
 from pathlib import Path
 from .util import compact, strict_json, stable_read
 from .mqtt_ws import WebSocketReader,client_handshake,encode_client_frame,validate_websocket_path
+try: import fcntl,termios
+except ImportError: fcntl=termios=None  # non-Linux: the TCP progress probe reports "unknown"
 
 MAX_PACKET = 16384
+# A late PINGRESP is tolerated up to this many keepalives while TCP still makes forward progress.
+PING_DRAIN_FACTOR = 4
 
 def vi(n:int) -> bytes:
     if type(n) is not int or not 0<=n<=268435455: raise ValueError('MQTT_VARINT_RANGE')
@@ -198,6 +204,27 @@ class Outbox:
             return dict(depth=len(self.data),bytes=sum(len(m.payload) for m in self.data.values()),
                         superseded=self.superseded,rejected=self.rejected,expired=self.expired)
 
+def _tcp_progress(sock):
+    """(bytes not yet ACKed in the kernel send queue, ms since the peer last ACKed) or None.
+
+    Linux SIOCOUTQ (== TIOCOUTQ) and TCP_INFO tcpi_last_ack_recv (u32 at offset 56). Plain TCP,
+    TLS (SSLSocket) and WebSocket sessions all sit on the same TCP socket. Any error -> None."""
+    try:
+        outq=struct.unpack('i',fcntl.ioctl(sock.fileno(),termios.TIOCOUTQ,b'\0\0\0\0'))[0]
+        info=sock.getsockopt(socket.IPPROTO_TCP,socket.TCP_INFO,104)
+        last_ack_recv_ms=struct.unpack_from('I',info,56)[0]
+    except Exception: return None
+    if outq<0: return None
+    return outq,last_ack_recv_ms
+
+def _link_draining(progress,keepalive,ping_unsent=False):
+    """A slow but working link: the peer ACKed within keepalive and the PINGREQ still waits behind
+    our own backlog (bytes unACKed in the kernel, or the PINGREQ not yet handed to the kernel).
+    A dead link sends no ACKs, so it is not draining. Unknown evidence is not draining."""
+    if progress is None: return False
+    outq,last_ack_recv_ms=progress
+    return last_ack_recv_ms<keepalive*1000 and (outq>0 or bool(ping_unsent))
+
 class Bucket:
     def __init__(self,rate,capacity):
         self.rate=rate; self.capacity=capacity; self.tokens=capacity; self.ts=time.monotonic()
@@ -244,6 +271,13 @@ class Client:
     def queue_age_ms(self):
         """Age in ms of the oldest message still waiting in the outbox (not the in-flight one); 0 when empty."""
         return self.outbox.oldest_age_ms()
+    @property
+    def socket_backlog(self):
+        """Bytes handed to the kernel but not yet ACKed by the peer; None when unknown or disconnected."""
+        sock=self._socket
+        if sock is None or not self.connected: return None
+        progress=_tcp_progress(sock)
+        return progress[0] if progress else None
     def offer(self,key,topic,payload,*,qos=0,retain=False,expiry=None,priority=2,on_sent=None,on_error=None):
         if not self.connected:
             _notify_error(on_error,'MQTT_DISCONNECTED'); return False
@@ -347,12 +381,13 @@ class Client:
         reader=Reader(); self._pub_result=None; self._publish=None
         pending_sub=set(); writes=[]; current=None; sent_start=None
         last_mqtt_tx=time.monotonic(); last_mqtt_rx=last_mqtt_tx; handshake_deadline=last_mqtt_tx+10; ping_at=None
+        ping_wire=None  # the queued PINGREQ write entry; its offset reaches len() once the kernel has it
         self._server_max_packet=MAX_PACKET; keepalive=self.cfg.get('keepalive',15)
         websocket_closing=False;websocket_close_sent=False;websocket_close_received=False;websocket_close_deadline=None
         def queue_wire(data):
             if websocket and websocket_closing:return
             if len(writes)>20: raise ValueError('MQTT_CONTROL_QUEUE_LIMIT')
-            writes.append([data,0,None,False,True])
+            entry=[data,0,None,False,True]; writes.append(entry); return entry
         def queue_ws_control(opcode,payload):
             nonlocal websocket_close_sent,websocket_close_deadline
             if opcode==10 and websocket_closing:return
@@ -368,12 +403,20 @@ class Client:
                 raise ValueError('WEBSOCKET_CLOSE_TIMEOUT')
             if not self.connected and now>handshake_deadline: raise ValueError('CONNACK_TIMEOUT')
             if self.connected and pending_sub and now>handshake_deadline: raise ValueError('SUBACK_TIMEOUT')
-            if keepalive>0 and ping_at and now-ping_at>keepalive: raise ValueError('PING_TIMEOUT')
+            if keepalive>0 and ping_at and now-ping_at>keepalive:
+                # On a slow but working link (T900 carrying less than the offered load) the PINGREQ
+                # waits behind our own backlog, so its PINGRESP is late, not lost. Tolerate that up
+                # to PING_DRAIN_FACTOR*keepalive while TCP still makes forward progress; a dead link
+                # sends no ACKs and still times out about keepalive after the PINGREQ.
+                ping_unsent=ping_wire is not None and ping_wire[1]<len(ping_wire[0])
+                if (now-ping_at>PING_DRAIN_FACTOR*keepalive or
+                        not _link_draining(_tcp_progress(s),keepalive,ping_unsent)):
+                    raise ValueError('PING_TIMEOUT')
             # Ping on TX silence (broker keepalive) and on MQTT RX silence, so a dead link is
             # found even while QoS0 telemetry keeps the transmit side busy.
             if (not websocket_closing and self.connected and keepalive>0 and ping_at is None and
                     (now-last_mqtt_tx>=keepalive or now-last_mqtt_rx>=keepalive)):
-                queue_wire(b'\xc0\x00'); ping_at=now
+                ping_wire=queue_wire(b'\xc0\x00'); ping_at=now
             if current is None and writes:
                 current=writes.pop(0)
                 if websocket and not current[3]:current[0]=encode_client_frame(current[0]);current[3]=True
@@ -496,7 +539,7 @@ class Client:
                             self._pub_result=reason
                     elif kind==13:
                         if header!=0xd0 or body: raise ValueError('BAD_PINGRESP')
-                        ping_at=None
+                        ping_at=None; ping_wire=None
                     elif kind==14:
                         if websocket:
                             websocket_closing=True

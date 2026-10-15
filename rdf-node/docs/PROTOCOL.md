@@ -54,7 +54,10 @@ Kontrak wire tidak berubah; yang berubah hanya kapan client membuka sesi baru.
   atau gagal tersambung terus menaikkan backoff (tidak ada reconnect tiap detik).
 - PINGREQ dikirim bila selama `mqtt.keepalive` detik tidak ada yang dikirim atau tidak ada yang
   diterima dari broker, termasuk saat telemetry QoS 0 terus terkirim. Tanpa PINGRESP dalam
-  `keepalive` detik berikutnya, sesi direset (`PING_TIMEOUT`).
+  `keepalive` detik berikutnya, sesi direset (`PING_TIMEOUT`), kecuali TCP masih maju: data client
+  yang belum di-ACK atau PINGREQ yang belum terkirim masih ada, dan peer mengirim ACK TCP dalam
+  `keepalive` detik terakhir. Dalam keadaan itu (link lambat yang masih bekerja) client menunggu
+  sampai 4 kali `keepalive`. Link mati tidak mengirim ACK TCP dan tetap direset seperti biasa.
 - Edge memanggil `kick()` pada client Control dan Bulk utama saat interface PPP kembali `UP` atau
   ping peer kembali dibalas: client yang belum tersambung langsung reconnect dan backoff kembali ke
   awal.
@@ -116,12 +119,12 @@ Nilai contoh sintetis. Radio tidak menambahkan SNR yang belum terbukti sumbernya
 
 Run: 0 stopped, 1 running, 2 starting, 3 stopping, 4 error, 255 unknown.
 DAQ: 0 degraded, 1 healthy, 2 unknown. `age` ialah umur DoA pada source, bukan latency E2E.
+Clock: 0 untrusted, 1 synced. Field unavailable dapat null. Health q tetap maju saat SDR stop.
 
 `telemetry/health/detail` (tiap 10 s) menambah field aditif status link PPP: `ppp` (`UP`/`DOWN`),
 `peer` (hasil ping peer), `ppp_svc` (`ActiveState` unit `t900-ppp.service`), dan `ppp_restarts`
 (`NRestarts` systemd). Consumer harus menerima field yang tidak ada dari Edge lama. Lihat
 [MQTT_TOPIC_SUMMARY.md](MQTT_TOPIC_SUMMARY.md#telemetryhealthdetail).
-Clock: 0 untrusted, 1 synced. Field unavailable dapat null. Health q tetap maju saat SDR stop.
 
 ## Grafik lengkap 360 titik
 
@@ -287,7 +290,9 @@ Untuk `ppp.restart`, operasi yang diterima mula-mula mengirim `ACCEPTED`, lalu
 `t900-ppp.service`. Edge kemudian memantau link sampai 120 s dan mengirim ACK akhir:
 `APPLIED` dengan `proof: {ppp:"UP", peer:"REPLY", mqtt:"READY"|"DISABLED", cycled:true}` dan
 `elapsed_ms` setelah PPP berganti siklus, peer membalas ping, dan MQTT utama tersambung lewat
-link baru; atau `OUTCOME_UNKNOWN` dengan `reason` `PPP_RECOVERY_TIMEOUT`/`PPP_CYCLE_NOT_OBSERVED`.
+link baru; atau `OUTCOME_UNKNOWN` dengan `reason` `T900_USB_MISSING`, `MQTT_NOT_RECOVERED`,
+`PPP_RECOVERY_TIMEOUT`, atau `PPP_CYCLE_NOT_OBSERVED`. Bila link pulih setelah ACK timeout itu,
+hanya snapshot lokal Edge yang berubah (`link.ppp_recovery.late: true`); tidak ada ACK kedua.
 Restart PPP memakai jalur sendiri di Edge: tidak ditolak `BUSY` oleh mutasi SDR, tetapi ditolak
 `PPP_RESTART_IN_PROGRESS` selama restart lain berjalan/dipantau dan `PPP_RESTART_TOO_SOON` dalam
 15 s setelah permintaan sebelumnya. Helper menerima unit `active`, `failed`, dan

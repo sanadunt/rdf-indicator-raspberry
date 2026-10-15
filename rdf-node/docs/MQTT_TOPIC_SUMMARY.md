@@ -42,8 +42,9 @@ memakai operasi remote yang aktif. Plaintext mengekspos credential dan payload; 
 pada link privat terisolasi/tepercaya. MQTT memakai Clean Start dan Session Expiry 0; reconnect
 membuat sesi baru tanpa replay offline. QoS 2 dan persistent broker session tidak didukung.
 Backoff reconnect di-reset setelah sesi stabil minimal 20 s, PINGREQ juga dikirim saat broker diam
-walaupun telemetry QoS 0 terus terkirim, dan Agent mempercepat reconnect client utama saat PPP
-kembali; lihat [MQTT_GROUND.md](MQTT_GROUND.md#reconnect-keepalive-dan-pemulihan-ppp).
+walaupun telemetry QoS 0 terus terkirim, PINGRESP yang terlambat karena TCP masih menguras antrean
+pada link lambat ditoleransi sampai 4 kali keepalive, dan Agent mempercepat reconnect client utama
+saat PPP kembali; lihat [MQTT_GROUND.md](MQTT_GROUND.md#reconnect-keepalive-dan-pemulihan-ppp).
 
 ### Broker cadangan
 
@@ -585,8 +586,10 @@ Status yang dikenal jurnal mencakup `ACCEPTED`, `APPLYING`, `VERIFYING`, `REBOOT
 
 Untuk `ppp.restart`, ACK berurutan `ACCEPTED`, `PPP_RESTART_REQUESTED` (`accepted_by_systemd`,
 `requested_ms`, `service`), lalu ACK akhir dari pemantau link Edge: `APPLIED` dengan
-`proof: {ppp, peer, mqtt, cycled}` dan `elapsed_ms`, atau `OUTCOME_UNKNOWN` dengan `reason`
-`PPP_RECOVERY_TIMEOUT`/`PPP_CYCLE_NOT_OBSERVED`, `phase`, `steps`, dan `elapsed_ms` setelah 120 s.
+`proof: {ppp, peer, mqtt, cycled}` dan `elapsed_ms`, atau `OUTCOME_UNKNOWN` setelah 120 s dengan
+`phase`, `steps`, `elapsed_ms`, dan `reason` `T900_USB_MISSING`, `MQTT_NOT_RECOVERED`,
+`PPP_RECOVERY_TIMEOUT`, atau `PPP_CYCLE_NOT_OBSERVED`. Link yang pulih setelah ACK timeout itu tidak
+menghasilkan ACK baru; hanya snapshot lokal Edge yang menandainya (`late: true`).
 Bila helper menolak atau gagal, ACK akhirnya `FAILED` atau `OUTCOME_UNKNOWN` dengan `error`. ACK
 akhir dapat hilang bila link utama belum pulih; Ground dapat memakai `operation.get`. Record
 operasi publik di hasil `operation.get` kini juga memuat field aditif `origin`

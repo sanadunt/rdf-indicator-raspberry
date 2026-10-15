@@ -151,16 +151,21 @@ Restart berjalan di lane worker sendiri sehingga operasi SDR (`BUSY`) tidak meng
 hanya satu restart diamati pada satu waktu (`PPP_RESTART_IN_PROGRESS`) dan jarak minimum
 antar-request 15 detik (`PPP_RESTART_TOO_SOON`).
 
-Setiap invokasi helper memeriksa unit di bawah lock helper: `LoadState=loaded`, `Job=0`, dan
+Setiap invokasi helper memeriksa unit di bawah lock helper: `LoadState=loaded`, tanpa job antre
+(`Job=` kosong, yang memang dicetak systemd untuk unit tanpa job; `0` juga diterima), dan
 `ActiveState` `active`, `failed`, atau `activating` dengan `SubState=auto-restart`; unit
 `inactive` hanya boleh di-start ulang dari panel lokal. `PPP_RESTART_REQUESTED` berarti systemd
 menerima request. Setelah itu Edge mengamati link: PPP turun/naik (interface atau timestamp/
 `NRestarts` unit berubah), interface PPP `UP`, ping ke peer Ground, lalu MQTT utama siap dengan
 session baru atau trafik broker baru. Edge menandai operasi `APPLIED` dengan bukti tersebut, atau
-`OUTCOME_UNKNOWN` (`PPP_RECOVERY_TIMEOUT`/`PPP_CYCLE_NOT_OBSERVED`) setelah 120 detik. Progresnya
-tampil di `link.ppp_recovery` pada snapshot. Ground tetap memakai reconcile sendiri: `APPLIED`
-di Ground hanya setelah health fresh yang lebih baru pada session sama. Request Ground tidak bisa
-dikirim setelah seluruh MQTT Control putus, dan hasil unknown tidak diulang otomatis.
+`OUTCOME_UNKNOWN` setelah 120 detik dengan alasan dari bukti saat itu (`T900_USB_MISSING`,
+`MQTT_NOT_RECOVERED`, `PPP_RECOVERY_TIMEOUT`, atau `PPP_CYCLE_NOT_OBSERVED`). Progresnya tampil di
+`link.ppp_recovery` pada snapshot, 90 detik setelah selesai menurut jam monotonic. Selama record
+`TIMEOUT` itu masih tampil, pemantau tetap menilai bukti; link yang pulih terlambat mengubah
+tampilan menjadi `DONE` dengan `late: true` tanpa menulis ulang jurnal atau ACK. Ground tetap
+memakai reconcile sendiri: `APPLIED` di Ground hanya setelah health fresh yang lebih baru pada
+session sama. Request Ground tidak bisa dikirim setelah seluruh MQTT Control putus, dan hasil
+unknown tidak diulang otomatis.
 
 ### Shutdown OS
 

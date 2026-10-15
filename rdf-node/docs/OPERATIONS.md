@@ -17,8 +17,11 @@ dipasang manual dari `deploy/examples/t900/`, dan juga harus dikerjakan dengan a
    `Config > Login > Kontrol > Raspberry > Restart T900` (perlu approval satu kali
    `sudo rdf-node controls approve --ppp-restart`). Terbang hanya setelah kartu progres
    menampilkan **Tersambung ke Ground ✓** dan Ground kembali menerima health.
-4. Bila hasilnya **Belum tersambung dalam 120 dtk**, periksa pppd Ubuntu, kabel, daya, dan
-   antena sebelum mencoba lagi. Jangan mengulang tanpa batas; kumpulkan diagnosis lebih dahulu.
+4. Bila hasilnya **Belum tersambung dalam 120 dtk**, lihat tab Link dulu: link yang pulih sedikit
+   setelah batas membuat kartu hijau dan **Coba lagi** disembunyikan; jangan restart lagi. Bila
+   masih putus, ikuti alasan di kartu (`T900_USB_MISSING`: kabel/daya radio; `MQTT_NOT_RECOVERED`:
+   broker Ground/TLS/akun, bukan radio; lainnya: pppd Ubuntu, kabel, daya, antena) sebelum
+   mencoba lagi. Jangan mengulang tanpa batas; kumpulkan diagnosis lebih dahulu.
 
 Langkah lengkap, arti setiap langkah progres, dan kode penolakan ada di
 [T900_PPP.md](T900_PPP.md#3-prosedur-pra-terbang).
@@ -102,6 +105,9 @@ sudo bash /opt/rdf-node/current/scripts/rollback.sh
 Rollback mengubah current ke previous dan try-restart service baru, bukan PPP/SDR.
 Ia tidak merollback database, settings RF, credential atau perubahan hardware. Untuk data
 schema yang berubah pada versi mendatang, backup dan migration policy tetap diperlukan.
+Asal command dan nilai sebelum perubahan disimpan di tabel tambahan `operation_meta`; tabel
+`operations` tidak berubah, jadi rilis sebelumnya tetap dapat menulis jurnal setelah rollback dan
+hanya mengabaikan tabel tambahan itu.
 
 ## Ground writes and broker trust boundary
 
@@ -175,12 +181,19 @@ Gejala dan langkah singkat; data diagnosis lengkap ada di
 
 | Gejala | Langkah |
 |---|---|
-| `T900 USB` `MISSING` atau `IDENTITY_MISMATCH` | Periksa kabel/port dan alias `/dev/t900`; `udevadm info --query=property --name=/dev/t900` harus cocok dengan `link.expected_*`. |
-| `PPP` `DOWN`, `Layanan PPP` `ACTIVE` | pppd hidup tetapi link belum terbentuk; periksa `journalctl -u t900-ppp.service` dan pppd Ubuntu. |
-| `Layanan PPP` `FAILED`/`INACTIVE` | Tombol Restart T900 lokal dapat menyalakannya lagi; pasang drop-in `Restart=always` agar pulih sendiri. |
+| `T900 USB` `MISSING` | Radio tidak terdeteksi. Periksa kabel, port, dan daya radio. Restart T900 tidak membantu; konfirmasi dan kartu progres menampilkan peringatan. pppd yang masih berjalan dengan `persist` tersambung lagi sendiri setelah radio terdeteksi. |
+| `T900 USB` `IDENTITY_MISMATCH` | Alias `/dev/t900` ada tetapi VID/PID/`ID_PATH` tidak sama dengan `link.expected_*`; biasanya config atau port yang berbeda, bukan radio hilang. `udevadm info --query=property --name=/dev/t900` harus cocok dengan `link.expected_*`. |
+| `PPP` `DOWN`, `Layanan PPP` `ACTIVE` | pppd hidup tetapi link belum terbentuk; periksa `journalctl -u t900-ppp.service` dan pppd Ubuntu. Pada unit `Type=oneshot` (`pon`), `ACTIVE` tidak membuktikan pppd masih hidup. |
+| `Layanan PPP` `ACTIVATING` lama, Restart T900 ditolak `PPP_SERVICE_NOT_ACTIVE` | Unit `Type=notify` (`up_sdnotify`) atau `forking` + `updetach` menunggu link pertama; ubah ke `Type=simple` + `nodetach` ([T900_PPP.md](T900_PPP.md#63-systemd-unit-ppp-hidup-lagi-sendiri)). |
+| `Layanan PPP` `NOT_LOADED` setelah memasang drop-in | `systemctl show t900-ppp.service -p LoadState`; bila `bad-setting`, cari `Refusing` di `journalctl -u t900-ppp.service -b`. `Restart=always` ditolak systemd untuk `Type=oneshot`. |
+| `Layanan PPP` `FAILED`/`INACTIVE` | Tombol Restart T900 lokal dapat menyalakannya lagi; pasang drop-in `Restart=always` agar pulih sendiri (unit `oneshot` diubah dulu). |
 | `restart N` di `Layanan PPP` terus naik | pppd sering keluar; cari `Modem hangup`, echo timeout, atau USB disconnect di log. |
+| Restart T900 berakhir `T900_USB_MISSING` | Radio Raspberry tidak terdeteksi saat batas 120 s; periksa kabel/daya radio sebelum mencoba lagi. |
+| Restart T900 berakhir `MQTT_NOT_RECOVERED` | PPP dan ping Ground pulih, MQTT utama belum; periksa broker Ground, error `MQTT CTRL` di tab Link, TLS/jam, dan akun/ACL. Jangan cabut-colok T900. |
 | Restart T900 berakhir `PPP_CYCLE_NOT_OBSERVED` | Tidak ada bukti unit/interface berganti siklus; periksa `systemctl status t900-ppp.service`. |
-| Restart T900 berakhir `PPP_RECOVERY_TIMEOUT` | PPP berganti siklus tetapi Ground belum membalas atau MQTT belum siap; periksa sisi Ubuntu, daya, dan antena. |
+| Restart T900 berakhir `PPP_RECOVERY_TIMEOUT` | PPP berganti siklus tetapi PPP/ping belum pulih; periksa sisi Ubuntu, daya, dan antena. |
+| Kartu kuning, lalu hijau "setelah batas 120 dtk" | Link pulih terlambat (`late: true`); CMD tetap `OUTCOME_UNKNOWN`. Tidak perlu restart lagi. Selalu lihat tab Link sebelum menekan **Coba lagi**. |
+| Kartu kuning **Hasil restart T900 belum pasti** | Helper timeout/socket gagal; restart mungkin sudah terjadi. Lihat tab Link dulu. |
 | Ditolak `PPP_RESTART_TOO_SOON` / `PPP_RESTART_IN_PROGRESS` | Tunggu 15 s atau sampai pemantauan sebelumnya selesai (maks. 120 s). |
 | Hanya pulih setelah cabut-colok T900 | Lihat [T900_PPP.md](T900_PPP.md#5-mengapa-cabut-colok-t900-berhasil) dan terapkan bagian 6 di kedua sisi. |
 
@@ -232,16 +245,21 @@ perlu diuji pada perangkat; kelulusan test fixture/unit tidak membuktikannya.
 Untuk acceptance T900 dengan pengawasan, periksa dahulu unit fixed ini secara read-only:
 
 ```bash
-systemctl show t900-ppp.service -p LoadState -p ActiveState -p SubState -p Job -p NRestarts
+systemctl show t900-ppp.service -p Type -p LoadState -p ActiveState -p SubState -p Job -p NRestarts
 ```
 
-Pastikan `LoadState=loaded` dan `Job=0`. Panel lokal dan Ground dapat me-restart unit `active`,
-`failed`, atau `activating/auto-restart`; `inactive` hanya dari panel lokal. Lakukan hanya dalam
+Pastikan `LoadState=loaded` dan `Job=` kosong. systemd tidak menulis `Job=0` untuk unit tanpa job;
+nomor job berarti job masih antre. `Type=simple` dengan pppd `nodetach` disarankan
+([T900_PPP.md](T900_PPP.md#63-systemd-unit-ppp-hidup-lagi-sendiri)). Panel lokal dan Ground dapat
+me-restart unit `active`, `failed`, atau `activating/auto-restart`; `inactive` hanya dari panel
+lokal. Lakukan hanya dalam
 test window terawasi dengan akses lokal/LAN cadangan. Catat untuk setiap uji: asal permintaan,
 waktu tiap langkah kartu progres (`cycled`, `ppp_up`, `peer_reply`, `mqtt_ready`), stage akhir
 Edge (`APPLIED` atau `OUTCOME_UNKNOWN` beserta `reason`), waktu sampai health fresh di Ground, dan
 waktu sampai Angular kembali. Ground bawaan melaporkan `APPLIED` dari health baru pada sesi yang
 sama; itu tidak membuktikan state unit PPP. Uji juga restart dari unit `failed`, restart lokal saat
-clock belum sinkron, dan restart saat verifikasi SDR sedang berjalan. Jika MQTT tidak kembali,
+clock belum sinkron, restart saat verifikasi SDR sedang berjalan, restart saat T900 Raspberry
+dicabut (peringatan USB dan alasan `T900_USB_MISSING`), dan link yang pulih sedikit setelah 120 s
+(kartu hijau dengan `late: true`, CMD tetap `OUTCOME_UNKNOWN`). Jika MQTT tidak kembali,
 pemulihan memerlukan panel lokal atau jalur management independen. Jangan mengulang hasil unknown
 secara otomatis.

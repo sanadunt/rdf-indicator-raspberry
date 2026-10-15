@@ -22,6 +22,9 @@ UNVERIFIED_REASONS=frozenset(('SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'))
 # Cost-byte/s reserves based on current Control fixtures; invalid-source reserve omits normal DoA.
 ANGULAR_CONTROL_BASELINE_VALID=800
 ANGULAR_CONTROL_BASELINE_INVALID=510
+# Bulk yields the shared PPP link while a Control PUBACK is this late or this many Bulk bytes are unACKed.
+BULK_YIELD_PENDING_MS=1000
+BULK_YIELD_BACKLOG_BYTES=2048
 
 class Agent:
     def __init__(self,cfg,demo=False):
@@ -822,7 +825,12 @@ class Agent:
                     else:
                         self.bulk_reason=None
                         interval=PROFILES[self.profile]['angular_s']
-                        if now>=due.get('angular',0) and d['q']!=self.last_angular_q:
+                        # Control goes first on the shared link: hold the next frame while a Control PUBACK
+                        # is late or the previous Bulk frame is still unACKed in the kernel (no 20 s pause).
+                        backlog=getattr(bulk,'socket_backlog',None)
+                        yield_link=(ctrl.pending_age_ms>BULK_YIELD_PENDING_MS or
+                                    (backlog is not None and backlog>BULK_YIELD_BACKLOG_BYTES))
+                        if not yield_link and now>=due.get('angular',0) and d['q']!=self.last_angular_q:
                             r=self.source.record
                             if r and r['q']==d['q']:
                                 data=self._live_angular(d,r,h,daq)

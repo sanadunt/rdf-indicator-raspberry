@@ -329,8 +329,12 @@ body.light #notices>*{box-shadow:0 4px 14px rgba(19,33,55,.18)}
 .notice-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
 .notice-title{display:flex;align-items:baseline;gap:7px;min-width:0;font-size:10.5px;font-weight:800;letter-spacing:.5px;white-space:nowrap;overflow:hidden}
 .notice-title time{font-weight:600;letter-spacing:0;color:var(--dim);font-variant-numeric:tabular-nums}
-.notice-body{font-size:12.5px;font-weight:600;line-height:15px;max-height:30px;overflow:hidden;overflow-wrap:anywhere}
-.notice-body em{font-style:normal}.notice-body em.progress{color:var(--accent)}
+.notice-body{font-size:12.5px;font-weight:600;line-height:15px;overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+/* The outcome (diterapkan / gagal: alasan) is its own line and is never clamped. */
+.notice-stage{font-style:normal;font-size:12px;font-weight:700;line-height:15px;overflow-wrap:anywhere}.notice-stage.progress{color:var(--accent)}
+/* Toast: last in the notices column, below banner and recovery card; hidden under an open dialog as before. */
+#notices>.toast{position:static;order:1;margin:0 6px;z-index:auto}
+#modal:not([hidden])~#notices>.toast{display:none}
 .notice-close{flex-shrink:0;height:38px;min-width:58px;padding:0 10px;font-size:12.5px;font-weight:700}
 .recovery{border:1px solid var(--accent);border-radius:10px;background:var(--bg);padding:2px 4px 5px 8px}
 .recovery[data-tone="good"]{border-color:var(--ok)}.recovery[data-tone="warn"]{border-color:var(--warn)}.recovery[data-tone="bad"]{border-color:var(--bad)}
@@ -359,15 +363,21 @@ body.light #notices>*{box-shadow:0 4px 14px rgba(19,33,55,.18)}
 .recovery[data-tone="bad"] li[data-state="fail"] .rdot{color:var(--bad)}
 .recovery-steps li[data-state="fail"] .rlabel{color:var(--warn)}.recovery[data-tone="bad"] li[data-state="fail"] .rlabel{color:var(--bad)}
 .recovery-steps li[data-state="off"] .rdot{border-style:dashed}
+.recovery-steps li[data-state="unknown"] .rdot{border-color:var(--warn);border-style:dashed;color:var(--warn)}
+.recovery-steps li[data-state="unknown"] .rlabel{color:var(--warn)}
 @keyframes spin{to{transform:rotate(360deg)}}
 .recovery-foot{display:flex;align-items:center;gap:8px;margin-top:4px;min-width:0}
-.recovery-reason{flex:1;min-width:0;font-size:11px;line-height:14px;font-weight:600;color:var(--dim);max-height:28px;overflow:hidden;overflow-wrap:anywhere}
-.recovery[data-tone="warn"] .recovery-reason{color:var(--warn)}.recovery[data-tone="bad"] .recovery-reason{color:var(--bad)}
+.recovery-reason{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;font-size:11px;line-height:14px;font-weight:600;color:var(--dim);overflow-wrap:anywhere}
+.recovery-reason:empty{display:none}
+.rline.good{color:var(--ok)}.rline.warn{color:var(--warn)}.rline.bad{color:var(--bad)}
 .recovery-retry{flex-shrink:0;height:40px;padding:0 12px;display:inline-flex;align-items:center;gap:6px;font-weight:700;border-color:var(--warn);color:var(--warn);background:var(--warn-soft)}
 .recovery-retry .ico{width:16px;height:16px}
 .recovery.compact .recovery-steps,.recovery.compact .recovery-foot{display:none}
 .recovery.compact .recovery-head{height:30px}
 #modalrecovery{flex-shrink:0}
+/* Restart T900 confirmation: the radio is missing on USB, so a PPP restart cannot help. */
+.dialog p.usb-warning{display:flex;align-items:flex-start;gap:6px;padding:5px 8px;border-radius:6px;background:var(--warn-soft);color:var(--warn);font-size:12px;line-height:15px;font-weight:600}
+.usb-warning .ico{width:15px;height:15px;flex-shrink:0;margin-top:0}
 #modalrecovery:empty,.dialog.keyboard-open #modalrecovery{display:none}
 /* Riwayat dialog */
 .dialog p.history-rejects{display:flex;align-items:center;gap:6px;margin:2px 0 4px;padding:5px 8px;border-radius:6px;background:var(--warn-soft);color:var(--warn);font-size:11.5px;line-height:14px;font-weight:600}

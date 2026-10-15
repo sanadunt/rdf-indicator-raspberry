@@ -65,9 +65,17 @@ mru 576
 nodefaultroute
 
 # --- Mode di bawah systemd ---
-# Bila unit memakai Type=simple, pppd harus tetap di foreground: aktifkan nodetach di sini atau
-# di ExecStart. Bila unit memakai Type=forking, JANGAN aktifkan. Salah pasangan membuat systemd
-# salah membaca status pppd (start timeout, atau pppd ganda saat Restart=always).
+# Cek: systemctl show t900-ppp.service -p Type
+# Disarankan Type=simple + nodetach: pppd tetap di foreground, unit langsung "active", dan
+# persist mengurus link. Aktifkan nodetach di sini atau di ExecStart.
+# Type=forking: JANGAN aktifkan nodetach, dan jangan pakai updetach.
+# Salah pasangan membuat systemd salah membaca status pppd (start timeout, atau pppd ganda saat
+# Restart=always).
+# JANGAN pakai updetach (Type=forking) atau up_sdnotify (Type=notify): unit tetap
+# activating/start sampai link PPP pertama terbentuk, sehingga tombol Restart T900 di panel Edge
+# ditolak PPP_SERVICE_NOT_ACTIVE selama radio putus, tepat saat dibutuhkan.
+# Type=oneshot (wrapper pon): lihat t900-ppp.service.d-10-recovery.conf sebelum memasang
+# Restart=always; systemd menolak kombinasi itu.
 #nodetach
 
 # --- Diagnosis sementara ---

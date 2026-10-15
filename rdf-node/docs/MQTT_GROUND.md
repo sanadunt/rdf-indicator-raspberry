@@ -310,8 +310,9 @@ PPP/radio. Token bucket dan coalescing mengurangi burst, bukan menjamin latency 
 Default pause setelah command/source/link issue dan resume20s stabil dipertahankan.
 Angular utama dipause `CONTROL_BACKLOG` hanya bila pesan tertua yang masih menunggu di outbox
 Control (bukan yang sedang dikirim) berumur lebih dari 3 s (`queue_age_ms`), atau PUBLISH QoS 1
-yang sedang dikirim menunggu PUBACK lebih dari 5 s (`pending_age_ms`). Satu PUBACK yang lambat
-pada link T900 tidak lagi memicu pause.
+yang sedang dikirim menunggu PUBACK lebih dari 2,5 s (`pending_age_ms`). PUBACK yang sedikit
+lambat pada link T900 (di bawah 2,5 s) tidak lagi memicu pause, tetapi Bulk tetap mengalah sebelum
+backlog Control menumpuk.
 
 ### Reconnect, keepalive, dan pemulihan PPP
 
@@ -330,6 +331,16 @@ Edge, serta client receiver Ground. Client cadangan memakai `mqtt.keepalive` dan
   terdeteksi walaupun telemetry QoS 0 terus terkirim. Bila PINGRESP tidak datang dalam
   `keepalive` detik setelah PINGREQ, sesi direset dengan `PING_TIMEOUT` lalu reconnect. Deteksi
   link mati butuh sekitar dua kali `keepalive`.
+- **Link lambat yang masih bekerja:** bila T900 membawa lebih sedikit dari beban yang ditawarkan,
+  PINGREQ antre di belakang data client sendiri dan PINGRESP datang terlambat. Client tidak
+  mereset sesi selama TCP masih maju, yaitu kernel masih memegang data yang belum di-ACK (atau
+  PINGREQ belum diserahkan ke kernel) dan broker mengirim ACK TCP dalam `keepalive` detik terakhir.
+  Toleransi ini paling lama 4 kali `keepalive` (default 60 s) sejak PINGREQ. Link mati tidak
+  mengirim ACK TCP, jadi tetap direset `keepalive` detik setelah PINGREQ, atau `keepalive` detik
+  setelah ACK TCP terakhir bila itu lebih lambat. Berlaku
+  untuk TCP, TLS, dan WebSocket; bila info socket Linux (`TIOCOUTQ`, `TCP_INFO`) tidak terbaca,
+  berlaku aturan tanpa toleransi. Tanpa toleransi ini, link marginal dapat memicu `PING_TIMEOUT`
+  palsu, Last Will `online:false`, dan status `MQTT utama` yang berkedip.
 - **Kick setelah PPP kembali:** saat interface PPP berubah dari tidak `UP` menjadi `UP`, atau ping
   peer kembali dibalas, Agent memanggil `kick()` pada client utama (Control dan Bulk). Client yang
   belum tersambung langsung mencoba lagi tanpa menunggu sisa backoff, dan backoff kembali ke awal.
