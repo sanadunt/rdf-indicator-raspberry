@@ -144,12 +144,28 @@ SDR, reboot, atau shutdown otomatis sebagai respons error.
 
 `ppp.restart` hanya menargetkan fixed unit `t900-ppp.service`; RDF Node tidak memasang,
 mengubah konfigurasi, atau memasukkannya ke ownership lifecycle SDR. Ground tidak memerlukan
-remote grant atau root approval per request. Setiap invokasi helper memeriksa
-`LoadState=loaded`, `ActiveState=active`, dan `Job=0` di bawah lock helper. `PPP_RESTART_REQUESTED`
-berarti systemd menerima request. Ground melaporkan `APPLIED` hanya setelah health fresh yang
-lebih baru pada session sama; status itu tidak membuktikan pemulihan PPP/MQTT di level unit.
-Request tidak bisa dikirim setelah seluruh MQTT Control putus, dan hasil unknown tidak diulang
-otomatis.
+remote grant atau root approval per request; tombol `Restart T900` di panel Edge memerlukan
+`sudo rdf-node controls approve --ppp-restart`. Restart lokal tidak diblok clock untrusted
+(Pi tanpa RTC mendapat NTP lewat link yang sedang dipulihkan) dan mengabaikan `base_rev`.
+Restart berjalan di lane worker sendiri sehingga operasi SDR (`BUSY`) tidak menghalanginya;
+hanya satu restart diamati pada satu waktu (`PPP_RESTART_IN_PROGRESS`) dan jarak minimum
+antar-request 15 detik (`PPP_RESTART_TOO_SOON`).
+
+Setiap invokasi helper memeriksa unit di bawah lock helper: `LoadState=loaded`, tanpa job antre
+(`Job=` kosong, yang memang dicetak systemd untuk unit tanpa job; `0` juga diterima), dan
+`ActiveState` `active`, `failed`, atau `activating` dengan `SubState=auto-restart`; unit
+`inactive` hanya boleh di-start ulang dari panel lokal. `PPP_RESTART_REQUESTED` berarti systemd
+menerima request. Setelah itu Edge mengamati link: PPP turun/naik (interface atau timestamp/
+`NRestarts` unit berubah), interface PPP `UP`, ping ke peer Ground, lalu MQTT utama siap dengan
+session baru atau trafik broker baru. Edge menandai operasi `APPLIED` dengan bukti tersebut, atau
+`OUTCOME_UNKNOWN` setelah 120 detik dengan alasan dari bukti saat itu (`T900_USB_MISSING`,
+`MQTT_NOT_RECOVERED`, `PPP_RECOVERY_TIMEOUT`, atau `PPP_CYCLE_NOT_OBSERVED`). Progresnya tampil di
+`link.ppp_recovery` pada snapshot, 90 detik setelah selesai menurut jam monotonic. Selama record
+`TIMEOUT` itu masih tampil, pemantau tetap menilai bukti; link yang pulih terlambat mengubah
+tampilan menjadi `DONE` dengan `late: true` tanpa menulis ulang jurnal atau ACK. Ground tetap
+memakai reconcile sendiri: `APPLIED` di Ground hanya setelah health fresh yang lebih baru pada
+session sama. Request Ground tidak bisa dikirim setelah seluruh MQTT Control putus, dan hasil
+unknown tidak diulang otomatis.
 
 ### Shutdown OS
 

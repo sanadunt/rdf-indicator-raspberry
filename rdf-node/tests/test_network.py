@@ -1,16 +1,172 @@
-import json,os,ssl,subprocess,tempfile,time,unittest
+import json,os,socket,ssl,subprocess,tempfile,threading,time,unittest
 from pathlib import Path
-from rdf_node.mqtt import Client
+from unittest import mock
+from rdf_node import mqtt as mqtt_module
+from rdf_node.mqtt import Client,Message,Outbox,PING_DRAIN_FACTOR,_link_draining,_tcp_progress
 from broker_fixture import Broker,wait,pkt,text,server_frame
+
+class LinkProxy:
+    """Loopback TCP relay in front of the broker fixture that stands in for the PPP/T900 link.
+    'up' relays both ways; 'down' drops live connections and closes new ones right after accept;
+    'blackhole' keeps sockets open but silently discards broker->client bytes (half-open link).
+    up_rate (bytes/s) throttles client->broker like a T900 carrying less than the offered load. The
+    smallest receive buffer keeps the backlog unACKed in the client's kernel, as on the real link."""
+    def __init__(self,target_port,mode='up',up_rate=None):
+        self.target_port=target_port;self.mode=mode;self.lock=threading.Lock();self.pairs=[];self.accepted=0
+        self.up_rate=up_rate;self.up_free=time.monotonic()
+        self.listener=socket.socket();self.listener.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+        if up_rate:self.listener.setsockopt(socket.SOL_SOCKET,socket.SO_RCVBUF,1)
+        self.listener.bind(('127.0.0.1',0));self.listener.listen(8);self.listener.settimeout(.1)
+        self.port=self.listener.getsockname()[1];self.stop_event=threading.Event()
+        self.thread=threading.Thread(target=self._accept,daemon=True);self.thread.start()
+    def _accept(self):
+        while not self.stop_event.is_set():
+            try:client,_=self.listener.accept()
+            except socket.timeout:continue
+            except OSError:return
+            with self.lock:self.accepted+=1;mode=self.mode
+            if mode=='down':client.close();continue
+            try:upstream=socket.create_connection(('127.0.0.1',self.target_port),timeout=2)
+            except OSError:client.close();continue
+            with self.lock:self.pairs.append((client,upstream))
+            threading.Thread(target=self._pump,args=(client,upstream,False),daemon=True).start()
+            threading.Thread(target=self._pump,args=(upstream,client,True),daemon=True).start()
+    def _pump(self,src,dst,to_client):
+        src.settimeout(.1);throttled=self.up_rate and not to_client
+        while not self.stop_event.is_set():
+            try:data=src.recv(256 if throttled else 8192)
+            except socket.timeout:continue
+            except OSError:break
+            if not data:break
+            if throttled:
+                with self.lock:
+                    self.up_free=max(self.up_free,time.monotonic())+len(data)/self.up_rate;delay=self.up_free-time.monotonic()
+                if delay>0:time.sleep(delay)
+            if to_client and self.mode=='blackhole':continue
+            try:dst.sendall(data)
+            except OSError:break
+        for sock in (src,dst):
+            try:sock.shutdown(socket.SHUT_RDWR)
+            except OSError:pass
+            sock.close()
+    def set_mode(self,mode):
+        with self.lock:
+            self.mode=mode;dropped=self.pairs if mode=='down' else []
+            if mode=='down':self.pairs=[]
+        for pair in dropped:
+            for sock in pair:
+                try:sock.shutdown(socket.SHUT_RDWR)
+                except OSError:pass
+    def stop(self):
+        self.set_mode('down');self.stop_event.set();self.listener.close();self.thread.join(1)
+
+class BackoffScheduleTests(unittest.TestCase):
+    """Drive the real Client._run with a fake clock and scripted sessions; record each reconnect wait."""
+    def run_schedule(self,script,kicks=(),reconnect_max=30):
+        c=Client(cfg={'reconnect_max':reconnect_max},client_id='backoff');clock=[1000.0];c._clock=lambda:clock[0]
+        steps=list(script);waits=[]
+        def session():
+            kind,seconds=steps.pop(0)
+            if kind=='fail':clock[0]+=.05;raise OSError('refused')
+            # 'up': CONNACK arrived, then the link dropped `seconds` later.
+            c._connected_at=clock[0];c.connected=True;clock[0]+=seconds;raise OSError('dropped')
+        def backoff_wait(seconds):
+            kicked=len(waits) in kicks;waits.append(seconds);clock[0]+=seconds
+            if not steps:c.stop_event.set()
+            return kicked
+        c._session=session;c._backoff_wait=backoff_wait;c._run()
+        self.assertTrue(all(0<=w-int(w)<=.3 for w in waits),waits)
+        self.assertEqual(c.reconnects,len(script))
+        return [int(w) for w in waits]
+    def test_never_connecting_grows_to_reconnect_max(self):
+        self.assertEqual(self.run_schedule([('fail',0)]*8),[1,2,4,8,16,30,30,30])
+        self.assertEqual(self.run_schedule([('fail',0)]*5,reconnect_max=5),[1,2,4,5,5])
+    def test_short_post_connack_sessions_back_off_instead_of_storming(self):
+        # SUBACK/PUBACK rejection, oversize packet or client-id takeover right after CONNACK (MQTT-2).
+        self.assertEqual(self.run_schedule([('up',.1)]*7),[1,2,4,8,16,30,30])
+    def test_stable_session_resets_backoff(self):
+        # Outage grows the delay to 30 s; each drop after a 10-minute session retries after ~1 s (MQTT-1).
+        script=[('fail',0)]*6+[('up',600)]*3+[('fail',0)]*2
+        self.assertEqual(self.run_schedule(script),[1,2,4,8,16,30,1,1,1,2,4])
+    def test_stable_threshold_is_twenty_seconds_after_connack(self):
+        script=[('fail',0)]*3+[('up',19.5),('up',20.5),('up',19.5)]
+        self.assertEqual(self.run_schedule(script),[1,2,4,8,1,2])
+    def test_kicked_wait_resets_backoff(self):
+        self.assertEqual(self.run_schedule([('fail',0)]*8,kicks={4}),[1,2,4,8,16,1,2,4])
+
+class KickTests(unittest.TestCase):
+    def test_kick_cuts_backoff_wait_short(self):
+        c=Client(cfg={},client_id='kick-wait');result=[]
+        t=threading.Thread(target=lambda:result.append((c._backoff_wait(30),time.monotonic())));started=time.monotonic();t.start()
+        time.sleep(.2);self.assertTrue(c.kick());t.join(3)
+        self.assertFalse(t.is_alive());self.assertTrue(result[0][0]);self.assertLess(result[0][1]-started,2)
+        self.assertFalse(c._wake.is_set())
+    def test_kick_is_noop_while_connected_and_stop_is_not_a_kick(self):
+        c=Client(cfg={},client_id='kick-connected');c.connected=True
+        self.assertFalse(c.kick());self.assertFalse(c._wake.is_set())
+        c.connected=False;result=[]
+        t=threading.Thread(target=lambda:result.append(c._backoff_wait(30)));started=time.monotonic();t.start()
+        time.sleep(.1);c.stop();t.join(3)
+        self.assertFalse(t.is_alive());self.assertEqual(result,[False]);self.assertLess(time.monotonic()-started,2)
+        self.assertFalse(c.kick())
+    def test_bare_stop_event_still_ends_backoff_wait(self):
+        c=Client(cfg={},client_id='kick-stop-event');result=[]
+        t=threading.Thread(target=lambda:result.append(c._backoff_wait(30)));t.start()
+        time.sleep(.1);c.stop_event.set();t.join(2)
+        self.assertFalse(t.is_alive());self.assertEqual(result,[False])
+
+class QueueAgeTests(unittest.TestCase):
+    def test_outbox_oldest_age(self):
+        o=Outbox()
+        self.assertEqual(o.oldest_age_ms(now=50.0),0)
+        o.offer(Message('a','t/a',b'1',0,False,None,2,10.0));o.offer(Message('b','t/b',b'2',0,False,None,1,12.0))
+        self.assertEqual(o.oldest_age_ms(now=13.25),3250)
+        o.offer(Message('a','t/a',b'3',0,False,None,2,13.0))  # supersede: the newer value replaces the old age
+        self.assertEqual(o.oldest_age_ms(now=13.25),1250)
+        self.assertEqual(o.oldest_age_ms(now=11.0),0)  # never negative
+    def test_queue_age_excludes_in_flight_message(self):
+        c=Client(cfg={},client_id='queue-age');c.connected=True
+        self.assertEqual(c.queue_age_ms,0);self.assertEqual(c.status()['queue_age_ms'],0)
+        self.assertTrue(c.offer('old','rdf/old',b'1',priority=0));self.assertTrue(c.offer('new','rdf/new',b'2',priority=1))
+        c.outbox.data['old'].offered-=2.5;c.outbox.data['new'].offered-=.5
+        self.assertTrue(2500<=c.queue_age_ms<2900,c.queue_age_ms)
+        self.assertTrue(2500<=c.status()['queue_age_ms']<2900)
+        in_flight=c.outbox.pop();self.assertEqual(in_flight.key,'old');c._publish=(in_flight,0,time.monotonic())
+        self.assertTrue(500<=c.queue_age_ms<900,c.queue_age_ms)
+        c.outbox.pop();self.assertEqual(c.queue_age_ms,0);self.assertEqual(c.status()['queue_age_ms'],0)
+
+class PingDrainProbeTests(unittest.TestCase):
+    def test_draining_needs_recent_ack_and_our_own_backlog(self):
+        self.assertTrue(_link_draining((5400,200),15))  # slow link: unACKed backlog, peer still ACKing
+        self.assertFalse(_link_draining((5400,15000),15))  # dead link: backlog but no ACK for keepalive
+        self.assertFalse(_link_draining((5400,16000),15,True))
+        self.assertFalse(_link_draining((0,200),15))  # PINGREQ ACKed and nothing queued: PINGRESP is lost
+        self.assertTrue(_link_draining((0,200),15,True))  # PINGREQ not yet handed to the kernel
+        self.assertFalse(_link_draining(None,15,True))  # probe failed: keep the old timeout
+        self.assertTrue(_link_draining((1,999),1));self.assertFalse(_link_draining((1,1000),1))
+    def test_probe_reads_tcp_and_fails_closed_elsewhere(self):
+        listener=socket.socket();listener.bind(('127.0.0.1',0));listener.listen(1)
+        client=socket.create_connection(listener.getsockname());server,_=listener.accept()
+        try:
+            client.sendall(b'x'*100);self.assertEqual(server.recv(100,socket.MSG_WAITALL),b'x'*100)
+            self.assertTrue(wait(lambda:(_tcp_progress(client) or (None,))[0]==0,2),_tcp_progress(client))
+            outq,last_ack_ms=_tcp_progress(client);self.assertEqual(outq,0);self.assertLess(last_ack_ms,2000)
+            self.assertIsNone(_tcp_progress(listener))  # not connected
+        finally:
+            for sock in (client,server,listener):sock.close()
+        self.assertIsNone(_tcp_progress(client))  # closed
+        a,b=socket.socketpair()
+        try:self.assertIsNone(_tcp_progress(a))  # not TCP: no TCP_INFO
+        finally:a.close();b.close()
 
 class NetworkTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.path=Path(self.tmp.name)
         self.creds=self.path/'creds.json';self.creds.write_text(json.dumps({'username':'test','password':'test-password'}))
-    def client(self,broker,subscriptions=(),callback=None,**extra):
+    def client(self,broker,subscriptions=(),callback=None,rate=10000,**extra):
         cfg={'host':'127.0.0.1','port':broker.port,'tls':False,'allow_insecure_loopback':True,'keepalive':5,'reconnect_max':5}
         cfg.update(extra)
-        c=Client(cfg=cfg,client_id='test-'+str(time.monotonic_ns()),credentials_file=str(self.creds),subscriptions=subscriptions,on_message=callback,rate=10000)
+        c=Client(cfg=cfg,client_id='test-'+str(time.monotonic_ns()),credentials_file=str(self.creds),subscriptions=subscriptions,on_message=callback,rate=rate)
         self.addCleanup(c.stop);c.start();return c
     def broker(self,**kw):
         b=Broker(**kw);self.addCleanup(b.stop);return b
@@ -38,6 +194,19 @@ class NetworkTests(unittest.TestCase):
             c.offer('bad','rdf/data',object(),on_error=errors.append)
         self.assertEqual(errors,['PUBLISH_PAYLOAD_ENCODE_FAILED'])
 
+    def test_socket_backlog_reports_unacked_bytes_while_connected(self):
+        c=Client(cfg={},client_id='offline-backlog')
+        self.assertIsNone(c.socket_backlog)
+        b=self.broker();link=self.proxy(b,'up',up_rate=2000);c=self.client(b,port=link.port)
+        self.assertTrue(wait(lambda:c.ready))
+        self.assertIsInstance(c.socket_backlog,int)
+        peak=[0];started=time.monotonic();n=0
+        while time.monotonic()-started<4 and peak[0]<=2048:
+            c.offer(f'bulk{n%4}','rdf/bulk',bytes(3000));n+=1
+            peak[0]=max(peak[0],c.socket_backlog or 0);time.sleep(.05)
+        self.assertGreater(peak[0],2048,c.status())
+        c.stop();self.assertIsNone(c.socket_backlog)
+
     def test_suback_failure_not_ready(self):
         b=self.broker(deny_sub='forbidden');c=self.client(b,[('forbidden',1,True)])
         self.assertTrue(wait(lambda:c.error=='SUBACK_REJECTED'));self.assertFalse(c.ready)
@@ -47,6 +216,88 @@ class NetworkTests(unittest.TestCase):
     def test_reconnect_creates_fresh_session(self):
         b=self.broker();c=self.client(b);self.assertTrue(wait(lambda:c.ready));g=c.generation;b.disconnect_all()
         self.assertTrue(wait(lambda:c.generation>g and c.ready,8))
+    def proxy(self,broker,mode='up',up_rate=None):
+        p=LinkProxy(broker.port,mode,up_rate);self.addCleanup(p.stop);return p
+    def test_kick_skips_remaining_backoff_after_link_returns(self):
+        b=self.broker();link=self.proxy(b,'down')
+        cfg={'host':'127.0.0.1','port':link.port,'tls':False,'keepalive':5,'reconnect_max':30}
+        c=Client(cfg=cfg,client_id='kick-'+str(time.monotonic_ns()),credentials_file=str(self.creds),rate=10000)
+        c._backoff_initial=30  # make the first wait long enough that only kick() can explain a prompt reconnect
+        self.addCleanup(c.stop);c.start()
+        self.assertTrue(wait(lambda:c.reconnects>=1 and link.accepted>=1,5),c.status())
+        link.set_mode('up');time.sleep(1)
+        self.assertFalse(c.connected);self.assertEqual(link.accepted,1)  # still waiting out the 30 s backoff
+        self.assertTrue(c.kick())
+        self.assertTrue(wait(lambda:c.ready,3),c.status())
+        g=c.generation;self.assertFalse(c.kick());time.sleep(.3)
+        self.assertEqual(c.generation,g);self.assertTrue(c.ready);self.assertEqual(link.accepted,2)
+    def test_pingreq_on_receive_silence_while_qos0_flows(self):
+        # The transmit side never idles for keepalive seconds, so only RX silence can trigger PINGREQ (MQTT-4).
+        b=self.broker();c=self.client(b,keepalive=1);self.assertTrue(wait(lambda:c.ready));g=c.generation
+        started=time.monotonic();n=0
+        while time.monotonic()-started<2.6:
+            self.assertTrue(c.offer('health','rdf/health',str(n).encode()));n+=1;time.sleep(.1)
+        self.assertGreaterEqual(b.mqtt_pingreq_count,2)
+        self.assertEqual(c.generation,g);self.assertTrue(c.ready);self.assertIsNone(c.error)
+        self.assertGreaterEqual(len([m for m in b.messages if m['topic']=='rdf/health']),20);self.assertFalse(b.errors)
+    def test_half_open_link_detected_while_qos0_flows(self):
+        b=self.broker();link=self.proxy(b);c=self.client(b,port=link.port,keepalive=1)
+        self.assertTrue(wait(lambda:c.ready));g=c.generation;link.set_mode('blackhole')
+        cut=time.monotonic();seen=[]
+        while time.monotonic()-cut<5 and not seen:
+            c.offer('health','rdf/health',b'x')  # QoS0 writes keep succeeding into the socket buffer
+            if c.error=='PING_TIMEOUT':seen.append(time.monotonic()-cut)
+            time.sleep(.05)
+        self.assertTrue(seen,c.status());self.assertLess(seen[0],3.5)
+        # The PINGREQ reached the broker; only its PINGRESP was lost on the way back.
+        self.assertGreaterEqual(b.mqtt_pingreq_count,1);self.assertFalse(c.connected);self.assertEqual(c.generation,g)
+    # Slow uplink: 8000 B/s, while the client's bucket offers ~12300 B/s of 1000-byte QoS0 publishes
+    # (cost 1014+142 per packet), so the backlog delay grows ~0.5 s per second. With keepalive 1 the
+    # PINGREQ queued at ~2.5 s is answered after ~1.3 s; the one at ~4.8 s after ~2.4 s (< 4*keepalive).
+    SLOW_UPLINK_RATE=8000;SLOW_OFFER_RATE=14000
+    def offer_over_slow_uplink(self,b,link,seconds,**extra):
+        """Nothing is subscribed, so PINGRESP is the only packet the client ever receives."""
+        verdicts=[];real=_link_draining
+        def spy(*args):
+            verdict=real(*args);verdicts.append(verdict);return verdict
+        patcher=mock.patch.object(mqtt_module,'_link_draining',spy);patcher.start();self.addCleanup(patcher.stop)
+        c=self.client(b,port=link.port,keepalive=1,rate=self.SLOW_OFFER_RATE,**extra)
+        self.assertTrue(wait(lambda:c.ready,6),c.status());g=c.generation
+        payload=b'p'*1000;errors=[];started=time.monotonic()
+        while time.monotonic()-started<seconds:
+            c.offer('bulk','rdf/bulk',payload)
+            if c.error and c.error not in errors:errors.append(c.error)
+            time.sleep(.01)
+        return c,g,errors,verdicts
+    def assert_slow_uplink_survived(self,b,c,g,errors,verdicts):
+        self.assertEqual(errors,[],c.status());self.assertTrue(c.ready);self.assertEqual(c.generation,g)
+        self.assertEqual(c.reconnects,0)
+        # The tolerance was really exercised: a PINGRESP came later than keepalive while TCP drained.
+        self.assertIn(True,verdicts,c.status())
+        self.assertGreaterEqual(b.mqtt_pingreq_count,2)
+        self.assertGreaterEqual(len([m for m in b.messages if m['topic']=='rdf/bulk']),20);self.assertFalse(b.errors)
+    def test_slow_uplink_below_offered_load_is_not_a_ping_timeout(self):
+        b=self.broker();link=self.proxy(b,up_rate=self.SLOW_UPLINK_RATE)
+        c,g,errors,verdicts=self.offer_over_slow_uplink(b,link,5)
+        self.assert_slow_uplink_survived(b,c,g,errors,verdicts)
+        # The same slow link with the broker->client direction gone is still found, within
+        # PING_DRAIN_FACTOR*keepalive of the last PINGREQ even while the uplink keeps draining.
+        link.set_mode('blackhole');cut=time.monotonic();seen=[]
+        while time.monotonic()-cut<(PING_DRAIN_FACTOR+1)*1+3 and not seen:
+            c.offer('bulk','rdf/bulk',b'p'*1000)
+            if c.error=='PING_TIMEOUT':seen.append(time.monotonic()-cut)
+            time.sleep(.01)
+        self.assertTrue(seen,c.status());self.assertLess(seen[0],(PING_DRAIN_FACTOR+1)*1+1.5)
+        self.assertEqual(c.generation,g)
+    def test_slow_uplink_over_wss_is_not_a_ping_timeout(self):
+        # Same probe through TLS (SSLSocket) and WebSocket framing.
+        if not __import__('shutil').which('openssl'):self.skipTest('openssl unavailable')
+        cert=self.path/'cert.pem';key=self.path/'key.pem'
+        subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-keyout',str(key),'-out',str(cert),'-days','1','-subj','/CN=localhost','-addext','subjectAltName=IP:127.0.0.1'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.load_cert_chain(cert,key)
+        b=self.broker(tls_context=ctx,websocket=True);link=self.proxy(b,up_rate=self.SLOW_UPLINK_RATE)
+        c,g,errors,verdicts=self.offer_over_slow_uplink(b,link,5,tls=True,ca_file=str(cert),transport='websocket',websocket_path='/mqtt')
+        self.assert_slow_uplink_survived(b,c,g,errors,verdicts)
     def test_retained_command_flag_preserved(self):
         b=self.broker();messages=[];r=self.client(b,[('rdf/cmd',1,True)],lambda *args:messages.append(args));p=self.client(b)
         self.assertTrue(wait(lambda:r.ready and p.ready));p.offer('c','rdf/cmd',b'{}',qos=1,retain=True)

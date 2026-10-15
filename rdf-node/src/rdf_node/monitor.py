@@ -13,6 +13,18 @@ def run(args,timeout=2):
         return p.stdout[:65536].strip() if p.returncode==0 else None
     except (OSError,subprocess.TimeoutExpired): return None
 
+def ppp_service_state():
+    # The PPP unit is site-owned; read it unprivileged like the engine unit (fixed name, same as the helper).
+    out=run(['systemctl','show','t900-ppp.service','--no-pager','-p','LoadState','-p','ActiveState',
+             '-p','SubState','-p','NRestarts','-p','ActiveEnterTimestampMonotonic'])
+    if not out: return {'state':'UNKNOWN','substate':None,'restarts':None,'since':None}
+    vals=dict(x.split('=',1) for x in out.splitlines() if '=' in x)
+    if vals.get('LoadState')!='loaded': return {'state':'NOT_LOADED','substate':None,'restarts':None,'since':None}
+    try: restarts=int(vals.get('NRestarts',''))
+    except ValueError: restarts=None
+    return {'state':(vals.get('ActiveState') or 'UNKNOWN').upper(),'substate':vals.get('SubState') or None,
+            'restarts':restarts,'since':vals.get('ActiveEnterTimestampMonotonic') or None}
+
 def probe_peer(interface,target):
     if not interface: return 'NO_INTERFACE'
     try:
@@ -29,8 +41,13 @@ class Monitor:
         self.data=dict(cpu_percent=None,memory_percent=None,temperature_c=None,disk_free_percent=None,
                        uptime_s=None,clock_state='UNTRUSTED',clock_trusted=False,usb='UNKNOWN',usb_count=None,
                        ppp='DOWN',interface=None,ppp_probe='UNKNOWN',tx_kbit_s=None,rx_kbit_s=None,
-                       service_state='UNKNOWN',substate=None,generation=None,cgroup_empty=None,throttled=None,undervoltage=None)
+                       service_state='UNKNOWN',substate=None,generation=None,cgroup_empty=None,throttled=None,undervoltage=None,
+                       ppp_service={'state':'UNKNOWN','substate':None,'restarts':None,'since':None})
         self.prev_cpu=None; self.prev_net=None
+        # While a PPP restart is being observed, probe the link every loop instead of every 2nd/5th.
+        self.fast_until=0.0
+    def fast_probe(self,seconds=150):
+        self.fast_until=max(self.fast_until,time.monotonic()+seconds)
     def snapshot(self):
         with self.lock: return dict(self.data)
     def start(self):
@@ -45,7 +62,7 @@ class Monitor:
             except Exception: pass
             n+=1; self.stop_event.wait(1)
     def probe(self,n):
-        d={}
+        d={}; fast=time.monotonic()<self.fast_until
         try:
             fields=list(map(int,Path('/proc/stat').read_text().splitlines()[0].split()[1:9]))
             total=sum(fields); idle=fields[3]+fields[4]
@@ -67,6 +84,8 @@ class Monitor:
             except OSError: pass
             clock=run(['timedatectl','show','-p','NTPSynchronized','--value'])
             d['clock_trusted']=clock=='yes'; d['clock_state']='SYNCED' if clock=='yes' else 'UNTRUSTED'
+        if n%2==0 or fast:
+            d['ppp_service']=ppp_service_state()
         if n%2==0:
             unit=self.cfg['link']['engine_service']
             if unit:
@@ -90,6 +109,7 @@ class Monitor:
                             elif not base.exists() and d['service_state'] in ('INACTIVE','FAILED'):
                                 d['cgroup_empty']=True
                         except (OSError,ValueError): pass
+        if n%2==0 or fast:
             ip=run(['ip','-j','addr','show'])
             d.update(ppp='DOWN',interface=None)
             if ip:
@@ -116,6 +136,8 @@ class Monitor:
             except (OSError,ValueError): pass
         else:
             self.prev_net=None; d['tx_kbit_s']=None; d['rx_kbit_s']=None
+        if fast and n%5:
+            d['ppp_probe']=probe_peer(iface if ppp=='UP' else None,self.cfg['link']['peer_ip'])
         if n%5==0:
             alias=self.cfg['link']['serial_alias']; d['usb']='MISSING'
             if Path(alias).exists():

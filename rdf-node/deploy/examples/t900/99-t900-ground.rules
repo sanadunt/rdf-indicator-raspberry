@@ -1,0 +1,36 @@
+# CONTOH SAJA - TIDAK dipasang otomatis oleh install.sh RDF Node (termasuk --ground).
+# Sisi Ubuntu/Ground: alias stabil /dev/t900-ground untuk adapter USB-serial radio T900,
+# supaya pppd Ground tidak bergantung pada nomor /dev/ttyUSBn yang dapat berubah setelah
+# cabut-colok atau reboot.
+#
+# Sebelum memasang:
+#   1. Ganti GANTI_ID_PATH_GROUND dengan nilai ID_PATH port USB tempat T900 dicolok, dari:
+#        udevadm info --query=property --name=/dev/ttyUSB0 | grep -E '^(ID_PATH|ID_VENDOR_ID|ID_MODEL_ID|ID_SERIAL_SHORT)='
+#      Contoh format (PC/laptop, satu port tertentu): pci-0000:00:14.0-usb-0:3:1.0
+#   2. Pastikan VID/PID sesuai hasil udevadm (contoh ini CH340: 1a86:7523).
+#   3. Arahkan opsi device pppd Ground ke /dev/t900-ground, lalu selalu colok T900 ke port
+#      fisik yang sama.
+#
+# Pasang manual (lihat README.md di folder ini):
+#   sudo install -m 0644 99-t900-ground.rules /etc/udev/rules.d/99-t900-ground.rules
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=tty --action=add
+#   ls -l /dev/t900-ground && readlink -f /dev/t900-ground
+#
+# Ubuntu: bila ttyUSB untuk CH340 (1a86:7523) hilang sesaat setelah dicolok dan log kernel
+# menunjukkan "ch341-uart converter now disconnected", periksa paket brltty, yang di sebagian
+# rilis Ubuntu mengklaim ID USB tersebut. Nonaktifkan/hapus hanya bila brltty tidak dipakai.
+
+ACTION=="remove", GOTO="rdf_t900_ground_end"
+SUBSYSTEM!="tty", GOTO="rdf_t900_ground_end"
+KERNEL!="ttyUSB[0-9]*", GOTO="rdf_t900_ground_end"
+
+# Opsi A (disarankan; CH340 umumnya tidak punya nomor seri unik): cocokkan port USB fisik.
+# ID_MM_DEVICE_IGNORE=1 mencegah ModemManager (umum terpasang di Ubuntu desktop) membuka port.
+ENV{ID_VENDOR_ID}=="1a86", ENV{ID_MODEL_ID}=="7523", ENV{ID_PATH}=="GANTI_ID_PATH_GROUND", SYMLINK+="t900-ground", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# Opsi B (hanya bila adapter punya ID_SERIAL_SHORT yang unik): hapus tanda # di baris bawah dan
+# beri tanda # pada Opsi A.
+#ENV{ID_VENDOR_ID}=="GANTI_VID", ENV{ID_MODEL_ID}=="GANTI_PID", ENV{ID_SERIAL_SHORT}=="GANTI_SERIAL", SYMLINK+="t900-ground", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+LABEL="rdf_t900_ground_end"

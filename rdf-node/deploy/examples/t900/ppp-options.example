@@ -1,0 +1,83 @@
+# CONTOH SAJA - TIDAK dipasang otomatis oleh install.sh RDF Node.
+# Opsi pppd untuk link PPP lewat radio T900. Nilai di bawah untuk sisi Raspberry/Edge;
+# baris berlabel "GROUND:" menunjukkan nilai pengganti untuk Ubuntu/Ground.
+# Semua opsi di file ini ada di pppd 2.4.x dan 2.5.x. Cek versi dan manual host:
+#   pppd --version ; man pppd
+#
+# Jangan langsung menimpa konfigurasi yang sudah berjalan. Bandingkan dulu:
+#   systemctl cat t900-ppp.service        (Ubuntu: unit PPP Ground milik site)
+#   ps -o args= -C pppd
+#   cat /etc/ppp/options /etc/ppp/peers/*
+# Pada banyak instalasi Debian/Ubuntu/Raspberry Pi OS, /etc/ppp/options bawaan sudah berisi
+# opsi seperti auth, crtscts, modem, dan lcp-echo-* dengan nilai lain. Opsi di file peers
+# (pppd call <nama>) dibaca sesudahnya dan menimpanya, jadi tulis ulang opsi penting di sini.
+#
+# Pemakaian umum: simpan sebagai /etc/ppp/peers/<nama-site> (root:root, 0644 atau lebih ketat),
+# lalu unit menjalankan "pppd call <nama-site>". Komentar pppd dimulai dengan # di awal kata;
+# contoh ini menaruh komentar di baris sendiri.
+
+# --- Perangkat dan kecepatan serial (baud SAMA di kedua sisi dan sama dengan setelan radio) ---
+# GROUND: /dev/t900-ground
+/dev/t900
+# Ganti dengan baud serial T900 yang dipakai site (catatan proyek: 57600). Placeholder ini
+# sengaja membuat pppd menolak start sampai diganti.
+GANTI_BAUD
+
+# --- Alamat IP lokal:peer (sesuai link.local_ip/link.peer_ip di config RDF Node) ---
+# GROUND: 10.90.0.1:10.90.0.2
+10.90.0.2:10.90.0.1
+
+# --- Link serial langsung, bukan modem ---
+# Link point-to-point privat tanpa autentikasi PPP. Keamanan MQTT tetap dari TLS, akun broker,
+# dan ACL; link privat sendiri bukan autentikasi.
+noauth
+# Abaikan garis kontrol modem (DCD); adapter USB-serial radio bukan modem dial-up.
+local
+# Flow control: pakai "crtscts" HANYA bila RTS/CTS benar-benar tersambung DAN aktif di radio
+# kedua sisi. Selain itu pakai nocrtscts. crtscts tanpa CTS dapat membuat TX macet lalu LCP
+# echo gagal.
+nocrtscts
+# Lock file UUCP agar program lain (mis. terminal serial) tidak ikut membuka port ini.
+lock
+
+# --- Pemulihan otomatis (SAMA di kedua sisi) ---
+# persist + maxfail 0: setelah link putus atau negosiasi gagal, pppd mencoba lagi tanpa batas.
+persist
+maxfail 0
+# Tunggu 5 s sebelum mencoba lagi.
+holdoff 5
+# Deteksi link mati: 6 echo gagal x 10 s = sekitar 60 s. Nilai HARUS SAMA di kedua sisi; sisi
+# yang lebih ketat memutus link untuk keduanya. Fade radio < ~60 s tidak memicu negosiasi ulang.
+lcp-echo-interval 10
+lcp-echo-failure 6
+# Opsional, hanya bila "man pppd" di KEDUA host mencantumkannya: kirim echo hanya saat tidak
+# ada trafik masuk sejak echo terakhir.
+#lcp-echo-adaptive
+
+# --- Ukuran frame (SAMA di kedua sisi) ---
+# Frame kecil: satu byte rusak di radio membuang lebih sedikit data.
+mtu 576
+mru 576
+
+# --- Routing ---
+# Jangan jadikan PPP default route. Broker cadangan dan trafik internet harus lewat LAN/uplink
+# lain, bukan ppp0. Cek: ip route get <host-cadangan>
+nodefaultroute
+
+# --- Mode di bawah systemd ---
+# Cek: systemctl show t900-ppp.service -p Type
+# Disarankan Type=simple + nodetach: pppd tetap di foreground, unit langsung "active", dan
+# persist mengurus link. Aktifkan nodetach di sini atau di ExecStart.
+# Type=forking: JANGAN aktifkan nodetach, dan jangan pakai updetach.
+# Salah pasangan membuat systemd salah membaca status pppd (start timeout, atau pppd ganda saat
+# Restart=always).
+# JANGAN pakai updetach (Type=forking) atau up_sdnotify (Type=notify): unit tetap
+# activating/start sampai link PPP pertama terbentuk, sehingga tombol Restart T900 di panel Edge
+# ditolak PPP_SERVICE_NOT_ACTIVE selama radio putus, tepat saat dibutuhkan.
+# Type=oneshot (wrapper pon): lihat t900-ppp.service.d-10-recovery.conf sebelum memasang
+# Restart=always; systemd menolak kombinasi itu.
+#nodetach
+
+# --- Diagnosis sementara ---
+# Log paket LCP/IPCP ke journal. Aktifkan hanya saat mencari masalah, lalu matikan lagi.
+#debug
