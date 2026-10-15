@@ -202,6 +202,8 @@ class CommandManager:
             with self.ppp_lock: self.ppp_active=None
     def _stage(self,r,stage,result=None):
         self.journal.update(r['id'],stage,result)
+        # Journal-only stages (APPLYING, VERIFYING, *_SCHEDULED) still change what the panel shows.
+        if hasattr(self.agent,'operation_seq'): self.agent.operation_seq+=1
     def _worker(self):
         while not self.stop_event.is_set():
             try: r,actor,link=self.queue.get(timeout=0.2)

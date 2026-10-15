@@ -589,7 +589,7 @@ class Agent:
         end=r['finished'] or time.monotonic()
         return {'id':r['id'],'origin':r['origin'],'phase':r['phase'],'steps':dict(r['steps']),'stage':r['stage'],
                 'reason':r['reason'],'started_ms':r['started_ms'],'elapsed_s':round(end-r['started'],1),
-                'timeout_s':self.PPP_RECOVERY_TIMEOUT_S}
+                'timeout_s':self.PPP_RECOVERY_TIMEOUT_S,'late':bool(r.get('late'))}
     def _kick_primary(self):
         for client in self.clients.values():
             kick=getattr(client,'kick',None)
@@ -605,8 +605,9 @@ class Agent:
         if not r: return
         now=time.monotonic()
         if r['finished']:
-            if now-r['finished']>self.PPP_RECOVERY_LINGER_S: self.ppp_recovery=None
-            return
+            if now-r['finished']>self.PPP_RECOVERY_LINGER_S: self.ppp_recovery=None; return
+            # A timed-out recovery keeps watching while it lingers, so a late recovery is shown too.
+            if r['phase']!='TIMEOUT': return
         steps=r['steps']; ctrl=self.clients.get('control'); svc=host.get('ppp_service') or {}
         cycled=(steps['cycled'] or ppp!='UP' or (svc.get('since'),svc.get('restarts'))!=r['svc0'] or
                 (ctrl is not None and r['gen0'] is not None and ctrl.generation!=r['gen0']))
@@ -620,9 +621,14 @@ class Agent:
                 (r['rx_at_up'] is not None and ctrl.rx_bytes>r['rx_at_up'])):
             # A fresh session, or broker traffic received after PPP returned, proves MQTT over the new link.
             steps['mqtt_ready']=True
-        r['phase']=('PEER_OK' if steps['peer_reply'] else 'PPP_UP' if steps['ppp_up'] else
-                    'RESTARTING' if cycled else 'REQUESTED')
+        progress=('PEER_OK' if steps['peer_reply'] else 'PPP_UP' if steps['ppp_up'] else
+                  'RESTARTING' if cycled else 'REQUESTED')
         done=steps['peer_reply'] and steps['mqtt_ready'] is not False
+        if r['finished']:
+            # The journal and ACK keep OUTCOME_UNKNOWN; only the panel view turns green.
+            if done: r['phase']='DONE'; r['late']=True; r['finished']=now
+            return
+        r['phase']=progress
         timed_out=now-r['started']>self.PPP_RECOVERY_TIMEOUT_S
         if not (done or timed_out): return
         elapsed=round((now-r['started'])*1000)
@@ -632,9 +638,11 @@ class Agent:
             r['phase']='DONE'
         else:
             stage='OUTCOME_UNKNOWN'; r['phase']='TIMEOUT'
-            r['reason']='PPP_RECOVERY_TIMEOUT' if cycled else 'PPP_CYCLE_NOT_OBSERVED'
-            result={'reason':r['reason'],'phase':'PEER_OK' if steps['peer_reply'] else 'PPP_UP' if steps['ppp_up'] else
-                    'RESTARTING' if cycled else 'REQUESTED','steps':dict(steps),'elapsed_ms':elapsed}
+            # Name the most likely cause from what the Edge already observed.
+            r['reason']=('T900_USB_MISSING' if host.get('usb')=='MISSING' else
+                         'MQTT_NOT_RECOVERED' if steps['peer_reply'] else
+                         'PPP_RECOVERY_TIMEOUT' if cycled else 'PPP_CYCLE_NOT_OBSERVED')
+            result={'reason':r['reason'],'phase':progress,'steps':dict(steps),'elapsed_ms':elapsed}
         r['stage']=stage; r['finished']=now
         try:
             self.journal.update(r['id'],stage,result)
@@ -788,7 +796,7 @@ class Agent:
                 if p_ready:
                     reason=source_reason
                     if reason is None and (not bulk or not bulk.ready): reason='BULK_NOT_READY'
-                    elif reason is None and (getattr(ctrl,'queue_age_ms',0)>3000 or ctrl.pending_age_ms>5000):
+                    elif reason is None and (getattr(ctrl,'queue_age_ms',0)>3000 or ctrl.pending_age_ms>2500):
                         reason='CONTROL_BACKLOG'
                     diagnostic_needed=reason is not None or now<self.bulk_resume_after
                     if (self.profile!='control' and diagnostic_needed and r and r['q']==d['q'] and

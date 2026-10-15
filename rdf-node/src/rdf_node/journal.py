@@ -15,10 +15,9 @@ class Journal:
         self.db.execute('PRAGMA synchronous=FULL')
         self.db.execute('CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)')
         self.db.execute('CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, hash TEXT NOT NULL, request TEXT NOT NULL, actor TEXT NOT NULL, stage TEXT NOT NULL, result TEXT NOT NULL, updated INTEGER NOT NULL)')
-        # Additive columns for existing Pi databases: where a command came from and what it changed.
-        columns={row[1] for row in self.db.execute('PRAGMA table_info(operations)')}
-        if 'link' not in columns: self.db.execute('ALTER TABLE operations ADD COLUMN link TEXT')
-        if 'meta' not in columns: self.db.execute("ALTER TABLE operations ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'")
+        # Where a command came from and what it changed. A side table keeps `operations` at its original
+        # shape, so a rolled-back release can still insert into the same database.
+        self.db.execute("CREATE TABLE IF NOT EXISTS operation_meta (id TEXT PRIMARY KEY, link TEXT, meta TEXT NOT NULL DEFAULT '{}')")
         self.db.commit()
     def close(self):
         with self.lock: self.db.close()
@@ -36,12 +35,16 @@ class Journal:
             rev=old.get('rev',0)+1
             self.set('config',{'rev':rev,'digest':h})
             return rev
+    SELECT=('SELECT o.id, o.hash, o.request, o.actor, o.stage, o.result, o.updated, m.link, m.meta '
+            'FROM operations o LEFT JOIN operation_meta m ON m.id=o.id')
+    @staticmethod
+    def _row(r):
+        return dict(id=r[0],hash=r[1],request=json.loads(r[2]),actor=r[3],stage=r[4],result=json.loads(r[5]),
+                    updated_ms=r[6],link=r[7],meta=json.loads(r[8] or '{}'))
     def lookup(self,id):
         with self.lock:
-            r=self.db.execute('SELECT hash, request, actor, stage, result, updated, link, meta FROM operations WHERE id=?',(id,)).fetchone()
-            if not r: return None
-            return dict(id=id,hash=r[0],request=json.loads(r[1]),actor=r[2],stage=r[3],result=json.loads(r[4]),updated_ms=r[5],
-                        link=r[6],meta=json.loads(r[7] or '{}'))
+            r=self.db.execute(self.SELECT+' WHERE o.id=?',(id,)).fetchone()
+            return self._row(r) if r else None
     def accept(self,request,actor,link=None,meta=None):
         with self.lock,self.db:
             old=self.lookup(request['id'])
@@ -49,8 +52,10 @@ class Journal:
             if old:
                 if old['hash']!=h: raise ValueError('COMMAND_ID_CONFLICT')
                 return False,old
-            self.db.execute('INSERT INTO operations (id,hash,request,actor,stage,result,updated,link,meta) VALUES (?,?,?,?,?,?,?,?,?)',
-                (request['id'],h,compact(request).decode(),actor,'ACCEPTED','{}',now_ms(),link,compact(meta or {}).decode()))
+            self.db.execute('INSERT INTO operations (id,hash,request,actor,stage,result,updated) VALUES (?,?,?,?,?,?,?)',
+                (request['id'],h,compact(request).decode(),actor,'ACCEPTED','{}',now_ms()))
+            self.db.execute('INSERT OR REPLACE INTO operation_meta (id,link,meta) VALUES (?,?,?)',
+                (request['id'],link,compact(meta or {}).decode()))
             return True,self.lookup(request['id'])
     def update(self,id,stage,result=None):
         with self.lock,self.db:
@@ -59,28 +64,27 @@ class Journal:
         return self.lookup(id)
     def latest(self,n=20,skip_ops=(),links=None):
         """Newest operations first; skip_ops drops ops by name, links keeps only those origins."""
-        columns='SELECT id, hash, request, actor, stage, result, updated, link, meta FROM operations'
+        columns=self.SELECT
         where=[];params=[]
         if links:
-            where.append(f"link IN ({','.join('?'*len(links))})");params.extend(links)
+            where.append(f"m.link IN ({','.join('?'*len(links))})");params.extend(links)
         with self.lock:
             if skip_ops:
                 try:
-                    clause=f"coalesce(json_extract(request,'$.op'),'') NOT IN ({','.join('?'*len(skip_ops))})"
-                    sql=columns+' WHERE '+' AND '.join(where+[clause])+' ORDER BY updated DESC LIMIT ?'
+                    clause=f"coalesce(json_extract(o.request,'$.op'),'') NOT IN ({','.join('?'*len(skip_ops))})"
+                    sql=columns+' WHERE '+' AND '.join(where+[clause])+' ORDER BY o.updated DESC LIMIT ?'
                     rows=self.db.execute(sql,(*params,*skip_ops,n)).fetchall()
                 except sqlite3.OperationalError:
                     # SQLite built without JSON1: filter in Python.
-                    sql=columns+(' WHERE '+' AND '.join(where) if where else '')+' ORDER BY updated DESC'
+                    sql=columns+(' WHERE '+' AND '.join(where) if where else '')+' ORDER BY o.updated DESC'
                     rows=[]
                     for r in self.db.execute(sql,params):
                         if json.loads(r[2]).get('op') not in skip_ops: rows.append(r)
                         if len(rows)>=n: break
             else:
-                sql=columns+(' WHERE '+' AND '.join(where) if where else '')+' ORDER BY updated DESC LIMIT ?'
+                sql=columns+(' WHERE '+' AND '.join(where) if where else '')+' ORDER BY o.updated DESC LIMIT ?'
                 rows=self.db.execute(sql,(*params,n)).fetchall()
-            return [dict(id=r[0],hash=r[1],request=json.loads(r[2]),actor=r[3],stage=r[4],result=json.loads(r[5]),
-                         updated_ms=r[6],link=r[7],meta=json.loads(r[8] or '{}')) for r in rows]
+            return [self._row(r) for r in rows]
     def pending_shutdowns(self):
         failures={'FAILED','REJECTED','EXPIRED','CONFLICT','CANCELLED'}
         with self.lock:
@@ -117,3 +121,4 @@ class Journal:
             marks=','.join('?' for _ in terminal)
             self.db.execute(f'DELETE FROM operations WHERE stage IN ({marks}) AND updated<?',(*terminal,cutoff))
             self.db.execute(f'DELETE FROM operations WHERE id IN (SELECT id FROM operations WHERE stage IN ({marks}) ORDER BY updated DESC LIMIT -1 OFFSET ?)',(*terminal,max_rows))
+            self.db.execute('DELETE FROM operation_meta WHERE id NOT IN (SELECT id FROM operations)')

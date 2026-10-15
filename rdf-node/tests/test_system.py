@@ -962,13 +962,16 @@ class PppRecoveryTests(unittest.TestCase):
         self.assertEqual(view['phase'],'DONE')
         self.assertEqual(self.a.journal.lookup(request['id'])['result']['proof']['mqtt'],'DISABLED')
 
-    def test_observer_times_out_as_unknown(self):
-        for cycle,reason in ((False,'PPP_CYCLE_NOT_OBSERVED'),(True,'PPP_RECOVERY_TIMEOUT')):
+    def test_observer_times_out_as_unknown_with_observed_cause(self):
+        down=dict(ppp='DOWN',interface=None,ppp_probe='NO_INTERFACE')
+        for steps,reason in (((),'PPP_CYCLE_NOT_OBSERVED'),((down,),'PPP_RECOVERY_TIMEOUT'),
+                             ((down,dict(ppp='UP',interface='ppp0',ppp_probe='REPLY')),'MQTT_NOT_RECOVERED'),
+                             ((dict(down,usb='MISSING'),),'T900_USB_MISSING')):
             with self.subTest(reason=reason):
-                self.a.ppp_recovery=None;self.a.commands.ppp_last=None
-                self.a.monitor.data.update(ppp='UP',interface='ppp0',ppp_probe='REPLY',ppp_service=dict(self.service))
+                self.a.ppp_recovery=None;self.a.commands.ppp_last=None;self.ctrl.ready=False
+                self.a.monitor.data.update(ppp='UP',interface='ppp0',ppp_probe='REPLY',usb='PRESENT',ppp_service=dict(self.service))
                 request,_,_=self.restart(actor='ground-controller')
-                if cycle:self.host(ppp='DOWN',interface=None,ppp_probe='NO_INTERFACE')
+                for state in steps:self.host(**state)
                 self.a.ppp_recovery['started']-=self.a.PPP_RECOVERY_TIMEOUT_S+1
                 view=self.host()
                 self.assertEqual((view['phase'],view['stage'],view['reason'],view['origin']),
@@ -976,6 +979,34 @@ class PppRecoveryTests(unittest.TestCase):
                 operation=self.a.journal.lookup(request['id'])
                 self.assertEqual((operation['stage'],operation['result']['reason']),('OUTCOME_UNKNOWN',reason))
                 self.assertFalse(self.a.ppp_recovery_active())
+
+    def test_late_recovery_turns_view_green_without_rewriting_journal(self):
+        self.ctrl.ready=False
+        request,_,_=self.restart()
+        self.host(ppp='DOWN',interface=None,ppp_probe='NO_INTERFACE')
+        self.a.ppp_recovery['started']-=self.a.PPP_RECOVERY_TIMEOUT_S+1
+        view=self.host()
+        self.assertEqual((view['phase'],view['late']),('TIMEOUT',False))
+        self.assertEqual(self.host(ppp='UP',interface='ppp0',ppp_probe='NO_REPLY')['steps']['ppp_up'],True)
+        self.assertEqual(self.host(ppp_probe='REPLY')['phase'],'TIMEOUT')
+        self.assertFalse(self.a.ppp_recovery_active())
+        self.ctrl.ready=True;self.ctrl.generation+=1
+        view=self.host()
+        self.assertEqual((view['phase'],view['late'],view['stage'],view['reason']),
+                         ('DONE',True,'OUTCOME_UNKNOWN','PPP_RECOVERY_TIMEOUT'))
+        self.assertEqual(self.a.journal.lookup(request['id'])['stage'],'OUTCOME_UNKNOWN')
+        self.a.ppp_recovery['finished']-=self.a.PPP_RECOVERY_LINGER_S+1
+        self.assertIsNone(self.host())
+
+    def test_journal_only_stages_bump_operation_seq(self):
+        a=self.a
+        request=self.request('stream.set',profile='graph_u8')
+        a.journal.accept(request,'ground-controller','ground')
+        seq=a.operation_seq
+        a.commands._stage(request,'APPLYING')
+        self.assertEqual(a.operation_seq,seq+1)
+        a._snapshot()
+        self.assertEqual((a.snapshot()['operation_seq'],a.snapshot()['last_operation']['stage']),(seq+1,'APPLYING'))
 
     def test_failed_restart_request_is_shown_with_reason(self):
         request,result,_=self.restart(helper=ValueError('PPP_SERVICE_NOT_ACTIVE'))
@@ -1679,7 +1710,7 @@ class BackupLinkTests(unittest.TestCase):
 
     def test_control_backlog_waits_for_queued_age_not_one_slow_puback(self):
         a=self.a
-        for pending,queued,expected in ((1000,0,None),(6000,0,'CONTROL_BACKLOG'),(0,4000,'CONTROL_BACKLOG')):
+        for pending,queued,expected in ((1000,0,None),(2400,2900,None),(3000,0,'CONTROL_BACKLOG'),(0,4000,'CONTROL_BACKLOG')):
             with self.subTest(pending=pending,queued=queued):
                 a.profile='balanced';a.bulk_resume_after=0;a.last_angular_q=0;a.backup_last_angular_q=0
                 control,bulk,backup=self.links(backup=False)

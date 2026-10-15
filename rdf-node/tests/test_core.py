@@ -403,18 +403,40 @@ class JournalTests(unittest.TestCase):
             self.assertEqual(([op['id'] for op in self.j.latest(1,reads)],
                               [op['id'] for op in self.j.latest(5,reads,links=('ground','backup'))]),(['op1'],['op0']))
         finally:self.j.db=real
-    def test_existing_database_gains_origin_columns(self):
+    def test_origin_side_table_keeps_old_release_compatible(self):
         import sqlite3
         path=Path(self.tmp.name)/'old.db';db=sqlite3.connect(path)
         db.execute('CREATE TABLE operations (id TEXT PRIMARY KEY, hash TEXT NOT NULL, request TEXT NOT NULL, actor TEXT NOT NULL, stage TEXT NOT NULL, result TEXT NOT NULL, updated INTEGER NOT NULL)')
         db.execute('INSERT INTO operations VALUES (?,?,?,?,?,?,?)',('old',digest({'id':'old'}),'{"id":"old","op":"stream.set"}','local-admin','APPLIED','{}',1))
         db.commit();db.close()
-        j=Journal(path);self.addCleanup(j.close)
+        j=Journal(path)
         old=j.lookup('old')
         self.assertEqual((old['stage'],old['link'],old['meta']),('APPLIED',None,{}))
-        j.accept({'id':'new','op':'ppp.restart'},'local-admin','local')
+        j.accept({'id':'new','op':'ppp.restart'},'local-admin','local',{'before':{}})
         self.assertEqual([op['id'] for op in j.latest(5)],['new','old'])
         self.assertEqual(j.lookup('new')['link'],'local')
+        j.close()
+        # A rolled-back release still writes with its positional 7-column INSERT.
+        db=sqlite3.connect(path)
+        self.assertEqual(len(db.execute('PRAGMA table_info(operations)').fetchall()),7)
+        db.execute('INSERT INTO operations VALUES (?,?,?,?,?,?,?)',('rollback',digest({'id':'rollback'}),'{"id":"rollback","op":"stream.set"}','local-admin','ACCEPTED','{}',2))
+        db.commit();db.close()
+        j=Journal(path);self.addCleanup(j.close)
+        self.assertEqual(j.lookup('rollback')['link'],None)
+    def test_branch_database_with_extra_columns_still_works(self):
+        import sqlite3
+        path=Path(self.tmp.name)/'dev.db';db=sqlite3.connect(path)
+        db.execute("CREATE TABLE operations (id TEXT PRIMARY KEY, hash TEXT NOT NULL, request TEXT NOT NULL, actor TEXT NOT NULL, stage TEXT NOT NULL, result TEXT NOT NULL, updated INTEGER NOT NULL, link TEXT, meta TEXT NOT NULL DEFAULT '{}')")
+        db.commit();db.close()
+        j=Journal(path);self.addCleanup(j.close)
+        j.accept({'id':'x','op':'stream.set'},'ground-controller','backup')
+        self.assertEqual(j.lookup('x')['link'],'backup')
+    def test_prune_drops_orphan_origin_rows(self):
+        self.j.accept({'id':'x','op':'stream.set'},'ground-controller','ground');self.j.update('x','APPLIED',{})
+        with self.j.lock,self.j.db:self.j.db.execute('UPDATE operations SET updated=0')
+        self.j.prune()
+        self.assertIsNone(self.j.lookup('x'))
+        self.assertEqual(self.j.db.execute('SELECT count(*) FROM operation_meta').fetchone()[0],0)
     def test_revision_stable(self):self.assertEqual(self.j.config_revision('a'),self.j.config_revision('a'));self.assertEqual(self.j.config_revision('b'),2)
 
 class LifecycleSetupTests(unittest.TestCase):
@@ -552,9 +574,9 @@ class HelperTests(unittest.TestCase):
     def test_ppp_restart_requires_active_idle_unit(self):
         request={'op':'ppp.restart','origin':'ground-controller'}
         for result,error in (
-                (mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=not-found','ActiveState=inactive','Job=0'))),
+                (mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=not-found','ActiveState=inactive','Job='))),
                  'PPP_SERVICE_NOT_LOADED'),
-                (mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=inactive','Job=0'))),
+                (mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=inactive','Job='))),
                  'PPP_SERVICE_NOT_ACTIVE'),
                 (mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=17'))),
                  'PPP_RESTART_PENDING'),
@@ -566,11 +588,27 @@ class HelperTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,error):
                     self.ctrl.dispatch(request,os.getuid())
             restart.assert_not_called()
+    def test_ppp_restart_reads_systemd_idle_job_format(self):
+        # systemctl show -p Job prints `Job=` for an idle unit; tolerate `Job=0` too.
+        request={'op':'ppp.restart','origin':'ground-controller'}
+        for job in ('Job=','Job=0'):
+            with self.subTest(job=job), \
+                    mock.patch('rdf_node.helper.subprocess.run',
+                               return_value=mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active',job)))), \
+                    mock.patch.object(self.ctrl,'_run') as restart:
+                self.assertEqual(self.ctrl.dispatch(request,os.getuid()),{'requested':True,'service':'t900-ppp.service'})
+                restart.assert_called_once()
+        for stdout in ('LoadState=loaded\nActiveState=active','LoadState=\nActiveState=active\nJob=','LoadState=loaded\nActiveState=\nJob='):
+            with self.subTest(stdout=stdout), \
+                    mock.patch('rdf_node.helper.subprocess.run',return_value=mock.Mock(returncode=0,stdout=stdout)), \
+                    mock.patch.object(self.ctrl,'_run') as restart:
+                with self.assertRaisesRegex(ValueError,'PPP_SERVICE_STATUS_UNKNOWN'):self.ctrl.dispatch(request,os.getuid())
+                restart.assert_not_called()
     def test_ppp_restart_recovers_failed_or_auto_restarting_unit_and_local_starts_inactive(self):
         self.p['allow_ppp_restart']=True
         def show(active,sub):
             return mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded',f'ActiveState={active}',
-                                                                   f'SubState={sub}','Job=0')))
+                                                                   f'SubState={sub}','Job=')))
         for origin,active,sub,error in (
                 ('ground-controller','failed','failed',None),
                 ('ground-controller','activating','auto-restart',None),
@@ -591,7 +629,7 @@ class HelperTests(unittest.TestCase):
                     restart.assert_called_once_with(['/usr/bin/systemctl','--no-block','restart','t900-ppp.service'])
     def test_ground_ppp_restart_needs_no_root_permission_but_checks_unit(self):
         request={'op':'ppp.restart','origin':'ground-controller'}
-        status=mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=0')))
+        status=mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=')))
         with mock.patch('rdf_node.helper.subprocess.run',return_value=status) as show, \
                 mock.patch.object(self.ctrl,'_run') as restart:
             result=self.ctrl.dispatch(request,os.getuid())
@@ -617,7 +655,7 @@ class HelperTests(unittest.TestCase):
     def test_ppp_restart_action_failure_is_outcome_unknown(self):
         self.p.update(allow_ppp_restart=True,allow_remote_control=True)
         request={'op':'ppp.restart','origin':'ground-controller'}
-        status=mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=0')))
+        status=mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=')))
         with mock.patch('rdf_node.helper.subprocess.run',return_value=status), \
                 mock.patch.object(self.ctrl,'_run',side_effect=HelperError('SYSTEMD_ACTION_FAILED')):
             with self.assertRaisesRegex(TimeoutError,'SYSTEMD_ACTION_OUTCOME_UNKNOWN'):
@@ -626,7 +664,7 @@ class HelperTests(unittest.TestCase):
     def test_ppp_restart_requests_only_fixed_unit(self):
         self.p.update(allow_ppp_restart=True,allow_remote_control=True)
         request={'op':'ppp.restart','origin':'ground-controller'}
-        status=mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=0')))
+        status=mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=')))
         with mock.patch('rdf_node.helper.subprocess.run',return_value=status) as show, \
                 mock.patch.object(self.ctrl,'_run') as restart:
             result=self.ctrl.dispatch(request,os.getuid())
@@ -656,7 +694,7 @@ class HelperTests(unittest.TestCase):
 
         def systemctl_show(args,**kwargs):
             status_calls.append(args)
-            job='17' if pending['value'] else '0'
+            job='17' if pending['value'] else ''
             return mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active',f'Job={job}')))
 
         def systemctl_restart(args):
@@ -890,7 +928,7 @@ class ControlApprovalTests(unittest.TestCase):
 
             args=SimpleNamespace(action='approve',config=str(config),settings=False,lifecycle=False,
                                  reboot=False,shutdown=False,ppp_restart=True)
-            status=mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=0')))
+            status=mock.Mock(returncode=0,stdout=os.linesep.join(('LoadState=loaded','ActiveState=active','Job=')))
             with mock.patch.object(cli,'require_root'),mock.patch.object(cli,'chown_config'), \
                     mock.patch.object(cli,'Path',side_effect=mapped_path), \
                     mock.patch('rdf_node.helper.subprocess.run',return_value=status) as systemctl, \

@@ -124,7 +124,7 @@ def call_helper(sock_path,request,timeout=8):
         return result['result']
 
 def require_ppp_service_ready(origin='ground-controller'):
-    """Fail closed unless the fixed PPP unit is loaded and has no job.
+    """Fail closed unless the fixed PPP unit is loaded and has no queued job.
 
     A restart is what recovers a crashed or auto-restarting link, so `failed` and
     `activating/auto-restart` are accepted from any origin. `inactive` may be an operator's
@@ -139,7 +139,8 @@ def require_ppp_service_ready(origin='ground-controller'):
     if result.returncode:
         raise HelperError('PPP_SERVICE_STATUS_UNKNOWN')
     state=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
-    if any(key not in state or not state[key] for key in ('LoadState','ActiveState','Job')):
+    # systemctl prints an idle unit's job as `Job=` (empty); only a job number means one is queued.
+    if any(key not in state or not state[key] for key in ('LoadState','ActiveState')) or 'Job' not in state:
         raise HelperError('PPP_SERVICE_STATUS_UNKNOWN')
     if state['LoadState']!='loaded':
         raise HelperError('PPP_SERVICE_NOT_LOADED')
@@ -149,7 +150,7 @@ def require_ppp_service_ready(origin='ground-controller'):
                  (active=='inactive' and origin=='local-admin'))
     if not restartable:
         raise HelperError('PPP_SERVICE_NOT_ACTIVE')
-    if state['Job']!='0':
+    if state['Job'] not in ('','0'):
         raise HelperError('PPP_RESTART_PENDING')
 
 class Controller:
