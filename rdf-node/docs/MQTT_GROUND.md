@@ -311,8 +311,13 @@ Default pause setelah command/source/link issue dan resume20s stabil dipertahank
 Angular utama dipause `CONTROL_BACKLOG` hanya bila pesan tertua yang masih menunggu di outbox
 Control (bukan yang sedang dikirim) berumur lebih dari 3 s (`queue_age_ms`), atau PUBLISH QoS 1
 yang sedang dikirim menunggu PUBACK lebih dari 2,5 s (`pending_age_ms`). PUBACK yang sedikit
-lambat pada link T900 (di bawah 2,5 s) tidak lagi memicu pause, tetapi Bulk tetap mengalah sebelum
-backlog Control menumpuk.
+lambat pada link T900 (di bawah 2,5 s) tidak lagi memicu pause 20 s. Sebagai gantinya Bulk
+mengalah tanpa penalti: frame Angular berikutnya ditahan selama PUBLISH Control menunggu PUBACK
+lebih dari 1 s, atau selama lebih dari 2.048 byte Bulk sebelumnya belum di-ACK TCP oleh Ground
+(antrean kernel, `SIOCOUTQ`). Frame dikirim lagi begitu link lega, tanpa menunggu 20 s. Pada link
+yang jauh lebih lambat dari budget (`control_budget_bytes_s` + `bulk_budget_bytes_s`), Control
+sendiri bisa tetap tertahan sampai `PUBLISH_PROGRESS_TIMEOUT`; turunkan budget atau pakai profil
+`control` untuk link seperti itu.
 
 ### Reconnect, keepalive, dan pemulihan PPP
 

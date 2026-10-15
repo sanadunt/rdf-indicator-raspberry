@@ -64,7 +64,9 @@
   `PING_TIMEOUT` resets, offline LWTs, and a flapping `MQTT utama` on a slow but working T900 link.
 - `CONTROL_BACKLOG` now pauses primary Angular when the oldest queued Control message is older
   than 3 s or an in-flight QoS 1 PUBLISH has waited more than 2.5 s for PUBACK, instead of on any
-  PUBACK slower than 500 ms.
+  PUBACK slower than 500 ms. Below those limits Bulk yields without the 20 s penalty: the next
+  primary Angular frame waits while a Control PUBACK is more than 1 s late or more than 2,048 Bulk
+  bytes are still unACKed in the kernel (`Client.socket_backlog`).
 - Remote-command indicator: the Edge journal records each command's origin (`local`, `ground`,
   `backup`) and before-values in a new side table `operation_meta`. The `operations` table keeps
   its original seven columns, so `scripts/rollback.sh` to the previous release still journals
