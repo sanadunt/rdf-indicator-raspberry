@@ -41,6 +41,9 @@ Jika broker mengizinkan publish anonymous ke topic tersebut, publisher yang menj
 memakai operasi remote yang aktif. Plaintext mengekspos credential dan payload; gunakan hanya
 pada link privat terisolasi/tepercaya. MQTT memakai Clean Start dan Session Expiry 0; reconnect
 membuat sesi baru tanpa replay offline. QoS 2 dan persistent broker session tidak didukung.
+Backoff reconnect di-reset setelah sesi stabil minimal 20 s, PINGREQ juga dikirim saat broker diam
+walaupun telemetry QoS 0 terus terkirim, dan Agent mempercepat reconnect client utama saat PPP
+kembali; lihat [MQTT_GROUND.md](MQTT_GROUND.md#reconnect-keepalive-dan-pemulihan-ppp).
 
 ### Broker cadangan
 
@@ -70,7 +73,7 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | `telemetry/diagnostic/doa` | Edge -> Ground | Control | 0 | Tidak | Setiap 3 s selama `doa.xml` tersedia; expiry 3 s | Sudut raw `doa.xml`, timestamp sumber/observasi, frekuensi MHz, status `UNVERIFIED` dan validation reasons. Diulang meski sampel tidak berubah, terlepas dari gate DoA normal. |
 | `telemetry/diagnostic/angular` | Edge -> Ground | Control | 0 | Tidak | Minimum 6 s saat gate integritas source gagal; minimum 30 s jika source eligible tetapi Bulk terblokir/menunggu stabilisasi; ukuran JSON dan headroom Control dapat memperpanjang interval; tidak diduplikasi ketika Angular normal mengalir; profile `control` menahan array. Expiry 3 s | Satu object JSON dengan 360 values dan source timestamp; Ground menyimpan terpisah sebagai `UNVERIFIED`, tanpa mengubah telemetry normal. |
 | `telemetry/health` | Edge -> Ground | Control | 0 | Tidak | Tiap 1 s; expiry 5 s | Status run, DAQ, clock, umur sumber, temperatur, dropped frames. |
-| `telemetry/health/detail` | Edge -> Ground | Control | 0 | Tidak | Tiap 10 s; expiry 15 s | Detail host, USB, sync DAQ, trafik, parse dan abort counter. |
+| `telemetry/health/detail` | Edge -> Ground | Control | 0 | Tidak | Tiap 10 s; expiry 15 s | Detail host, USB, sync DAQ, trafik, parse dan abort counter, serta status link PPP (interface, ping peer, unit `t900-ppp.service`, restart count). |
 | `telemetry/angular` | Edge -> Ground | Bulk | 0 | Tidak | Profile-dependent; expiry 3 s | Frame 360 sampel; flags `63` untuk LIVE atau trust-only partial untuk UNVERIFIED. |
 | `state` | Edge -> Ground | Control | 1 | Ya | Saat state berubah dan paling lambat tiap 60 s | Status run/DAQ, profile, clock dan identitas boot. Jangan dipakai sebagai heartbeat. |
 | `capabilities` | Edge -> Ground | Control | 1 | Ya | Saat generation koneksi Control berubah | Versi, identitas, codec, profile dan capability yang diizinkan. |
@@ -82,7 +85,7 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | `cmd/config/patch` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Safe-field patch memakai target settings fixed/single-writer; tanpa approval root per command. |
 | `cmd/processing/set` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Intent `RUNNING` atau `STOPPED` untuk target SDR fixed yang sudah diaudit; tanpa approval root per command. |
 | `cmd/service/restart` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Restart target SDR audited; tanpa approval root per command. Bukan restart PPP atau bridge. |
-| `cmd/service/ppp/restart` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Restart fixed `t900-ppp.service`; tanpa grant/approval root, tetapi helper memeriksa loaded/active/no-job setiap request. |
+| `cmd/service/ppp/restart` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Restart fixed `t900-ppp.service`; tanpa grant/approval root. Helper memeriksa unit loaded, tanpa job, dan `active`/`failed`/`activating(auto-restart)` setiap request. Jalur PPP sendiri: satu restart aktif, jeda minimum 15 s. |
 | `cmd/system/reboot/prepare` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Meminta challenge reboot sekali pakai; tidak memerlukan remote grant/approval root. |
 | `cmd/system/reboot/execute` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Eksekusi reboot dengan `prepare_id` dan `challenge` yang masih valid. |
 | `cmd/system/shutdown/prepare` | Ground -> Edge | Control | 1 | Tidak | Command TTL default 15 s, maksimum 30 s | Meminta challenge shutdown sekali pakai; tidak memerlukan approval root. |
@@ -98,7 +101,7 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | `telemetry/diagnostic/doa` | Tampilkan XML terpisah sebagai diagnostik UNVERIFIED dengan timestamp dan reasons; jangan gabungkan ke detection atau keputusan kontrol. |
 | `telemetry/diagnostic/angular` | Simpan frame lengkap terbaru terpisah sebagai UNVERIFIED; expose lewat `GET /api/v2/angular/diagnostic/latest`; jangan gabungkan ke `telemetry/angular`, DoA, detection atau keputusan kontrol. |
 | `telemetry/health` | Gunakan sebagai sumber utama freshness dan status DAQ; pisahkan MQTT tersambung dari `daq=1`. |
-| `telemetry/health/detail` | Pakai untuk diagnosis host, USB, sync, trafik dan error; jangan jadikan pengganti gate health. |
+| `telemetry/health/detail` | Pakai untuk diagnosis host, USB, sync, trafik, error, dan link PPP; jangan jadikan pengganti gate health. Di broker cadangan, field PPP menunjukkan keadaan link utama saat Ground utama tidak terjangkau. |
 | `telemetry/angular` | Parse satu object JSON per message, lalu pastikan ada tepat 360 values. `flags=63` memenuhi gate bukti LIVE; `revision` tetap metadata dan tidak dibandingkan dengan `state.cfg`. |
 | `state` | Bootstrap identitas boot/sesi dan profile; saat `sid` berubah, buang cache telemetry sesi lama. Retained state bukan heartbeat. |
 | `capabilities` | Tampilkan operasi sesuai capability node; tetap tegakkan ACL dan policy Ground. |
@@ -110,7 +113,7 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | `cmd/config/patch` | Kirim hanya field allowlist dengan `base_rev` terkini; bedakan `APPLIED` dari `PERSISTED_UNVERIFIED`. |
 | `cmd/processing/set` | Minta start/stop SDR stack hanya jika capability tersedia; verifikasi hasil dari ACK dan telemetry baru. |
 | `cmd/service/restart` | Minta restart SDR stack yang di-approve; tunggu ACK final dengan proof operasi dan telemetry health fresh sebelum menyatakan pulih. |
-| `cmd/service/ppp/restart` | Minta restart hanya dengan `ppp_restart` dan `remote_commands`; butuh health fresh. `PPP_RESTART_REQUESTED` hanya membuktikan systemd menerima request. Jangan retry otomatis; request baru perlu konfirmasi operator dan health yang lebih baru dari semua hasil belum pasti. |
+| `cmd/service/ppp/restart` | Minta restart hanya dengan `remote_ppp_restart` dan `remote_commands`; butuh health fresh. `PPP_RESTART_REQUESTED` hanya membuktikan systemd menerima request; ACK akhir Edge `APPLIED`/`OUTCOME_UNKNOWN` berasal dari pemantau link Edge. Ditolak `PPP_RESTART_IN_PROGRESS`/`PPP_RESTART_TOO_SOON` bila restart lain masih berjalan atau < 15 s. Jangan retry otomatis; request baru perlu konfirmasi operator dan health yang lebih baru dari semua hasil belum pasti. |
 | `cmd/system/reboot/prepare` | Minta challenge reboot setelah policy/approval terpenuhi; jangan log challenge. |
 | `cmd/system/reboot/execute` | Kirim challenge satu kali sebelum kedaluwarsa; tunggu boot ID baru dan health fresh untuk rekonsiliasi. |
 | `cmd/system/shutdown/prepare` | Minta challenge shutdown hanya saat capability tersedia; jangan log challenge. |
@@ -145,8 +148,8 @@ Jika perangkat memakai nilai MQTT budget berbeda dari `config/example.yaml`, hit
 Broker cadangan memiliki bucket sendiri, `mqtt.backup.budget_bytes_s` (default 8.000 byte/s,
 rentang 1.000..200.000), yang **tidak** dihitung dalam estimasi 15 kbit/s di atas maupun dalam
 pemeriksaan agregat Control+Bulk. Dengan fixture di bagian berikut, trafik PUBLISH ke cadangan kira-kira
-445 B/s tanpa Angular (`control`), sekitar 1.192 B/s (9,5 kbit/s) pada `balanced` karena Angular
-dikirim tiap 4 s, dan sekitar 1.939 B/s (15,5 kbit/s) pada `graph_u8` karena Angular tiap 2 s;
+451 B/s tanpa Angular (`control`), sekitar 1.198 B/s (9,6 kbit/s) pada `balanced` karena Angular
+dikirim tiap 4 s, dan sekitar 1.945 B/s (15,6 kbit/s) pada `graph_u8` karena Angular tiap 2 s;
 belum termasuk TCP/TLS/WebSocket/IP. Angka ini aman untuk LAN/internet, tetapi bila route ke broker
 cadangan lewat PPP, trafik itu ditambahkan ke beban T900 dan dapat melampaui 15 kbit/s.
 
@@ -165,7 +168,7 @@ Ukuran fixture bukan ukuran maksimum; digit metadata dan nilai source dapat meng
 | `telemetry/doa` | Maks. 1/s; verified atau UNVERIFIED untuk trust-only blockers | 109 B verified | 147 B verified |
 | `telemetry/diagnostic/doa` | Setiap 3 s selama XML tersedia; heartbeat mengulang sampel yang sama | 303 B | 352 B |
 | `telemetry/health` | 1/s | 113 B | 154 B |
-| `telemetry/health/detail` | 1/10 s | 179 B | 227 B |
+| `telemetry/health/detail` | 1/10 s | 241 B | 289 B |
 | `telemetry/angular` (`balanced`) | Minimum 4 s; contoh JSON dipace sekitar 8.96 s pada Bulk 350 B/s | 2,946 B | 2,988 B |
 | `telemetry/angular` (`graph_u8`) | Minimum 2 s; format JSON dan pace sama dengan `balanced` | 2,946 B | 2,988 B |
 | `telemetry/angular` (`control`) | Tidak dipublish | — | — |
@@ -222,13 +225,14 @@ state periodik, request/response settings, command/ACK, MQTT control packets, at
 
 | Profile | Payload JSON | MQTT PUBLISH | Biaya limiter |
 |---|---:|---:|---:|
-| `control` | 344.4 B/s | 445.0 B/s (3.56 kbit/s) | 795.3 cost-B/s (6.36 kbit/s) |
-| `balanced` | 673.1 B/s | 778.4 B/s (6.23 kbit/s) | 1,144.5 cost-B/s (9.16 kbit/s) |
-| `graph_u8` | 673.1 B/s | 778.4 B/s (6.23 kbit/s) | 1,144.5 cost-B/s (9.16 kbit/s) |
+| `control` | 350.6 B/s | 451.2 B/s (3.61 kbit/s) | 801.5 cost-B/s (6.41 kbit/s) |
+| `balanced` | 679.3 B/s | 784.6 B/s (6.28 kbit/s) | 1,150.7 cost-B/s (9.21 kbit/s) |
+| `graph_u8` | 679.3 B/s | 784.6 B/s (6.28 kbit/s) | 1,150.7 cost-B/s (9.21 kbit/s) |
 
 State periodik tiap 60 s sudah masuk tabel. Pada `balanced` dan `graph_u8`, Bulk menggunakan
-sekitar 349.2 cost-B/s dari budget 350 B/s. Control steady-state menggunakan sekitar 795.3
-cost-B/s dari budget 850 B/s. Diagnostic Angular tidak berjalan saat normal Bulk mengirim.
+sekitar 349.2 cost-B/s dari budget 350 B/s. Control steady-state menggunakan sekitar 801.5
+cost-B/s dari budget 850 B/s; field PPP pada `telemetry/health/detail` menambah sekitar 6 B/s.
+Diagnostic Angular tidak berjalan saat normal Bulk mengirim.
 Saat source valid tetapi Bulk terblokir, scheduler menyisihkan sekitar 800 B/s untuk telemetri
 Control lain dan memace fixture diagnostic sekitar 62.96 s (49.9 cost-B/s). Saat source invalid,
 DoA normal berhenti; reserve 510 B/s menyisakan sekitar 340 B/s dan fixture diagnostic dipace
@@ -304,7 +308,7 @@ Ground memperlakukan health fresh sampai 8 s dan memerlukan `q` yang maju. Healt
 ### `telemetry/health/detail`
 
 ```json
-{"v":2,"sid":"7a8b9c0d","t":1790668800000,"usb":2,"sync":[true,true,true],"cpu":22.1,"mem":41.7,"disk_free":83.2,"throt":false,"uv":false,"tx":12.34,"rx":8.21,"adrop":0,"parse":0}
+{"v":2,"sid":"7a8b9c0d","t":1790668800000,"usb":2,"sync":[true,true,true],"cpu":22.1,"mem":41.7,"disk_free":83.2,"throt":false,"uv":false,"tx":12.34,"rx":8.21,"adrop":0,"parse":0,"ppp":"UP","peer":"REPLY","ppp_svc":"ACTIVE","ppp_restarts":0}
 ```
 
 - `usb`: jumlah device USB yang terhitung, dapat `null`.
@@ -314,6 +318,18 @@ Ground memperlakukan health fresh sampai 8 s dan memerlukan `q` yang maju. Healt
 - `tx`, `rx`: trafik interface dalam kbit/s, dapat `null`.
 - `adrop`: jumlah frame angular yang dibatalkan Edge.
 - `parse`: jumlah error parse source.
+- `ppp`: `UP` bila ada interface dengan alamat `link.local_ip` dan peer `link.peer_ip` yang UP,
+  selain itu `DOWN`.
+- `peer`: hasil ping terakhir ke peer PPP lewat interface itu: `REPLY`, `NO_REPLY`,
+  `NO_INTERFACE`, `ERROR`, atau `UNKNOWN`. Tanpa balasan bukan bukti link mati.
+- `ppp_svc`: `ActiveState` systemd unit `t900-ppp.service` dalam huruf besar (`ACTIVE`,
+  `ACTIVATING`, `DEACTIVATING`, `FAILED`, `INACTIVE`, ...), `NOT_LOADED`, atau `UNKNOWN`.
+- `ppp_restarts`: `NRestarts` systemd untuk unit itu (restart otomatis oleh `Restart=`), dapat
+  `null` bila tidak terbaca.
+
+Empat field PPP bersifat aditif; Edge versi lama tidak mengirimnya, jadi consumer harus menerima
+field yang tidak ada. Detail juga dikirim ke broker cadangan, sehingga consumer di sana tetap dapat
+melihat status link utama saat PPP/T900 putus.
 
 Detail tidak menggantikan gate health utama. Ground saat ini menyimpan detail terpisah dari validasi DoA/Angular.
 
@@ -522,7 +538,7 @@ yang diizinkan ACL topic dapat mengirim command langsung.
 | `cmd/config/patch` | `config.patch` | `{"changes":{"center_frequency_hz":433920000,"vfo0_frequency_hz":433920000}}`; subset field safe dan tidak kosong. |
 | `cmd/processing/set` | `processing.set` | `{"desired":"STOPPED"}` atau `{"desired":"RUNNING"}`. Hanya target SDR audited; tanpa approval root per command. |
 | `cmd/service/restart` | `service.restart` | Tidak ada. Hanya target SDR audited; tanpa approval root per command. |
-| `cmd/service/ppp/restart` | `ppp.restart` | Tidak ada. Ground tanpa root grant/approval; helper memeriksa fixed unit loaded/active/no-job pada setiap request. Konfirmasi ulang diperlukan setelah hasil unknown. |
+| `cmd/service/ppp/restart` | `ppp.restart` | Tidak ada. Ground tanpa root grant/approval; helper memeriksa fixed unit loaded, tanpa job, dan `active`/`failed`/`activating(auto-restart)` pada setiap request (`inactive` hanya dari panel Edge lokal). Satu restart aktif dan jeda minimum 15 s untuk semua asal. Konfirmasi ulang diperlukan setelah hasil unknown. |
 | `cmd/system/reboot/prepare` | `system.reboot.prepare` | Tidak ada. Ground tidak memerlukan remote grant atau approval reboot root. ACK mengembalikan `prepare_id`, `challenge`, `valid_seconds` (30). |
 | `cmd/system/reboot/execute` | `system.reboot.execute` | `{"prepare_id":"<prepare-id>","challenge":"<one-time-challenge>"}` dari ACK prepare. Challenge sekali pakai, jangan log atau simpan sebagai credential permanen. |
 | `cmd/system/shutdown/prepare` | `system.shutdown.prepare` | Tidak ada. Ground tidak memerlukan approval root; ACK mengembalikan `prepare_id`, `challenge`, `valid_seconds` (30). |
@@ -565,7 +581,16 @@ Jika `id` sama dan payload sama, Edge mengembalikan progress/hasil jurnal tanpa 
 `result` bergantung pada operation. `config.get` mengembalikan `revision` dan `proof` di
 `ack/config`, lalu memicu respons terpisah di `settings/reported`. `operation.get` mengembalikan
 `operation` berupa record operation publik atau `null`. Error biasanya berisi `{"error":"ERROR_CODE"}`.
-Status yang dikenal jurnal mencakup `ACCEPTED`, `APPLYING`, `VERIFYING`, `REBOOT_SCHEDULED`, `SHUTDOWN_SCHEDULED`, `APPLIED`, `FAILED`, `REJECTED`, `EXPIRED`, `CONFLICT`, `PERSISTED_UNVERIFIED`, `OUTCOME_UNKNOWN`, dan `CANCELLED`.
+Status yang dikenal jurnal mencakup `ACCEPTED`, `APPLYING`, `VERIFYING`, `REBOOT_SCHEDULED`, `SHUTDOWN_SCHEDULED`, `PPP_RESTART_REQUESTED`, `APPLIED`, `FAILED`, `REJECTED`, `EXPIRED`, `CONFLICT`, `PERSISTED_UNVERIFIED`, `OUTCOME_UNKNOWN`, dan `CANCELLED`.
+
+Untuk `ppp.restart`, ACK berurutan `ACCEPTED`, `PPP_RESTART_REQUESTED` (`accepted_by_systemd`,
+`requested_ms`, `service`), lalu ACK akhir dari pemantau link Edge: `APPLIED` dengan
+`proof: {ppp, peer, mqtt, cycled}` dan `elapsed_ms`, atau `OUTCOME_UNKNOWN` dengan `reason`
+`PPP_RECOVERY_TIMEOUT`/`PPP_CYCLE_NOT_OBSERVED`, `phase`, `steps`, dan `elapsed_ms` setelah 120 s.
+Bila helper menolak atau gagal, ACK akhirnya `FAILED` atau `OUTCOME_UNKNOWN` dengan `error`. ACK
+akhir dapat hilang bila link utama belum pulih; Ground dapat memakai `operation.get`. Record
+operasi publik di hasil `operation.get` kini juga memuat field aditif `origin`
+(`local`/`ground`/`backup`), `summary`, dan `reason`.
 
 `PERSISTED_UNVERIFIED` berarti perubahan tersimpan tetapi bukti runtime belum lengkap. `OUTCOME_UNKNOWN` berarti hasil side effect belum diketahui, bukan bukti gagal atau berhasil. Ground tidak boleh mengubah dua status ini menjadi sukses/gagal pasti atau mengulang mutation dengan ID baru tanpa rekonsiliasi.
 

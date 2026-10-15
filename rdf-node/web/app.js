@@ -373,6 +373,8 @@ function renderOperation(op,s){
  showToast(`${opLabel(op)}: ${op.stage}${reason?` · ${reasonLabel(reason)}`:''}`,stageTone(op.stage));
 }
 // ---- Remote-command banner: Ground or the backup broker changed something on this Edge. ----
+// The host is created if a stale index.html lacks it, so a mismatched page never stops loading.
+const noticesHost=$('notices')||document.querySelector('.shell').appendChild(Object.assign(document.createElement('div'),{id:'notices'}));
 let remoteSeen=undefined,remoteTimer=null;
 const remoteBanner=(()=>{
  const root=document.createElement('section');root.className='notice remote';root.hidden=true;root.setAttribute('role','status');root.setAttribute('aria-live','polite');
@@ -384,7 +386,7 @@ const remoteBanner=(()=>{
  const summary=document.createElement('span'),stage=document.createElement('em');line.append(summary,' · ',stage);
  body.append(title,line);
  const close=document.createElement('button');close.type='button';close.className='notice-close';close.textContent='Tutup';
- root.append(chip,body,close);$('notices').append(root);
+ root.append(chip,body,close);noticesHost.append(root);
  return {root,chip,titleText,time,summary,stage,close};
 })();
 function hideRemoteBanner(){remoteBanner.root.hidden=true;if(remoteTimer){clearTimeout(remoteTimer);remoteTimer=null;}}
@@ -392,7 +394,7 @@ remoteBanner.close.onclick=hideRemoteBanner;
 function showRemoteBanner(op){
  const b=remoteBanner,tone=stageTone(op.stage),origin=ORIGINS[op.origin],reason=REASON_STAGES.has(op.stage)?opReason(op):'';
  setOriginChip(b.chip,op.origin);
- b.root.className=`notice remote ${tone}`;
+ b.root.dataset.tone=tone;
  b.titleText.textContent=`Perintah dari ${origin?origin.upper:'REMOTE'}`;
  b.time.textContent=clockText(op.updated_ms);
  b.summary.textContent=opSummary(op);
@@ -419,13 +421,14 @@ const RECOVERY_STEPS=[['requested','Restart diminta'],['cycled','PPP turun/naik'
 const RECOVERY_END=new Set(['DONE','TIMEOUT','FAILED']);
 const RECOVERY_HEAD={REQUESTED:'Menunggu PPP turun/naik…',RESTARTING:'PPP sedang restart…',PPP_UP:'PPP UP, ping Ground…',PEER_OK:'Ground membalas, tunggu MQTT…',DONE:'Tersambung ke Ground ✓',FAILED:'Restart T900 gagal'};
 const RECOVERY_LINGER_MS=90000;
-let recoveryDismissed=null,recoveryNote={id:null,text:''};
+let recoveryDismissed=null,recoveryNote={id:null,text:'',at:0};
 const recovery=(()=>{
- const root=document.createElement('section');root.className='recovery';root.hidden=true;root.setAttribute('role','status');root.setAttribute('aria-live','polite');
+ // Only the headline is live: the elapsed counter changes every poll and must not be re-read aloud.
+ const root=document.createElement('section');root.className='recovery';root.hidden=true;root.setAttribute('aria-label','Progres restart T900');
  const head=document.createElement('div');head.className='recovery-head';
  const title=document.createElement('b');title.append(icon('radio'),'Restart T900');
  const origin=document.createElement('span'),headline=document.createElement('span'),elapsed=document.createElement('span');
- headline.className='recovery-headline';elapsed.className='recovery-elapsed';
+ headline.className='recovery-headline';headline.setAttribute('role','status');headline.setAttribute('aria-live','polite');elapsed.className='recovery-elapsed';
  const close=document.createElement('button');close.type='button';close.className='recovery-close';close.setAttribute('aria-label','Sembunyikan progres restart T900');close.append(icon('x'));
  head.append(title,origin,headline,elapsed,close);
  const list=document.createElement('ol');list.className='recovery-steps';
@@ -438,7 +441,7 @@ const recovery=(()=>{
  const reason=document.createElement('span');reason.className='recovery-reason';
  const retry=document.createElement('button');retry.type='button';retry.className='recovery-retry';
  const retryLabel=document.createElement('span');retryLabel.textContent='Coba lagi';retry.append(icon('sync'),retryLabel);
- foot.append(reason,retry);root.append(head,list,foot);$('notices').append(root);
+ foot.append(reason,retry);root.append(head,list,foot);noticesHost.append(root);
  return {root,origin,headline,elapsed,close,steps,foot,reason,retry};
 })();
 function currentRecovery(s){
@@ -450,7 +453,7 @@ function currentRecovery(s){
 }
 function recoveryRunning(){const r=currentRecovery(snapshot);return !!r&&!RECOVERY_END.has(r.phase);}
 function placeRecovery(){
- const modalOpen=!$('modal').hidden,host=modalOpen?$('modalrecovery'):$('notices');
+ const slot=$('modalrecovery'),modalOpen=!!slot&&!$('modal').hidden,host=modalOpen?slot:noticesHost;
  if(recovery.root.parentNode!==host)host.append(recovery.root);
  recovery.root.classList.toggle('in-modal',modalOpen);
  recovery.root.classList.toggle('compact',modalOpen&&$('modal').dataset.recovery==='compact');
@@ -469,24 +472,22 @@ function renderRecovery(s){
  c.root.hidden=hidden;placeRecovery();
  if(hidden)return;
  const tone=r.phase==='DONE'?'good':r.phase==='TIMEOUT'?'warn':r.phase==='FAILED'?'bad':'progress';
- c.root.classList.remove('good','warn','bad','progress');c.root.classList.add(tone);
- c.root.dataset.phase=r.phase;
+ c.root.dataset.tone=tone;c.root.dataset.phase=r.phase;
  setOriginChip(c.origin,r.origin);
  const limit=Number.isFinite(r.timeout_s)?r.timeout_s:120,seconds=Number.isFinite(r.elapsed_s)?Math.floor(r.elapsed_s):null;
  c.headline.textContent=r.phase==='TIMEOUT'?`Belum tersambung dalam ${limit} dtk`:RECOVERY_HEAD[r.phase]||r.phase;
- c.headline.className=`recovery-headline ${tone==='progress'?'':tone}`.trim();
  c.elapsed.textContent=seconds==null?'':end?`${seconds} dtk`:`${seconds} / ${limit} dtk`;
  const steps=r.steps&&typeof r.steps==='object'?r.steps:{};let pointer=false;
  for(const step of c.steps){
   const value=steps[step.key];let state;
-  if(step.key==='mqtt_ready'&&value===null)state='off';
+  if(step.key==='mqtt_ready'&&value===null&&r.phase!=='FAILED')state='off';
   else if(value===true)state='done';
   else if(!pointer){pointer=true;state=r.phase==='TIMEOUT'||r.phase==='FAILED'?'fail':end?'pending':'active';}
   else state='pending';
   setStepState(step,state);
  }
  const reason=typeof r.reason==='string'&&r.reason?r.reason:'';
- const note=recoveryNote.id===r.id?recoveryNote.text:'';
+ const note=recoveryNote.id===r.id&&Date.now()-recoveryNote.at<15000?recoveryNote.text:'';
  c.reason.textContent=[reason?(REASONS[reason]?`${REASONS[reason]} · ${reason}`:reason):'',note].filter(Boolean).join(' — ');
  const retry=r.phase==='TIMEOUT',caps=s.capabilities||{};
  c.retry.hidden=!retry;
@@ -498,11 +499,11 @@ recovery.retry.onclick=async()=>{
  if(needLogin())return;
  const r=currentRecovery(snapshot),button=recovery.retry;
  if(!r||!snapshot.capabilities?.ppp_restart||button.dataset.busy)return;
- button.dataset.busy='1';button.disabled=true;recoveryNote={id:r.id,text:'Mengirim restart T900…'};renderRecovery(snapshot);
- try{const result=await command('ppp.restart');recoveryNote={id:r.id,text:`Terkirim: ${result.stage}`};}
+ button.dataset.busy='1';button.disabled=true;recoveryNote={id:r.id,text:'Mengirim restart T900…',at:Date.now()};renderRecovery(snapshot);
+ try{const result=await command('ppp.restart');recoveryNote={id:r.id,text:`Terkirim: ${result.stage}`,at:Date.now()};}
  catch(e){
-  if(e.message==='AUTHENTICATION_AND_CSRF_REQUIRED'){authenticated=false;csrf=null;lastAdminSessionRefresh=0;recoveryNote={id:null,text:''};render(snapshot);login();}
-  else recoveryNote={id:r.id,text:withReasonHint(e).message};
+  if(e.message==='AUTHENTICATION_AND_CSRF_REQUIRED'){authenticated=false;csrf=null;lastAdminSessionRefresh=0;recoveryNote={id:null,text:'',at:0};render(snapshot);login();}
+  else recoveryNote={id:r.id,text:withReasonHint(e).message,at:Date.now()};
  }
  finally{delete button.dataset.busy;renderRecovery(snapshot);}
 };
@@ -1307,5 +1308,5 @@ async function prepareShutdown(){
 document.addEventListener('pointerdown',()=>{lastTouch=Date.now();if(wakeScreen()){swallowClick=true;setTimeout(()=>{swallowClick=false;},400);}},true);
 document.addEventListener('keydown',event=>{lastTouch=Date.now();if(wakeScreen())event.stopImmediatePropagation();},true);
 $('blankbtn').onclick=()=>enterBlank();
-$('historybtn').onclick=openHistory;
+if($('historybtn'))$('historybtn').onclick=openHistory;
 get('/api/v2/session').then(s=>{if(authenticated)return;authenticated=s.authenticated;csrf=s.csrf;lastAdminSessionRefresh=Date.now();render(snapshot);}).catch(()=>{});poll();

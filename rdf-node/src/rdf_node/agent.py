@@ -457,8 +457,8 @@ class Agent:
             self.config_proof='source_correlated' if view['valid'] else 'unverified'
             self.last_config_rev=self.source.revision
         self._watch_link(host)
-        latest=[op for op in self.journal.latest(20) if op['request'].get('op') not in READ_OPS]
-        remote=next((op for op in latest if op.get('link') in ('ground','backup')),None)
+        latest=self.journal.latest(1,READ_OPS)
+        remote=self.journal.latest(1,READ_OPS,links=('ground','backup'))
         alerts=[]
         if self.demo: alerts.append({'severity':'warning','code':'DEMO','text':'DEMO - bukan data perangkat'})
         if not self.source.path: alerts.append({'severity':'warning','code':'SETUP_REQUIRED','text':'Pilih folder output SDR terlebih dahulu'})
@@ -484,7 +484,7 @@ class Agent:
                       'traffic_layer':'PPP_IP_COUNTERS','profile':self.profile,'bulk_pause':self.bulk_reason,'angular_aborted':self.angular_abort},
               'config':self.config_view(),'capabilities':self.capabilities(),
               'last_operation':self.commands.public(latest[0]) if latest else None,
-              'last_remote_operation':self.commands.public(remote) if remote else None,
+              'last_remote_operation':self.commands.public(remote[0]) if remote else None,
               'operation_seq':self.operation_seq,'remote_rejects':list(self.remote_rejects),'active_alerts':alerts}
         with self.lock: self.snapshot_data=snap
     def snapshot(self):

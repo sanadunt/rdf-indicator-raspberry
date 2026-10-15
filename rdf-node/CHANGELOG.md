@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+- Edge panel: **Restart T900** in `Kontrol > Raspberry` restarts the fixed `t900-ppp.service` from
+  the touch panel. It needs the existing one-time `sudo rdf-node controls approve --ppp-restart`
+  (controlled mode, `control.ppp_restart_enabled`, helper `allow_ppp_restart`); when disabled the
+  dialog says why. Local `ppp.restart` is not rejected `CLOCK_UNTRUSTED` (a Pi without RTC gets
+  NTP over the link that is down) and ignores `base_rev`.
+- `ppp.restart` from every origin runs on its own small worker lane: an SDR start/restart still
+  verifying (`BUSY`) no longer blocks it, and it does not block SDR mutations. New rejections:
+  `PPP_RESTART_IN_PROGRESS` (a previous restart is still running or being observed) and
+  `PPP_RESTART_TOO_SOON` (less than 15 s since the last accepted request, any origin).
+- The helper now also restarts a `failed` unit and one in `activating/auto-restart` (any origin),
+  and starts an `inactive` unit for the local panel only. A pending job is still refused
+  (`PPP_RESTART_PENDING`).
+- PPP recovery observer on the Edge for local, Ground, and backup restarts: after
+  `PPP_RESTART_REQUESTED` it probes the link about every second and reports `APPLIED` with proof
+  (PPP cycled, interface up, peer ping reply, primary MQTT ready over the new link) or, after
+  120 s, `OUTCOME_UNKNOWN` with `PPP_RECOVERY_TIMEOUT` or `PPP_CYCLE_NOT_OBSERVED`. The panel shows
+  the steps (`Restart diminta`, `PPP turun/naik`, `PPP UP`, `Ping Ground`, `MQTT utama`) and
+  `Tersambung ke Ground ✓`, with `Coba lagi` after a timeout. The built-in Ground receiver keeps its
+  own health-based reconcile and does not adopt the observer's final ACK.
+- Snapshot adds `link.ppp_service` (`state`, `substate`, `restarts` of `t900-ppp.service`) and
+  `link.ppp_recovery` (kept 90 s after it finishes). The Link tab `Rincian` view shows
+  `Layanan PPP`. `telemetry/health/detail` adds `ppp`, `peer`, `ppp_svc`, and `ppp_restarts`
+  (about +62 B per message, ~6 B/s), so a backup-broker consumer can see the primary link state.
+- After the PPP interface comes back up or the peer ping returns, the Agent calls `kick()` on the
+  primary MQTT clients so they reconnect without waiting out the backoff.
+- MQTT client: the reconnect backoff resets after a session that stayed connected for at least 20 s
+  after CONNACK; shorter sessions and failed connects keep growing it up to `reconnect_max`, so a
+  rejected SUBACK/PUBACK no longer reconnects every second. PINGREQ is also sent after `keepalive`
+  seconds without receiving anything, even while QoS 0 telemetry keeps the transmit side busy.
+  New `queue_age_ms` status field.
+- `CONTROL_BACKLOG` now pauses primary Angular only when the oldest queued Control message is older
+  than 3 s or an in-flight QoS 1 PUBLISH has waited more than 5 s for PUBACK, instead of on any
+  PUBACK slower than 500 ms.
+- Remote-command indicator: the Edge journal records each command's origin (`local`, `ground`,
+  `backup`) and before-values (new `link` and `meta` columns, migrated in place on existing
+  databases). Public operation records add `origin`, `summary` (`{kind, changes:{field:{from,to}}}`),
+  and `reason`. The snapshot adds `last_remote_operation`, `operation_seq`, and `remote_rejects` (up
+  to five recent remote rejections); `last_operation` skips read-only operations. The panel shows a
+  `Perintah dari GROUND` / `Perintah dari CADANGAN` banner with an Indonesian summary and stage,
+  origin chips `[G]`/`[C]`/`[L]` and reasons in the CMD row, and a `Riwayat` dialog with the last 10
+  mutations. Old operations no longer toast on page load.
+- Docs: new `docs/T900_PPP.md` (pre-flight procedure, progress steps, why unplugging the T900
+  helps, hardening both ends, diagnostics). New examples under `deploy/examples/t900/` (udev rules
+  for both hosts, pppd options, a `Restart=always` drop-in); they are not installed by
+  `install.sh`.
+
 - Add an optional backup MQTT broker on the Edge (`mqtt.backup`, panel `Data > Cadangan`). A third
   client, `<client_id>-backup`, mirrors every Edge publish to a LAN or online broker under the same
   `sdr/v2/{node_id}` topics, independent of the PPP/T900 primary, and keeps publishing while the

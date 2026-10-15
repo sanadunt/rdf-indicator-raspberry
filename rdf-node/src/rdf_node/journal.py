@@ -57,10 +57,28 @@ class Journal:
             self.db.execute('UPDATE operations SET stage=?,result=?,updated=? WHERE id=?',
                 (stage,compact(result or {}).decode(),now_ms(),id))
         return self.lookup(id)
-    def latest(self,n=20):
+    def latest(self,n=20,skip_ops=(),links=None):
+        """Newest operations first; skip_ops drops ops by name, links keeps only those origins."""
+        columns='SELECT id, hash, request, actor, stage, result, updated, link, meta FROM operations'
+        where=[];params=[]
+        if links:
+            where.append(f"link IN ({','.join('?'*len(links))})");params.extend(links)
         with self.lock:
-            rows=self.db.execute('SELECT id, hash, request, actor, stage, result, updated, link, meta FROM operations '
-                                 'ORDER BY updated DESC LIMIT ?',(n,)).fetchall()
+            if skip_ops:
+                try:
+                    clause=f"coalesce(json_extract(request,'$.op'),'') NOT IN ({','.join('?'*len(skip_ops))})"
+                    sql=columns+' WHERE '+' AND '.join(where+[clause])+' ORDER BY updated DESC LIMIT ?'
+                    rows=self.db.execute(sql,(*params,*skip_ops,n)).fetchall()
+                except sqlite3.OperationalError:
+                    # SQLite built without JSON1: filter in Python.
+                    sql=columns+(' WHERE '+' AND '.join(where) if where else '')+' ORDER BY updated DESC'
+                    rows=[]
+                    for r in self.db.execute(sql,params):
+                        if json.loads(r[2]).get('op') not in skip_ops: rows.append(r)
+                        if len(rows)>=n: break
+            else:
+                sql=columns+(' WHERE '+' AND '.join(where) if where else '')+' ORDER BY updated DESC LIMIT ?'
+                rows=self.db.execute(sql,(*params,n)).fetchall()
             return [dict(id=r[0],hash=r[1],request=json.loads(r[2]),actor=r[3],stage=r[4],result=json.loads(r[5]),
                          updated_ms=r[6],link=r[7],meta=json.loads(r[8] or '{}')) for r in rows]
     def pending_shutdowns(self):

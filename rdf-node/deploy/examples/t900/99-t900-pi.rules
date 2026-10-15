@@ -1,0 +1,39 @@
+# CONTOH SAJA - TIDAK dipasang otomatis oleh install.sh RDF Node.
+# Sisi Raspberry/Edge: alias stabil /dev/t900 untuk adapter USB-serial radio T900.
+#
+# RDF Node membaca alias ini (link.serial_alias) dan membandingkan properti udev
+# ID_VENDOR_ID, ID_MODEL_ID, dan ID_PATH dengan link.expected_vid, link.expected_pid, dan
+# link.expected_usb_path di /etc/rdf-node/config.yaml. Bila berbeda, tab Link menampilkan
+# IDENTITY_MISMATCH; bila alias tidak ada, MISSING.
+#
+# Sebelum memasang:
+#   1. Ganti GANTI_ID_PATH_PI dengan nilai ID_PATH port USB tempat T900 dicolok, dari:
+#        udevadm info --query=property --name=/dev/ttyUSB0 | grep -E '^(ID_PATH|ID_VENDOR_ID|ID_MODEL_ID|ID_SERIAL_SHORT)='
+#      Contoh format (Raspberry Pi 5, satu port tertentu): platform-xhci-hcd.0-usb-0:2:1.0
+#   2. Pastikan VID/PID sesuai hasil udevadm (contoh ini CH340: 1a86:7523).
+#   3. Samakan link.expected_usb_path di config.yaml dengan ID_PATH yang sama.
+#   4. Selalu colok T900 ke port fisik yang sama; ID_PATH mengikuti port, bukan radio.
+#
+# Pasang manual (lihat README.md di folder ini), sebaiknya dengan akses lokal/LAN cadangan:
+#   sudo install -m 0644 99-t900-pi.rules /etc/udev/rules.d/99-t900-pi.rules
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger --subsystem-match=tty --action=add
+#   ls -l /dev/t900 && readlink -f /dev/t900
+#
+# Aturan ini memakai ID_PATH/ID_VENDOR_ID/ID_MODEL_ID yang diisi aturan serial bawaan systemd
+# (60-serial.rules atau 60-persistent-serial.rules) yang berjalan sebelum file 99-*.
+
+ACTION=="remove", GOTO="rdf_t900_pi_end"
+SUBSYSTEM!="tty", GOTO="rdf_t900_pi_end"
+KERNEL!="ttyUSB[0-9]*", GOTO="rdf_t900_pi_end"
+
+# Opsi A (disarankan; CH340 umumnya tidak punya nomor seri unik): cocokkan port USB fisik.
+# ID_MM_DEVICE_IGNORE=1 mencegah ModemManager (bila terpasang) membuka port radio.
+ENV{ID_VENDOR_ID}=="1a86", ENV{ID_MODEL_ID}=="7523", ENV{ID_PATH}=="GANTI_ID_PATH_PI", SYMLINK+="t900", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# Opsi B (hanya bila adapter punya ID_SERIAL_SHORT yang unik): hapus tanda # di baris bawah dan
+# beri tanda # pada Opsi A. Monitor RDF Node tetap membandingkan ID_PATH, jadi
+# link.expected_usb_path harus tetap sesuai port yang dipakai.
+#ENV{ID_VENDOR_ID}=="GANTI_VID", ENV{ID_MODEL_ID}=="GANTI_PID", ENV{ID_SERIAL_SHORT}=="GANTI_SERIAL", SYMLINK+="t900", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+LABEL="rdf_t900_pi_end"

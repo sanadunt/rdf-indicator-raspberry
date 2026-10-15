@@ -33,9 +33,22 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
   spektrum 360° (skala relatif per frame) hanya tampil untuk deteksi valid dengan sampel yang sama;
   sudut raw/UNVERIFIED tetap berupa angka. Ketuk dial untuk **mode baca jauh** layar penuh.
 - Dial menampilkan jejak arah valid terakhir (maks. 8 titik, 30 detik; dihapus saat deteksi tidak
-  valid). Baris CMD menampilkan stage operasi apa adanya dengan warna, plus notifikasi singkat saat
-  operasi selesai/gagal. Ikon tab diberi titik kuning/merah bila halaman itu memuat masalah, dan
-  halaman dapat digeser kiri/kanan di layar sentuh.
+  valid). Baris CMD menampilkan chip asal `[G]` Ground, `[C]` broker cadangan, atau `[L]` panel
+  lokal, nama operasi dalam bahasa Indonesia, stage apa adanya dengan warna, dan alasan singkat bila
+  gagal/ditolak/belum pasti. Notifikasi singkat muncul saat operasi selesai/gagal, tidak untuk
+  operasi baca dan tidak untuk operasi lama saat halaman dimuat ulang. Ikon tab diberi titik
+  kuning/merah bila halaman itu memuat masalah, dan halaman dapat digeser kiri/kanan di layar sentuh.
+- **Indikator perintah remote:** perintah dari Ground atau broker cadangan memunculkan banner
+  `Perintah dari GROUND` / `Perintah dari CADANGAN` dengan ringkasan perubahan (misalnya
+  `Frekuensi VFO 433,920 → 434,000 MHz`) dan status (diproses, diterapkan, tersimpan belum
+  terbukti, gagal). Banner tampil di atas dialog dan membangunkan layar hitam; banner `diterapkan`
+  hilang sendiri setelah 10 detik, lainnya sampai disentuh. Tombol `Config > Riwayat` menampilkan
+  10 perubahan terakhir beserta asal, status, alasan, dan jumlah perintah remote yang ditolak.
+- **Restart T900** di `Config > Login > Kontrol > Raspberry` me-restart `t900-ppp.service` lokal,
+  juga saat MQTT/PPP putus total, lalu menampilkan progres `Restart diminta → PPP turun/naik →
+  PPP UP → Ping Ground → MQTT utama` sampai **Tersambung ke Ground ✓** atau batas 120 detik. Tab
+  Link > Rincian menampilkan status `Layanan PPP`. Prosedur pra-terbang dan pencegahan cabut-colok
+  T900: [T900_PPP.md](docs/T900_PPP.md).
 - `Config > Tampilan` menyimpan mode gelap/terang/malam (merah), aksen warna, font lokal, dan
   **layar hitam otomatis** (mati, 1, 5, atau 15 menit tanpa sentuhan). Tombol `Config > Layar hitam`
   menghitamkan layar seketika. Layar hitam hanya menampilkan jam redup (jam sistem Pi; ditandai
@@ -49,15 +62,17 @@ Bukan sekadar mockup. Tidak perlu npm, pip, Docker, atau mengubah environment Co
 - `Data > Cadangan` mengatur **broker MQTT cadangan** opsional (LAN atau online) yang menerima salinan semua
   publish Edge, terpisah dari PPP/T900, dan tetap berjalan saat broker utama mati. Lihat bagian 4.
 - Daftar Data memuat topic/payload keluar dan command dari Ground; angular terkompresi, raw IQ tidak dikirim.
-- Jurnal command SQLite, ID dedup, expiry/session/revision validation, satu mutasi aktif.
+- Jurnal command SQLite, ID dedup, expiry/session/revision validation, satu mutasi aktif (restart PPP memakai jalur sendiri).
 - Safe settings patch dan Start/Stop/Restart stack SDR hanya memakai target helper yang fixed; panel Edge tetap mengikuti approval lokal, Ground tidak perlu approval root remote.
-- Reboot/shutdown Ground memakai challenge + konfirmasi operator tanpa approval root; Ground juga dapat meminta restart fixed `t900-ppp.service`.
+- Reboot/shutdown Ground memakai challenge + konfirmasi operator tanpa approval root; Ground juga dapat meminta restart fixed `t900-ppp.service`, dengan pemantau pemulihan link yang sama di Edge.
 - Receiver Ground dan preview grafik/API di port **8791**, terpisah dari dashboard lama.
 - Mode DEMO yang tidak mengirim MQTT dan tidak menulis hardware.
 - Kedua panel mempertahankan snapshot terakhir sebagai STALE saat API gagal; Retry melakukan fetch segera, polling rutin tetap berjalan, dan tidak ada recovery mutatif otomatis.
 
 **Tidak dikirim:** raw IQ, waterfall, audio, video, logs panjang, atau full settings rutin.
-**Tidak dipasang:** driver layar, autopilot, engine KrakenSDR, atau konfigurasi radio/PPP baru.
+**Tidak dipasang:** driver layar, autopilot, engine KrakenSDR, atau konfigurasi radio/PPP/udev baru.
+Contoh udev, opsi pppd, dan drop-in systemd untuk link T900 ada di
+[deploy/examples/t900/](deploy/examples/t900/README.md) dan hanya dipasang manual.
 
 ## 2. Persyaratan
 
@@ -352,8 +367,9 @@ Target operasi yang tetap harus disiapkan sekali:
   compare-digest; perubahan writer bersamaan dapat ditolak sebagai conflict.
 - Start/Stop/Restart hanya tersedia untuk unit SDR fixed yang diaudit dan memakai stop-intent
   guard; tidak ada unit atau shell command dari payload.
-- PPP restart hanya menargetkan `t900-ppp.service`, dan helper mengecek unit loaded, active, tanpa
-  systemd job pada tiap request.
+- PPP restart hanya menargetkan `t900-ppp.service`. Helper mengecek unit loaded, tanpa systemd job,
+  dan `active`, `failed`, atau `activating/auto-restart` pada tiap request; unit `inactive` hanya
+  dapat dinyalakan lagi dari panel Edge lokal.
 - Reboot/shutdown tetap memakai Prepare/Execute, challenge sekali pakai 30 detik, konfirmasi akhir,
   intent/jurnal durable, dan tidak mengulang otomatis.
 
@@ -381,8 +397,9 @@ sudo rdf-node controls approve --lifecycle --ppp-restart --reboot --shutdown
 ```
 
 Approval meminta `APPROVE`, `AUDITED`, `T900 PPP RESTART`, `REBOOT`, dan `SHUTDOWN`; PPP
-melakukan preflight unit. `--lifecycle` menyiapkan target Ground yang fixed/audited, sementara flag
-lain mengatur gate panel Edge lokal. Ground tidak memakai approval root per command.
+melakukan preflight unit (loaded, tanpa job, dan `active`/`failed`/`activating/auto-restart`).
+`--lifecycle` menyiapkan target Ground yang fixed/audited, sementara flag lain mengatur gate panel
+Edge lokal. Ground tidak memakai approval root per command.
 
 Approval root tersimpan di helper policy/config dan berlaku lintas reboot. `--lifecycle`,
 `--ppp-restart`, `--reboot`, dan `--shutdown` mengaktifkan aksi Edge terkait; setelah provisioning,
@@ -392,6 +409,15 @@ single-writer `--settings` yang terpisah.
 Panel Config -> Login -> Kontrol memerlukan sesi Admin dengan PIN. Start/Stop/Restart mengelola
 unit `link.engine_service` yang fixed dan audited (`rdfsdr.service` untuk konfigurasi ini), bukan
 `rdf-edge.service` atau unit PPP.
+**Restart T900** di bagian Raspberry memerlukan approval `--ppp-restart` dan konfirmasi layar. Ia
+hanya me-restart `t900-ppp.service`; radio tidak dimatikan dayanya, USB tidak di-reset, dan pppd
+Ubuntu serta broker cadangan tidak disentuh. Restart PPP lokal tidak ditolak karena jam belum
+sinkron dan tidak menunggu verifikasi SDR yang sedang berjalan; satu restart PPP aktif sekaligus
+dan jeda minimum 15 detik berlaku untuk semua asal. Kartu progres baru menampilkan
+**Tersambung ke Ground ✓** setelah PPP berganti siklus, ping `10.90.0.1` dibalas, dan MQTT utama
+tersambung; tanpa bukti itu dalam 120 detik hasilnya `OUTCOME_UNKNOWN`. Bila tombol nonaktif,
+panel menulis `Helper kontrol belum tersedia.` atau
+`Perlu approval root: sudo rdf-node controls approve --ppp-restart`.
 Reboot lokal memerlukan approval `--reboot`, challenge satu kali 30 detik, jurnal durable, dan
 konfirmasi akhir pada layar. Ground reboot memakai jalur terpisah dan tidak memerlukan approval
 root lokal.
@@ -408,10 +434,12 @@ meminta konfirmasi ketik `SHUTDOWN RECONCILED` dan helper hanya menghapus intent
 ditolak. Marker boot sebelumnya dibersihkan pada pemeriksaan helper berikutnya. Perangkat harus
 dinyalakan lagi secara lokal.
 Restart T900 PPP di Ground menargetkan hanya `t900-ppp.service`, tanpa approval root. Pada setiap
-request helper memerlukan unit `loaded`, `active`, dan tanpa systemd job pending. Jika MQTT
-Control sudah terputus, Ground tidak dapat mengirim request. `PPP_RESTART_REQUESTED` hanya
-berarti systemd menerima permintaan; `APPLIED` menunggu health node yang lebih baru dalam sesi
-yang sama dan tidak membuktikan unit PPP/link pulih. Ground tidak mengirim ulang hasil unknown;
+request helper memerlukan unit `loaded`, tanpa systemd job pending, dan `active`, `failed`, atau
+`activating/auto-restart`. Jika MQTT Control sudah terputus, Ground tidak dapat mengirim request;
+gunakan tombol Restart T900 di panel Edge. `PPP_RESTART_REQUESTED` hanya berarti systemd menerima
+permintaan. Edge lalu memantau link dan mengirim ACK akhir `APPLIED` atau `OUTCOME_UNKNOWN`;
+receiver Ground bawaan tetap menandai `APPLIED` dari health node yang lebih baru dalam sesi yang
+sama, yang tidak membuktikan unit PPP/link pulih. Ground tidak mengirim ulang hasil unknown;
 request baru memerlukan health fresh dan konfirmasi tambahan. Uji unit serta waktu pemulihan
 tetap perlu dilakukan pada Raspberry.
 Form Ground hanya mengirim perubahan pada field allowlist: center+VFO0 bersama, bandwidth,
@@ -453,7 +481,9 @@ Tidak ada perintah reboot atau shutdown nyata dari test suite. Jalankan tanpa su
 | Ping peer PPP | Tab Link: satu ping ICMP tiap sekitar 5 detik dipaksa melalui interface PPP; tanpa balasan bukan bukti link mati. |
 | Grafik tidak mulai | Tab Link: gate source/angle, backlog/stabilisasi, CONTROL profile |
 | CAPABILITY DISABLED | Panel Edge lokal: pastikan mode controlled dan approval root satu kali untuk aksi; Ground: periksa helper target fixed/audited, health/session, dan kesiapan MQTT Control. |
-| PPP restart tidak tersedia | Cek capability, health fresh, MQTT Control, dan status unit fixed pada Raspberry |
+| PPP restart tidak tersedia | Panel Edge: `sudo rdf-node controls approve --ppp-restart` dan helper aktif. Ground: cek capability, health fresh, MQTT Control, dan status unit fixed pada Raspberry |
+| PPP/T900 putus sebelum terbang | Panel Edge `Kontrol > Restart T900`, tunggu **Tersambung ke Ground ✓**; bila `OUTCOME_UNKNOWN`, periksa pppd Ubuntu, daya, kabel, antena. Lihat [T900_PPP.md](docs/T900_PPP.md) |
+| `PPP_RESTART_TOO_SOON` / `PPP_RESTART_IN_PROGRESS` | Tunggu 15 detik atau sampai pemantauan restart sebelumnya selesai (maks. 120 detik) |
 | PERSISTED_UNVERIFIED | Settings tersimpan; runtime evidence belum lengkap, bukan masalah ACK MQTT |
 | Browser tidak muncul | Jalankan `rdf-kiosk-session` dari desktop grafis; launcher memakai `--disable-gpu`. Pastikan `rdf-edge.service` aktif pada `127.0.0.1:8790`. |
 
@@ -483,6 +513,7 @@ Jangan membagikan full settings, credential bundle, file hash/password atau log 
 - [Setup MQTT Ground](docs/MQTT_GROUND.md)
 - [Command, bukti hasil, dan keselamatan lifecycle](docs/CONTROL.md)
 - [Operasi, backup dan rollback](docs/OPERATIONS.md)
+- [T900/PPP: restart, pra-terbang, dan pencegahan](docs/T900_PPP.md)
 - [Pengujian dan keterbatasan verifikasi](docs/TEST_REPORT.md)
 - [Sumber teknis dan lisensi](docs/SOURCES.md)
 - [Screenshot panel](evidence/overview-480x320.png)

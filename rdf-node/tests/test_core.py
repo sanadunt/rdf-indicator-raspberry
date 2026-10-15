@@ -382,6 +382,27 @@ class JournalTests(unittest.TestCase):
         op=self.j.lookup('x')
         self.assertEqual((op['link'],op['meta']),('backup',{'before':{'profile':'balanced'}}))
         self.assertEqual(self.j.latest(1),[op])
+    def test_latest_can_skip_read_ops_and_select_remote_origin(self):
+        import sqlite3
+        for i,(op,link) in enumerate((('stream.set','backup'),('ppp.restart','local'),('config.get','ground'),('operation.get','ground'))):
+            self.j.accept({'id':f'op{i}','op':op},'test',link)
+            with self.j.lock,self.j.db:self.j.db.execute('UPDATE operations SET updated=? WHERE id=?',(i,f'op{i}'))
+        reads=('config.get','operation.get')
+        expected=(['op1','op0'],['op0'])
+        self.assertEqual([op['id'] for op in self.j.latest(5)],['op3','op2','op1','op0'])
+        self.assertEqual(([op['id'] for op in self.j.latest(5,reads)],
+                          [op['id'] for op in self.j.latest(5,reads,links=('ground','backup'))]),expected)
+        real=self.j.db
+        class NoJson:
+            def execute(self,sql,params=()):
+                if 'json_extract' in sql:raise sqlite3.OperationalError('no such function: json_extract')
+                return real.execute(sql,params)
+            def __getattr__(self,name):return getattr(real,name)
+        self.j.db=NoJson()
+        try:
+            self.assertEqual(([op['id'] for op in self.j.latest(1,reads)],
+                              [op['id'] for op in self.j.latest(5,reads,links=('ground','backup'))]),(['op1'],['op0']))
+        finally:self.j.db=real
     def test_existing_database_gains_origin_columns(self):
         import sqlite3
         path=Path(self.tmp.name)/'old.db';db=sqlite3.connect(path)
