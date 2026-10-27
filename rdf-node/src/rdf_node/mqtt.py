@@ -5,6 +5,8 @@ retained state, LWT, Message Expiry, PING, verified TLS, and MQTT binary frames
 over WebSocket. Not implemented: QoS 2, persistent broker sessions,
 topic aliases, enhanced authentication or a broker. Only one outbound publish
 is in flight. No offline replay: each reconnect creates a fresh protocol session.
+PINGREQ goes out on TX or RX silence; a PINGRESP later than keepalive resets the session unless
+TCP is still draining our own backlog (slow link), which is tolerated up to 4x keepalive.
 Plaintext transports do not encrypt credentials or MQTT payloads.
 """
 from __future__ import annotations
@@ -21,8 +23,12 @@ import time
 from pathlib import Path
 from .util import compact, strict_json, stable_read
 from .mqtt_ws import WebSocketReader,client_handshake,encode_client_frame,validate_websocket_path
+try: import fcntl,termios
+except ImportError: fcntl=termios=None  # non-Linux: the TCP progress probe reports "unknown"
 
 MAX_PACKET = 16384
+# A late PINGRESP is tolerated up to this many keepalives while TCP still makes forward progress.
+PING_DRAIN_FACTOR = 4
 
 def vi(n:int) -> bytes:
     if type(n) is not int or not 0<=n<=268435455: raise ValueError('MQTT_VARINT_RANGE')
@@ -186,10 +192,38 @@ class Outbox:
         with self.lock: message=self.data.pop(key,None)
         if message: _notify_error(message.on_error,reason); return True
         return False
+    def oldest_age_ms(self,now=None):
+        """Age of the oldest message still queued (the in-flight publish is not in the outbox)."""
+        now=time.monotonic() if now is None else now
+        with self.lock:
+            if not self.data: return 0
+            oldest=min(m.offered for m in self.data.values())
+        return max(0,int((now-oldest)*1000))
     def status(self):
         with self.lock:
             return dict(depth=len(self.data),bytes=sum(len(m.payload) for m in self.data.values()),
                         superseded=self.superseded,rejected=self.rejected,expired=self.expired)
+
+def _tcp_progress(sock):
+    """(bytes not yet ACKed in the kernel send queue, ms since the peer last ACKed) or None.
+
+    Linux SIOCOUTQ (== TIOCOUTQ) and TCP_INFO tcpi_last_ack_recv (u32 at offset 56). Plain TCP,
+    TLS (SSLSocket) and WebSocket sessions all sit on the same TCP socket. Any error -> None."""
+    try:
+        outq=struct.unpack('i',fcntl.ioctl(sock.fileno(),termios.TIOCOUTQ,b'\0\0\0\0'))[0]
+        info=sock.getsockopt(socket.IPPROTO_TCP,socket.TCP_INFO,104)
+        last_ack_recv_ms=struct.unpack_from('I',info,56)[0]
+    except Exception: return None
+    if outq<0: return None
+    return outq,last_ack_recv_ms
+
+def _link_draining(progress,keepalive,ping_unsent=False):
+    """A slow but working link: the peer ACKed within keepalive and the PINGREQ still waits behind
+    our own backlog (bytes unACKed in the kernel, or the PINGREQ not yet handed to the kernel).
+    A dead link sends no ACKs, so it is not draining. Unknown evidence is not draining."""
+    if progress is None: return False
+    outq,last_ack_recv_ms=progress
+    return last_ack_recv_ms<keepalive*1000 and (outq>0 or bool(ping_unsent))
 
 class Bucket:
     def __init__(self,rate,capacity):
@@ -203,6 +237,11 @@ class Bucket:
         return False
 
 class Client:
+    # Reconnect backoff: start at RECONNECT_INITIAL_S and double per failed attempt up to
+    # cfg reconnect_max. A session that stayed connected (post-CONNACK) for at least
+    # STABLE_SESSION_S resets it; one that dies sooner keeps growing it (no 1 s storm).
+    RECONNECT_INITIAL_S=1.0
+    STABLE_SESSION_S=20.0
     def __init__(self, *, cfg, client_id, credentials_file=None, subscriptions=(),will=None,
                  on_message=None, rate=850, bulk=False):
         self.cfg=cfg; self.client_id=client_id; self.credentials_file=credentials_file
@@ -213,13 +252,32 @@ class Client:
         self.connected=False; self.ready=False; self.generation=0; self.error=None
         self.last_success=None; self.tx_bytes=0; self.rx_bytes=0; self.reconnects=0; self.pending_age_ms=0
         self.mid=0; self._publish=None; self._pub_result=None; self._socket=None
+        # _wake is set by kick() (skip the backoff) and by stop(); _kick_lock orders kick() against CONNACK.
+        self._wake=threading.Event(); self._kick_lock=threading.Lock()
+        self._clock=time.monotonic; self._connected_at=None; self._backoff_initial=self.RECONNECT_INITIAL_S
     def start(self):
         if self.thread and self.thread.is_alive(): return
         self.thread=threading.Thread(target=self._run,name=self.client_id,daemon=True); self.thread.start()
     def stop(self):
-        self.stop_event.set()
+        self.stop_event.set(); self._wake.set()
         if self.thread: self.thread.join(7)
     def reset(self): self.reset_event.set()
+    def kick(self):
+        """Reconnect now: skip the remaining backoff and reset it. No-op while connected. Any thread."""
+        with self._kick_lock:
+            if self.connected or self.stop_event.is_set(): return False
+            self._wake.set(); return True
+    @property
+    def queue_age_ms(self):
+        """Age in ms of the oldest message still waiting in the outbox (not the in-flight one); 0 when empty."""
+        return self.outbox.oldest_age_ms()
+    @property
+    def socket_backlog(self):
+        """Bytes handed to the kernel but not yet ACKed by the peer; None when unknown or disconnected."""
+        sock=self._socket
+        if sock is None or not self.connected: return None
+        progress=_tcp_progress(sock)
+        return progress[0] if progress else None
     def offer(self,key,topic,payload,*,qos=0,retain=False,expiry=None,priority=2,on_sent=None,on_error=None):
         if not self.connected:
             _notify_error(on_error,'MQTT_DISCONNECTED'); return False
@@ -233,7 +291,8 @@ class Client:
     def status(self):
         return dict(state='CONNECTED' if self.connected else 'ERROR' if self.error else 'CONNECTING',
                     ready=self.ready,error=self.error,generation=self.generation,tx_bytes=self.tx_bytes,
-                    rx_bytes=self.rx_bytes,reconnects=self.reconnects,pending_age_ms=self.pending_age_ms,**self.outbox.status())
+                    rx_bytes=self.rx_bytes,reconnects=self.reconnects,pending_age_ms=self.pending_age_ms,
+                    queue_age_ms=self.queue_age_ms,**self.outbox.status())
     def _next_id(self):
         self.mid=(self.mid%65535)+1; return self.mid
     def _credentials(self):
@@ -243,10 +302,22 @@ class Client:
                 raise ValueError('CREDENTIAL_FORMAT')
             return j['username'],j['password']
         return None,None
-    def _run(self):
-        delay=1
+    def _backoff_wait(self,seconds):
+        """Wait out one reconnect delay. True when kick() cut it short."""
+        deadline=time.monotonic()+seconds
         while not self.stop_event.is_set():
-            self.reset_event.clear()
+            if self._wake.is_set():
+                self._wake.clear()
+                return not self.stop_event.is_set()
+            remaining=deadline-time.monotonic()
+            if remaining<=0: return False
+            # Bounded slices also notice a bare stop_event.set() that bypassed stop().
+            self._wake.wait(min(remaining,0.5))
+        return False
+    def _run(self):
+        delay=self._backoff_initial
+        while not self.stop_event.is_set():
+            self.reset_event.clear(); self._connected_at=None
             try:
                 self._session()
                 self.error=None if self.stop_event.is_set() else 'CONNECTION_CLOSED'
@@ -271,12 +342,15 @@ class Client:
                     self._socket=None
             if self.stop_event.is_set(): break
             self.reconnects+=1
-            if self.last_success is not None and time.monotonic()-self.last_success>20:
-                delay=max(delay,2)
-            self.stop_event.wait(delay+random.uniform(0,0.3))
-            delay=min(self.cfg.get('reconnect_max',30),delay*2)
-            if self.last_success is not None and time.monotonic()-self.last_success<20:
-                delay=1
+            # Only a session that stayed up post-CONNACK long enough proves the path; a session
+            # that fails sooner (SUBACK/PUBACK rejection, oversize packet, takeover) keeps backing off.
+            connected_at=self._connected_at
+            if connected_at is not None and self._clock()-connected_at>=self.STABLE_SESSION_S:
+                delay=self._backoff_initial
+            if self._backoff_wait(delay+random.uniform(0,0.3)):
+                delay=self._backoff_initial
+            else:
+                delay=min(self.cfg.get('reconnect_max',30),delay*2)
     def _session(self):
         transport=self.cfg.get('transport','tcp')
         if transport not in ('tcp','websocket'):raise ValueError('UNSUPPORTED_MQTT_TRANSPORT')
@@ -306,13 +380,14 @@ class Client:
         s.sendall(wire); self.tx_bytes+=len(wire); s.setblocking(False)
         reader=Reader(); self._pub_result=None; self._publish=None
         pending_sub=set(); writes=[]; current=None; sent_start=None
-        last_mqtt_tx=time.monotonic(); last_rx=last_mqtt_tx; handshake_deadline=last_mqtt_tx+10; ping_at=None
+        last_mqtt_tx=time.monotonic(); last_mqtt_rx=last_mqtt_tx; handshake_deadline=last_mqtt_tx+10; ping_at=None
+        ping_wire=None  # the queued PINGREQ write entry; its offset reaches len() once the kernel has it
         self._server_max_packet=MAX_PACKET; keepalive=self.cfg.get('keepalive',15)
         websocket_closing=False;websocket_close_sent=False;websocket_close_received=False;websocket_close_deadline=None
         def queue_wire(data):
             if websocket and websocket_closing:return
             if len(writes)>20: raise ValueError('MQTT_CONTROL_QUEUE_LIMIT')
-            writes.append([data,0,None,False,True])
+            entry=[data,0,None,False,True]; writes.append(entry); return entry
         def queue_ws_control(opcode,payload):
             nonlocal websocket_close_sent,websocket_close_deadline
             if opcode==10 and websocket_closing:return
@@ -328,9 +403,20 @@ class Client:
                 raise ValueError('WEBSOCKET_CLOSE_TIMEOUT')
             if not self.connected and now>handshake_deadline: raise ValueError('CONNACK_TIMEOUT')
             if self.connected and pending_sub and now>handshake_deadline: raise ValueError('SUBACK_TIMEOUT')
-            if keepalive>0 and ping_at and now-ping_at>keepalive: raise ValueError('PING_TIMEOUT')
-            if not websocket_closing and self.connected and keepalive>0 and now-last_mqtt_tx>=keepalive and ping_at is None:
-                queue_wire(b'\xc0\x00'); ping_at=now
+            if keepalive>0 and ping_at and now-ping_at>keepalive:
+                # On a slow but working link (T900 carrying less than the offered load) the PINGREQ
+                # waits behind our own backlog, so its PINGRESP is late, not lost. Tolerate that up
+                # to PING_DRAIN_FACTOR*keepalive while TCP still makes forward progress; a dead link
+                # sends no ACKs and still times out about keepalive after the PINGREQ.
+                ping_unsent=ping_wire is not None and ping_wire[1]<len(ping_wire[0])
+                if (now-ping_at>PING_DRAIN_FACTOR*keepalive or
+                        not _link_draining(_tcp_progress(s),keepalive,ping_unsent)):
+                    raise ValueError('PING_TIMEOUT')
+            # Ping on TX silence (broker keepalive) and on MQTT RX silence, so a dead link is
+            # found even while QoS0 telemetry keeps the transmit side busy.
+            if (not websocket_closing and self.connected and keepalive>0 and ping_at is None and
+                    (now-last_mqtt_tx>=keepalive or now-last_mqtt_rx>=keepalive)):
+                ping_wire=queue_wire(b'\xc0\x00'); ping_at=now
             if current is None and writes:
                 current=writes.pop(0)
                 if websocket and not current[3]:current[0]=encode_client_frame(current[0]);current[3]=True
@@ -382,11 +468,13 @@ class Client:
                 try: chunk=s.recv(8192)
                 except (ssl.SSLWantReadError,ssl.SSLWantWriteError,BlockingIOError): continue
                 if not chunk: raise OSError('socket closed')
-                self.rx_bytes+=len(chunk); last_rx=time.monotonic()
+                self.rx_bytes+=len(chunk)
                 packets=[]
                 if websocket:
                     for event,payload in ws_reader.feed(chunk):
                         if event=='data':
+                            # WebSocket control frames (ping/pong) do not prove the broker is alive.
+                            last_mqtt_rx=time.monotonic()
                             for offset in range(0,len(payload),8192):
                                 packets.extend(reader.feed(payload[offset:offset+8192]))
                         elif event=='ping':queue_ws_control(10,payload)
@@ -396,7 +484,8 @@ class Client:
                                 if current[2] is not None:self._publish=None;self._pub_result=None
                                 current=None
                             writes.clear();queue_ws_control(8,payload)
-                else:packets=reader.feed(chunk)
+                else:
+                    last_mqtt_rx=time.monotonic();packets=reader.feed(chunk)
                 for header,body in packets:
                     kind=header>>4
                     if kind==2:
@@ -407,7 +496,11 @@ class Client:
                         if end!=len(body) or props.get(36,1)<1 or props.get(37,1)!=1: raise ValueError('BROKER_CAPABILITY_UNSUPPORTED')
                         self._server_max_packet=props.get(39,MAX_PACKET)
                         keepalive=props.get(19,keepalive)
-                        self.connected=True; self.error=None; self.generation+=1; self.last_success=time.monotonic()
+                        with self._kick_lock:
+                            # A kick() that raced this CONNACK is stale now; drop it.
+                            self.connected=True; self._wake.clear()
+                        self.error=None; self.generation+=1; self.last_success=time.monotonic()
+                        self._connected_at=self._clock()
                         handshake_deadline=time.monotonic()+10
                         for topic,qos,no_retained in self.subscriptions:
                             mid=self._next_id(); pending_sub.add(mid)
@@ -446,7 +539,7 @@ class Client:
                             self._pub_result=reason
                     elif kind==13:
                         if header!=0xd0 or body: raise ValueError('BAD_PINGRESP')
-                        ping_at=None
+                        ping_at=None; ping_wire=None
                     elif kind==14:
                         if websocket:
                             websocket_closing=True

@@ -5,6 +5,7 @@ import re
 import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from . import __version__
 from .util import now_ms, compact, strict_json, read_boot_id, atomic_write, stable_read
@@ -12,7 +13,7 @@ from .config import PROFILES
 from .journal import Journal
 from .source import Source
 from .monitor import Monitor
-from .control import CommandManager, OPS
+from .control import CommandManager, OPS, READ_OPS
 from .helper import call_helper
 from .mqtt import Client
 from .mqtt_ws import validate_mqtt_host,validate_websocket_path
@@ -21,6 +22,9 @@ UNVERIFIED_REASONS=frozenset(('SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'))
 # Cost-byte/s reserves based on current Control fixtures; invalid-source reserve omits normal DoA.
 ANGULAR_CONTROL_BASELINE_VALID=800
 ANGULAR_CONTROL_BASELINE_INVALID=510
+# Bulk yields the shared PPP link while a Control PUBACK is this late or this many Bulk bytes are unACKed.
+BULK_YIELD_PENDING_MS=1000
+BULK_YIELD_BACKLOG_BYTES=2048
 
 class Agent:
     def __init__(self,cfg,demo=False):
@@ -57,6 +61,9 @@ class Agent:
         self.mqtt_backup_topic_delivery={}; self._backup_generation=-1
         self.backup_bulk_reason=None; self.backup_last_angular_q=0; self.backup_angular_abort=0
         self.settings_request_link=None; self.backup_client_id=None
+        # Operator-visible command history and PPP link recovery state (panel only; no extra radio traffic).
+        self.operation_seq=0; self.remote_rejects=deque(maxlen=5)
+        self.ppp_recovery=None; self._last_ppp=None; self._last_probe=None
         self.backup_desired=self._load_backup_settings()
         self.backup_active=self.backup_desired
         self.backup_client=self._new_backup_client(self.backup_desired)
@@ -452,7 +459,9 @@ class Agent:
         if self.source.revision!=self.last_config_rev:
             self.config_proof='source_correlated' if view['valid'] else 'unverified'
             self.last_config_rev=self.source.revision
-        latest=self.journal.latest(1)
+        self._watch_link(host)
+        latest=self.journal.latest(1,READ_OPS)
+        remote=self.journal.latest(1,READ_OPS,links=('ground','backup'))
         alerts=[]
         if self.demo: alerts.append({'severity':'warning','code':'DEMO','text':'DEMO - bukan data perangkat'})
         if not self.source.path: alerts.append({'severity':'warning','code':'SETUP_REQUIRED','text':'Pilih folder output SDR terlebih dahulu'})
@@ -472,10 +481,14 @@ class Agent:
                       'ppp_probe':host['ppp_probe'],'ppp_peer':self.cfg['link']['peer_ip'],
                       'mqtt_control':cs,'mqtt_bulk':bs,'mqtt_topic_delivery':topic_delivery,
                       'mqtt_backup':self._backup_status(),
+                      'ppp_service':{k:v for k,v in (host.get('ppp_service') or {}).items() if k!='since'} or None,
+                      'ppp_recovery':self._ppp_recovery_view(),
                       'tx_kbit_s':host['tx_kbit_s'],'rx_kbit_s':host['rx_kbit_s'],
                       'traffic_layer':'PPP_IP_COUNTERS','profile':self.profile,'bulk_pause':self.bulk_reason,'angular_aborted':self.angular_abort},
               'config':self.config_view(),'capabilities':self.capabilities(),
-              'last_operation':self.commands.public(latest[0]) if latest else None,'active_alerts':alerts}
+              'last_operation':self.commands.public(latest[0]) if latest else None,
+              'last_remote_operation':self.commands.public(remote[0]) if remote else None,
+              'operation_seq':self.operation_seq,'remote_rejects':list(self.remote_rejects),'active_alerts':alerts}
         with self.lock: self.snapshot_data=snap
     def snapshot(self):
         with self.lock: return copy.deepcopy(self.snapshot_data)
@@ -545,10 +558,99 @@ class Agent:
                 accepted=True
         return accepted
     def operation_changed(self,id,op,stage,result,link=None):
+        self.operation_seq+=1
         suffix='ack/config' if op.startswith('config.') else 'ack/operation'
         # Commands from the backup broker are answered there only, so they never use the T900 budget.
         self._offer('op:'+id,suffix,{'v':2,'sid':self.sid,'id':id,'status':stage,'t':now_ms(),'rev':self.source.revision,'result':result},
                     qos=1,expiry=30,priority=0,links=('backup',) if link=='backup' else None)
+    # ---- PPP/T900 link recovery ----
+    PPP_RECOVERY_TIMEOUT_S=120; PPP_RECOVERY_LINGER_S=90
+    def remote_rejected(self,origin,op,error):
+        self.remote_rejects.appendleft({'t':now_ms(),'origin':origin,'op':op,'error':error})
+    def ppp_recovery_active(self):
+        r=self.ppp_recovery
+        return bool(r and r['phase'] not in ('DONE','TIMEOUT','FAILED'))
+    def ppp_recovery_begin(self,id,origin,link):
+        host=self.monitor.snapshot(); ctrl=self.clients.get('control'); svc=host.get('ppp_service') or {}
+        fast=getattr(self.monitor,'fast_probe',None)
+        if fast: fast(self.PPP_RECOVERY_TIMEOUT_S+30)
+        with self.lock:
+            self.ppp_recovery={'id':id,'origin':origin,'link':link,'phase':'REQUESTED','stage':'PPP_RESTART_REQUESTED',
+                'reason':None,'started_ms':now_ms(),'started':time.monotonic(),'finished':None,
+                'steps':{'requested':True,'cycled':False,'ppp_up':False,'peer_reply':False,
+                         'mqtt_ready':None if ctrl is None else False},
+                'gen0':ctrl.generation if ctrl else None,'svc0':(svc.get('since'),svc.get('restarts')),'rx_at_up':None}
+    def ppp_recovery_failed(self,id,origin,stage,error):
+        with self.lock:
+            self.ppp_recovery={'id':id,'origin':origin,'link':None,'phase':'FAILED','stage':stage,'reason':error,
+                'started_ms':now_ms(),'started':time.monotonic(),'finished':time.monotonic(),
+                'steps':{'requested':False,'cycled':False,'ppp_up':False,'peer_reply':False,'mqtt_ready':None},
+                'gen0':None,'svc0':(None,None),'rx_at_up':None}
+    def _ppp_recovery_view(self):
+        r=self.ppp_recovery
+        if not r: return None
+        end=r['finished'] or time.monotonic()
+        return {'id':r['id'],'origin':r['origin'],'phase':r['phase'],'steps':dict(r['steps']),'stage':r['stage'],
+                'reason':r['reason'],'started_ms':r['started_ms'],'elapsed_s':round(end-r['started'],1),
+                'timeout_s':self.PPP_RECOVERY_TIMEOUT_S,'late':bool(r.get('late'))}
+    def _kick_primary(self):
+        for client in self.clients.values():
+            kick=getattr(client,'kick',None)
+            if kick: kick()
+    def _watch_link(self,host):
+        ppp=host.get('ppp'); probe=host.get('ppp_probe')
+        # PPP came back: reconnect MQTT now instead of sitting out the remaining backoff.
+        if (self._last_ppp is not None and self._last_ppp!='UP' and ppp=='UP') or \
+           (self._last_probe is not None and self._last_probe!='REPLY' and probe=='REPLY'):
+            self._kick_primary()
+        self._last_ppp=ppp; self._last_probe=probe
+        r=self.ppp_recovery
+        if not r: return
+        now=time.monotonic()
+        if r['finished']:
+            if now-r['finished']>self.PPP_RECOVERY_LINGER_S: self.ppp_recovery=None; return
+            # A timed-out recovery keeps watching while it lingers, so a late recovery is shown too.
+            if r['phase']!='TIMEOUT': return
+        steps=r['steps']; ctrl=self.clients.get('control'); svc=host.get('ppp_service') or {}
+        cycled=(steps['cycled'] or ppp!='UP' or (svc.get('since'),svc.get('restarts'))!=r['svc0'] or
+                (ctrl is not None and r['gen0'] is not None and ctrl.generation!=r['gen0']))
+        steps['cycled']=cycled
+        if cycled and ppp=='UP':
+            if not steps['ppp_up']:
+                steps['ppp_up']=True; r['rx_at_up']=ctrl.rx_bytes if ctrl else None
+        if steps['ppp_up'] and probe=='REPLY': steps['peer_reply']=True
+        if ctrl is None: steps['mqtt_ready']=None
+        elif steps['ppp_up'] and ctrl.ready and (ctrl.generation!=r['gen0'] or
+                (r['rx_at_up'] is not None and ctrl.rx_bytes>r['rx_at_up'])):
+            # A fresh session, or broker traffic received after PPP returned, proves MQTT over the new link.
+            steps['mqtt_ready']=True
+        progress=('PEER_OK' if steps['peer_reply'] else 'PPP_UP' if steps['ppp_up'] else
+                  'RESTARTING' if cycled else 'REQUESTED')
+        done=steps['peer_reply'] and steps['mqtt_ready'] is not False
+        if r['finished']:
+            # The journal and ACK keep OUTCOME_UNKNOWN; only the panel view turns green.
+            if done: r['phase']='DONE'; r['late']=True; r['finished']=now
+            return
+        r['phase']=progress
+        timed_out=now-r['started']>self.PPP_RECOVERY_TIMEOUT_S
+        if not (done or timed_out): return
+        elapsed=round((now-r['started'])*1000)
+        if done:
+            stage='APPLIED'; result={'proof':{'ppp':'UP','peer':'REPLY',
+                'mqtt':'READY' if steps['mqtt_ready'] else 'DISABLED','cycled':True},'elapsed_ms':elapsed}
+            r['phase']='DONE'
+        else:
+            stage='OUTCOME_UNKNOWN'; r['phase']='TIMEOUT'
+            # Name the most likely cause from what the Edge already observed.
+            r['reason']=('T900_USB_MISSING' if host.get('usb')=='MISSING' else
+                         'MQTT_NOT_RECOVERED' if steps['peer_reply'] else
+                         'PPP_RECOVERY_TIMEOUT' if cycled else 'PPP_CYCLE_NOT_OBSERVED')
+            result={'reason':r['reason'],'phase':progress,'steps':dict(steps),'elapsed_ms':elapsed}
+        r['stage']=stage; r['finished']=now
+        try:
+            self.journal.update(r['id'],stage,result)
+            self.operation_changed(r['id'],'ppp.restart',stage,result,link=r['link'])
+        except Exception: pass
     def link_tls(self,link):
         if link=='backup': return bool(self.backup_client and self.backup_active['tls'])
         return bool(self.cfg['mqtt']['tls'])
@@ -634,7 +736,9 @@ class Agent:
                     self._offer('detail','telemetry/health/detail',{'v':2,'sid':self.sid,'t':now_ms(),
                         'usb':h['usb_count'],'sync':list(daq['sync'].values()),'cpu':h['cpu_percent'],'mem':h['memory_percent'],
                         'disk_free':h['disk_free_percent'],'throt':h['throttled'],'uv':h['undervoltage'],
-                        'tx':h['tx_kbit_s'],'rx':h['rx_kbit_s'],'adrop':self.angular_abort,'parse':self.source.parse_errors},
+                        'tx':h['tx_kbit_s'],'rx':h['rx_kbit_s'],'adrop':self.angular_abort,'parse':self.source.parse_errors,
+                        'ppp':h.get('ppp'),'peer':h.get('ppp_probe'),
+                        'ppp_svc':(h.get('ppp_service') or {}).get('state'),'ppp_restarts':(h.get('ppp_service') or {}).get('restarts')},
                         expiry=15,priority=4,links=ready)
                 state=self._state(s); state_changed=(state['run'],state['daq'],state['cfg'],state['profile'],state['clock'])
                 state_sent=False
@@ -695,7 +799,8 @@ class Agent:
                 if p_ready:
                     reason=source_reason
                     if reason is None and (not bulk or not bulk.ready): reason='BULK_NOT_READY'
-                    elif reason is None and ctrl.pending_age_ms>500: reason='CONTROL_BACKLOG'
+                    elif reason is None and (getattr(ctrl,'queue_age_ms',0)>3000 or ctrl.pending_age_ms>2500):
+                        reason='CONTROL_BACKLOG'
                     diagnostic_needed=reason is not None or now<self.bulk_resume_after
                     if (self.profile!='control' and diagnostic_needed and r and r['q']==d['q'] and
                             tick(diagnostic_schedule,diagnostic_period)):
@@ -720,7 +825,12 @@ class Agent:
                     else:
                         self.bulk_reason=None
                         interval=PROFILES[self.profile]['angular_s']
-                        if now>=due.get('angular',0) and d['q']!=self.last_angular_q:
+                        # Control goes first on the shared link: hold the next frame while a Control PUBACK
+                        # is late or the previous Bulk frame is still unACKed in the kernel (no 20 s pause).
+                        backlog=getattr(bulk,'socket_backlog',None)
+                        yield_link=(ctrl.pending_age_ms>BULK_YIELD_PENDING_MS or
+                                    (backlog is not None and backlog>BULK_YIELD_BACKLOG_BYTES))
+                        if not yield_link and now>=due.get('angular',0) and d['q']!=self.last_angular_q:
                             r=self.source.record
                             if r and r['q']==d['q']:
                                 data=self._live_angular(d,r,h,daq)

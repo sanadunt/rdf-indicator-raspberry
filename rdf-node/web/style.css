@@ -81,7 +81,7 @@ header{height:28px;padding:0 8px 0 10px;display:flex;align-items:center;justify-
 .dial:not([data-state="valid"]) .dial-trail{display:none}
 .dial-spectrum{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1;stroke-linejoin:round;opacity:0;transition:opacity .25s}
 .dial[data-state="valid"][data-spectrum="on"] .dial-spectrum{opacity:.9}
-@media(prefers-reduced-motion:reduce){.needle,.dial-spectrum,.dial-trail circle{transition:none}.page.enter-next,.page.enter-prev,.toast,.stagechip.progress::before{animation:none}}
+@media(prefers-reduced-motion:reduce){.needle,.dial-spectrum,.dial-trail circle{transition:none}.page.enter-next,.page.enter-prev,.toast,.notice,.stagechip.progress::before,.recovery-steps li[data-state="active"] .rdot{animation:none}}
 .readout{min-width:0;height:100%;padding:4px 12px 4px 10px;display:flex;flex-direction:column;justify-content:center}
 .reading{min-width:0}
 .reading label{display:block;font-size:12px;line-height:15px;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -91,9 +91,16 @@ header{height:28px;padding:0 8px 0 10px;display:flex;align-items:center;justify-
 .reading-freq{margin-top:4px;padding-top:4px;border-top:1px solid var(--line)}
 .value-mid strong{font-size:24px;line-height:28px;font-weight:700;letter-spacing:-.6px;font-variant-numeric:tabular-nums}
 .value-mid .unit{font-size:12px;color:var(--dim);font-weight:600}
-.commandline{height:24px;display:flex;gap:8px;align-items:center;padding:0 10px;min-width:0;font-size:12px;border-top:1px solid var(--line)}
+.commandline{height:24px;display:flex;gap:6px;align-items:center;padding:0 10px;min-width:0;font-size:12px;border-top:1px solid var(--line)}
 .commandline .tag{font-size:9.5px;font-weight:700;letter-spacing:.6px;color:var(--dim);border:1px solid var(--line);border-radius:4px;padding:1px 4px}
-#command{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#command{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cmdreason{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:600;color:var(--dim)}
+.cmdreason.bad{color:var(--bad)}.cmdreason.warn{color:var(--warn)}
+/* Command origin: G = Ground, C = broker cadangan (amber, distinct), L = panel lokal */
+.originchip{flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;border:1px solid currentColor;font-size:10.5px;font-weight:800;line-height:1;letter-spacing:0}
+.origin-ground{color:var(--accent);background:var(--accent-soft)}
+.origin-backup{color:var(--warn);background:var(--warn-soft)}
+.origin-local{color:var(--dim);background:var(--surface);border-color:var(--line)}
 .stagechip{flex-shrink:0;margin-left:auto;display:inline-flex;align-items:center;gap:5px;height:18px;padding:0 7px;border-radius:9px;font-size:10px;font-weight:700;letter-spacing:.3px;background:var(--surface);color:var(--dim)}
 .stagechip::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor}
 .stagechip.good{color:var(--ok);background:var(--ok-soft)}.stagechip.warn{color:var(--warn);background:var(--warn-soft)}.stagechip.bad{color:var(--bad);background:var(--bad-soft)}
@@ -120,8 +127,8 @@ header{height:28px;padding:0 8px 0 10px;display:flex;align-items:center;justify-
 .configrows .row{height:33px}
 /* Koneksi holds 6 rows (incl. MQTT cadangan): 6 x 33 = 198 = 244 page - 46 title. */
 #linkrows .row{height:33px}
-.configbuttons{display:grid;grid-template-columns:repeat(4,1fr);height:54px;gap:6px;margin:8px 0 0}
-.configbuttons button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0 4px;font-size:11.5px;font-weight:600;white-space:nowrap}
+.configbuttons{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));height:54px;gap:5px;margin:8px 0 0}
+.configbuttons button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0 3px;font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden}
 .configbuttons svg,nav svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
 .configbuttons svg{width:17px;height:17px;color:var(--accent)}
 #blankbtn svg{color:var(--dim)}
@@ -309,6 +316,81 @@ nav button[data-alert="bad"]::before{background:var(--bad)}
 .freq-pad{display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(4,44px);gap:5px}
 .freq-pad button{height:44px;font-size:18px;font-weight:600;font-variant-numeric:tabular-nums}
 .freq-pad .ico{width:20px;height:20px;margin:auto}
+
+/* Notices: remote-command banner and T900 recovery card. Above dialogs (10), below black screen (20). */
+#notices{position:absolute;top:31px;left:6px;right:6px;z-index:12;display:flex;flex-direction:column;gap:4px;pointer-events:none}
+#notices>*{pointer-events:auto;box-shadow:0 6px 18px rgba(0,0,0,.45)}
+body.light #notices>*{box-shadow:0 4px 14px rgba(19,33,55,.18)}
+/* Over an open dialog the banner leaves the dialog's close button free. */
+#modal:not([hidden])~#notices{right:60px}
+.notice{display:flex;align-items:center;gap:8px;min-height:46px;padding:4px 5px 4px 8px;border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;background:var(--bg);animation:toast-in .18s ease-out}
+.notice[data-tone="good"]{border-left-color:var(--ok)}.notice[data-tone="warn"]{border-left-color:var(--warn)}.notice[data-tone="bad"]{border-left-color:var(--bad)}
+.notice .originchip{width:26px;height:26px;border-radius:6px;font-size:14px}
+.notice-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.notice-title{display:flex;align-items:baseline;gap:7px;min-width:0;font-size:10.5px;font-weight:800;letter-spacing:.5px;white-space:nowrap;overflow:hidden}
+.notice-title time{font-weight:600;letter-spacing:0;color:var(--dim);font-variant-numeric:tabular-nums}
+.notice-body{font-size:12.5px;font-weight:600;line-height:15px;overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+/* The outcome (diterapkan / gagal: alasan) is its own line and is never clamped. */
+.notice-stage{font-style:normal;font-size:12px;font-weight:700;line-height:15px;overflow-wrap:anywhere}.notice-stage.progress{color:var(--accent)}
+/* Toast: last in the notices column, below banner and recovery card; hidden under an open dialog as before. */
+#notices>.toast{position:static;order:1;margin:0 6px;z-index:auto}
+#modal:not([hidden])~#notices>.toast{display:none}
+.notice-close{flex-shrink:0;height:38px;min-width:58px;padding:0 10px;font-size:12.5px;font-weight:700}
+.recovery{border:1px solid var(--accent);border-radius:10px;background:var(--bg);padding:2px 4px 5px 8px}
+.recovery[data-tone="good"]{border-color:var(--ok)}.recovery[data-tone="warn"]{border-color:var(--warn)}.recovery[data-tone="bad"]{border-color:var(--bad)}
+.recovery.in-modal{margin:0 0 4px;padding:1px 4px 4px 6px;background:var(--surface);box-shadow:none}
+.recovery-head{display:flex;align-items:center;gap:6px;min-width:0;height:34px}
+.recovery-head>b{display:flex;align-items:center;gap:5px;font-size:12px;white-space:nowrap;flex-shrink:0}
+.recovery-head>b .ico{width:16px;height:16px;color:var(--accent)}
+.recovery-headline{flex:1;min-width:0;font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--accent)}
+.recovery[data-tone="good"] .recovery-headline{color:var(--ok)}.recovery[data-tone="warn"] .recovery-headline{color:var(--warn)}.recovery[data-tone="bad"] .recovery-headline{color:var(--bad)}
+.recovery-elapsed{flex-shrink:0;font-size:11px;font-weight:600;color:var(--dim);font-variant-numeric:tabular-nums;white-space:nowrap}
+.recovery-close{flex-shrink:0;width:34px;height:34px;padding:0;display:inline-flex;align-items:center;justify-content:center;border-radius:50%}
+.recovery-close .ico{width:15px;height:15px}
+.recovery-steps{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(5,minmax(0,1fr))}
+.recovery-steps li{position:relative;display:flex;flex-direction:column;align-items:center;gap:2px;min-width:0;text-align:center}
+.recovery-steps li+li::before{content:'';position:absolute;top:9px;left:calc(-50% + 13px);right:calc(50% + 13px);height:2px;border-radius:1px;background:var(--line)}
+.recovery-steps li[data-state="done"]::before{background:var(--ok)}
+.rdot{width:20px;height:20px;flex-shrink:0;border-radius:50%;border:2px solid var(--faint);display:flex;align-items:center;justify-content:center;color:var(--faint)}
+.rdot .ico{width:12px;height:12px;stroke-width:3}
+.rlabel{max-width:100%;font-size:10.5px;line-height:12px;font-weight:600;color:var(--dim)}
+.rsub{font-size:9.5px;line-height:10px;letter-spacing:0;text-transform:none;font-weight:600;color:var(--faint)}
+.recovery-steps li[data-state="done"] .rdot{background:var(--ok);border-color:var(--ok);color:var(--bg)}
+.recovery-steps li[data-state="done"] .rlabel{color:var(--text)}
+.recovery-steps li[data-state="active"] .rdot{border-color:var(--accent-soft);border-top-color:var(--accent);border-right-color:var(--accent);animation:spin .9s linear infinite}
+.recovery-steps li[data-state="active"] .rlabel{color:var(--accent)}
+.recovery-steps li[data-state="fail"] .rdot{border-color:currentColor;color:var(--warn)}
+.recovery[data-tone="bad"] li[data-state="fail"] .rdot{color:var(--bad)}
+.recovery-steps li[data-state="fail"] .rlabel{color:var(--warn)}.recovery[data-tone="bad"] li[data-state="fail"] .rlabel{color:var(--bad)}
+.recovery-steps li[data-state="off"] .rdot{border-style:dashed}
+.recovery-steps li[data-state="unknown"] .rdot{border-color:var(--warn);border-style:dashed;color:var(--warn)}
+.recovery-steps li[data-state="unknown"] .rlabel{color:var(--warn)}
+@keyframes spin{to{transform:rotate(360deg)}}
+.recovery-foot{display:flex;align-items:center;gap:8px;margin-top:4px;min-width:0}
+.recovery-reason{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px;font-size:11px;line-height:14px;font-weight:600;color:var(--dim);overflow-wrap:anywhere}
+.recovery-reason:empty{display:none}
+.rline.good{color:var(--ok)}.rline.warn{color:var(--warn)}.rline.bad{color:var(--bad)}
+.recovery-retry{flex-shrink:0;height:40px;padding:0 12px;display:inline-flex;align-items:center;gap:6px;font-weight:700;border-color:var(--warn);color:var(--warn);background:var(--warn-soft)}
+.recovery-retry .ico{width:16px;height:16px}
+.recovery.compact .recovery-steps,.recovery.compact .recovery-foot{display:none}
+.recovery.compact .recovery-head{height:30px}
+#modalrecovery{flex-shrink:0}
+/* Restart T900 confirmation: the radio is missing on USB, so a PPP restart cannot help. */
+.dialog p.usb-warning{display:flex;align-items:flex-start;gap:6px;padding:5px 8px;border-radius:6px;background:var(--warn-soft);color:var(--warn);font-size:12px;line-height:15px;font-weight:600}
+.usb-warning .ico{width:15px;height:15px;flex-shrink:0;margin-top:0}
+#modalrecovery:empty,.dialog.keyboard-open #modalrecovery{display:none}
+/* Riwayat dialog */
+.dialog p.history-rejects{display:flex;align-items:center;gap:6px;margin:2px 0 4px;padding:5px 8px;border-radius:6px;background:var(--warn-soft);color:var(--warn);font-size:11.5px;line-height:14px;font-weight:600}
+.history-rejects .ico{width:15px;height:15px}
+.history-list{display:flex;flex-direction:column}
+.history-row{display:grid;grid-template-columns:52px 18px minmax(0,1fr) auto;align-items:center;column-gap:7px;min-height:38px;padding:3px 2px;border-bottom:1px solid var(--line)}
+.history-row:last-child{border-bottom:0}
+.history-row time{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums}
+.history-main{min-width:0;display:flex;flex-direction:column;gap:1px}
+.history-main b{font-size:12.5px;font-weight:600;line-height:15px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere}
+.history-reason{font-size:10.5px;line-height:13px;letter-spacing:0;text-transform:none;font-weight:600;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow-wrap:anywhere}
+.history-reason.progress{color:var(--dim)}
+.history-row .stagechip{margin-left:0}
 
 #blank{position:absolute;inset:0;background:#000;z-index:20;display:flex;align-items:center;justify-content:center;cursor:pointer}
 .blank-clock{display:flex;flex-direction:column;align-items:center;gap:2px;color:#5b6573;font-variant-numeric:tabular-nums}

@@ -275,14 +275,16 @@ biasanya lewat Ethernet/Wi-Fi. Broker online memakai default route OS. Jika rout
 cadangan lewat PPP (default route ke `ppp0`, atau host di subnet PPP), trafik cadangan ikut
 memakai bandwidth T900 dan budget cadangan **tidak** dihitung dalam batas agregat T900. Periksa
 dengan `ip route get <host-cadangan>` sebelum mengaktifkan, dan pastikan route keluar lewat LAN
-atau uplink internet, bukan PPP.
+atau uplink internet, bukan PPP. Opsi pppd `nodefaultroute` mencegah PPP menjadi default route;
+lihat [T900_PPP.md](T900_PPP.md#65-broker-cadangan-jangan-lewat-ppp0).
 
 ### Status cadangan
 
 `GET /api/v2/snapshot` dan `GET /api/v2/link` memuat `link.mqtt_backup` (tanpa host atau secret):
 `enabled`, `commands`, `state` (`DISABLED`, `CONNECTING`, `CONNECTED`, `ERROR`), `ready`, `error`,
 `depth`, `pending_age_ms`, `bulk_pause`, `angular_aborted`, dan `topic_delivery`. Saat client aktif,
-objek itu juga memuat `generation`, `tx_bytes`, `rx_bytes`, `reconnects`, dan statistik outbox.
+objek itu juga memuat `generation`, `tx_bytes`, `rx_bytes`, `reconnects`, `queue_age_ms`, dan
+statistik outbox.
 `topic_delivery` adalah peta terpisah per suffix topic untuk broker cadangan; `mqtt_topic_delivery`
 tetap hanya untuk broker utama. `config.mqtt_backup_configured` bernilai `true` bila cadangan aktif
 dengan host. Panel menampilkan `UTAMA` dan `CADANGAN` di ringkasan Data dan baris `MQTT cadangan` di
@@ -306,6 +308,53 @@ PUBACK hanya membuktikan broker mengakui PUBLISH QoS 1.
 Bulk reset/reconnect tidak merestart control atau engine. Dua koneksi tetap berbagi TCP/IP/
 PPP/radio. Token bucket dan coalescing mengurangi burst, bukan menjamin latency RF.
 Default pause setelah command/source/link issue dan resume20s stabil dipertahankan.
+Angular utama dipause `CONTROL_BACKLOG` hanya bila pesan tertua yang masih menunggu di outbox
+Control (bukan yang sedang dikirim) berumur lebih dari 3 s (`queue_age_ms`), atau PUBLISH QoS 1
+yang sedang dikirim menunggu PUBACK lebih dari 2,5 s (`pending_age_ms`). PUBACK yang sedikit
+lambat pada link T900 (di bawah 2,5 s) tidak lagi memicu pause 20 s. Sebagai gantinya Bulk
+mengalah tanpa penalti: frame Angular berikutnya ditahan selama PUBLISH Control menunggu PUBACK
+lebih dari 1 s, atau selama lebih dari 2.048 byte Bulk sebelumnya belum di-ACK TCP oleh Ground
+(antrean kernel, `SIOCOUTQ`). Frame dikirim lagi begitu link lega, tanpa menunggu 20 s. Pada link
+yang jauh lebih lambat dari budget (`control_budget_bytes_s` + `bulk_budget_bytes_s`), Control
+sendiri bisa tetap tertahan sampai `PUBLISH_PROGRESS_TIMEOUT`; turunkan budget atau pakai profil
+`control` untuk link seperti itu.
+
+### Reconnect, keepalive, dan pemulihan PPP
+
+Backoff dan keepalive berlaku untuk semua client MQTT RDF Node: Control, Bulk, dan cadangan di
+Edge, serta client receiver Ground. Client cadangan memakai `mqtt.keepalive` dan
+`mqtt.reconnect_max` yang sama.
+
+- **Backoff:** setelah koneksi putus atau gagal, client menunggu 1 s, lalu berlipat setiap
+  percobaan gagal sampai `mqtt.reconnect_max` (default 30 s), ditambah jitter kecil. Sesi yang
+  bertahan minimal 20 s setelah CONNACK mengembalikan jeda ke 1 s. Sesi yang putus lebih cepat
+  (misalnya SUBACK/PUBACK ditolak, paket terlalu besar, takeover Client ID) atau tidak pernah
+  tersambung terus menaikkan jeda, sehingga tidak ada reconnect dan handshake TLS tiap detik
+  lewat radio.
+- **Keepalive:** PINGREQ dikirim bila selama `mqtt.keepalive` detik (default 15) client tidak
+  mengirim apa pun, **atau** tidak menerima data apa pun dari broker. Jadi link mati tetap
+  terdeteksi walaupun telemetry QoS 0 terus terkirim. Bila PINGRESP tidak datang dalam
+  `keepalive` detik setelah PINGREQ, sesi direset dengan `PING_TIMEOUT` lalu reconnect. Deteksi
+  link mati butuh sekitar dua kali `keepalive`.
+- **Link lambat yang masih bekerja:** bila T900 membawa lebih sedikit dari beban yang ditawarkan,
+  PINGREQ antre di belakang data client sendiri dan PINGRESP datang terlambat. Client tidak
+  mereset sesi selama TCP masih maju, yaitu kernel masih memegang data yang belum di-ACK (atau
+  PINGREQ belum diserahkan ke kernel) dan broker mengirim ACK TCP dalam `keepalive` detik terakhir.
+  Toleransi ini paling lama 4 kali `keepalive` (default 60 s) sejak PINGREQ. Link mati tidak
+  mengirim ACK TCP, jadi tetap direset `keepalive` detik setelah PINGREQ, atau `keepalive` detik
+  setelah ACK TCP terakhir bila itu lebih lambat. Berlaku
+  untuk TCP, TLS, dan WebSocket; bila info socket Linux (`TIOCOUTQ`, `TCP_INFO`) tidak terbaca,
+  berlaku aturan tanpa toleransi. Tanpa toleransi ini, link marginal dapat memicu `PING_TIMEOUT`
+  palsu, Last Will `online:false`, dan status `MQTT utama` yang berkedip.
+- **Kick setelah PPP kembali:** saat interface PPP berubah dari tidak `UP` menjadi `UP`, atau ping
+  peer kembali dibalas, Agent memanggil `kick()` pada client utama (Control dan Bulk). Client yang
+  belum tersambung langsung mencoba lagi tanpa menunggu sisa backoff, dan backoff kembali ke awal.
+  Client yang sudah tersambung tidak terpengaruh. Client cadangan tidak di-kick karena tidak lewat
+  PPP.
+- Setelah kedua client utama READY, Angular utama menunggu `resume_stable_seconds` (default 20 s)
+  sebelum mengalir lagi (`WAIT_STABLE`).
+
+Restart PPP dari panel Edge dan pemantau pemulihannya dijelaskan di [T900_PPP.md](T900_PPP.md).
 
 ## Uji penerimaan nyata
 
@@ -318,7 +367,7 @@ Setelah MQTT dikonfigurasi:
 4. Jika authority/angle approval belum ada tetapi seluruh gate integritas data lulus, pastikan Edge tetap mengirim `telemetry/doa` (`ok=0`, RAW) dan `telemetry/angular` (flags parsial) pada topic normal. Ground menampilkan keduanya sebagai `UNVERIFIED`; detection tetap invalid.
 5. Pastikan `telemetry/diagnostic/doa` berulang setiap 3 detik selama XML tersedia, termasuk saat sampel sama dan DoA normal valid; data tetap `UNVERIFIED`. Saat gate normal memblokir, pastikan panel utama Edge menampilkan sudut raw dan frekuensi XML secara terpisah.
 6. Saat `DOA_value.html` berisi record 360 sampel dan gate integritas source gagal (misalnya service/DAQ berhenti atau source stale), pastikan `telemetry/diagnostic/angular` tiba. Interval 6 detik saat source tidak eligible dan 30 detik saat source eligible tetapi Bulk terblokir adalah minimum; ukuran JSON dan headroom Control dapat memperpanjangnya. Saat Bulk normal mengalir, tidak ada duplikasi. Periksa timestamp sumber dan 360 values di `/api/v2/angular/diagnostic/latest`; kandidat tetap `UNVERIFIED`, tidak mengubah detection LIVE. Profile `control` sengaja tidak mengirim array diagnostik.
-7. Putuskan radio sementara dengan jalur management aman, lihat stale/lost, reconnect tanpa burst data lama; jangan reset SDR.
+7. Putuskan radio sementara dengan jalur management aman, lihat stale/lost, reconnect tanpa burst data lama; jangan reset SDR. Catat waktu sampai MQTT Control READY setelah PPP kembali (kick tanpa menunggu backoff) dan waktu sampai Angular kembali.
 8. Jalankan command config/read-only, lalu subset write yang sudah di-approve.
 9. Ukur actual PPP counters, capture MQTT/TCP terkontrol, latency dan loss >30menit.
 10. Cold boot kedua host, radio belum terpasang, kemudian radio hadir; periksa recovery.
@@ -327,6 +376,10 @@ Setelah MQTT dikonfigurasi:
     PPP/T900 secara terkontrol dan pastikan broker cadangan tetap menerima health/DoA. Bila
     `Terima perintah` aktif, uji command read-only dari broker cadangan dan pastikan ACK hanya
     muncul di broker cadangan; uji juga bahwa publisher yang tidak diizinkan ACL ditolak broker.
+12. Bila approval `--ppp-restart` dipakai: tekan Restart T900 di panel Edge dan pastikan kartu
+    progres melewati `PPP turun/naik`, `PPP UP`, `Ping Ground`, `MQTT utama`, lalu
+    **Tersambung ke Ground ✓** (`APPLIED`). Uji juga saat PPP sudah putus total; catat waktu tiap
+    langkah sesuai [T900_PPP.md](T900_PPP.md).
 
 Paket build diuji dengan broker fixture loopback, bukan uji Mosquitto/T900 nyata. Hal yang sama
 berlaku untuk broker cadangan: interoperabilitas dengan broker LAN/online tertentu tetap harus

@@ -45,6 +45,27 @@ MQTT Control Packets travel only in WebSocket binary frames; the parser treats t
 byte stream, not frame-aligned packets. Client frames are masked, server frames must be unmasked,
 and fragmentation/control frames are handled.
 
+## Reconnect dan keepalive
+
+Kontrak wire tidak berubah; yang berubah hanya kapan client membuka sesi baru.
+
+- Backoff reconnect mulai 1 s dan berlipat sampai `mqtt.reconnect_max` (default 30 s). Sesi yang
+  bertahan minimal 20 s setelah CONNACK mengembalikan backoff ke 1 s; sesi yang putus lebih cepat
+  atau gagal tersambung terus menaikkan backoff (tidak ada reconnect tiap detik).
+- PINGREQ dikirim bila selama `mqtt.keepalive` detik tidak ada yang dikirim atau tidak ada yang
+  diterima dari broker, termasuk saat telemetry QoS 0 terus terkirim. Tanpa PINGRESP dalam
+  `keepalive` detik berikutnya, sesi direset (`PING_TIMEOUT`), kecuali TCP masih maju: data client
+  yang belum di-ACK atau PINGREQ yang belum terkirim masih ada, dan peer mengirim ACK TCP dalam
+  `keepalive` detik terakhir. Dalam keadaan itu (link lambat yang masih bekerja) client menunggu
+  sampai 4 kali `keepalive`. Link mati tidak mengirim ACK TCP dan tetap direset seperti biasa.
+- Edge memanggil `kick()` pada client Control dan Bulk utama saat interface PPP kembali `UP` atau
+  ping peer kembali dibalas: client yang belum tersambung langsung reconnect dan backoff kembali ke
+  awal.
+- Setiap reconnect tetap Clean Start tanpa replay offline; consumer harus memakai `sid`, `boot`,
+  `q`, dan freshness, bukan asumsi kontinuitas sesi.
+
+Detail operasional ada di [MQTT_GROUND.md](MQTT_GROUND.md#reconnect-keepalive-dan-pemulihan-ppp).
+
 ## Broker cadangan
 
 Edge dapat memakai satu broker cadangan opsional (`mqtt.backup`, panel `Data > Cadangan`) sebagai
@@ -99,6 +120,11 @@ Nilai contoh sintetis. Radio tidak menambahkan SNR yang belum terbukti sumbernya
 Run: 0 stopped, 1 running, 2 starting, 3 stopping, 4 error, 255 unknown.
 DAQ: 0 degraded, 1 healthy, 2 unknown. `age` ialah umur DoA pada source, bukan latency E2E.
 Clock: 0 untrusted, 1 synced. Field unavailable dapat null. Health q tetap maju saat SDR stop.
+
+`telemetry/health/detail` (tiap 10 s) menambah field aditif status link PPP: `ppp` (`UP`/`DOWN`),
+`peer` (hasil ping peer), `ppp_svc` (`ActiveState` unit `t900-ppp.service`), dan `ppp_restarts`
+(`NRestarts` systemd). Consumer harus menerima field yang tidak ada dari Edge lama. Lihat
+[MQTT_TOPIC_SUMMARY.md](MQTT_TOPIC_SUMMARY.md#telemetryhealthdetail).
 
 ## Grafik lengkap 360 titik
 
@@ -259,14 +285,30 @@ ACK berisi `v,sid,id,status,t,rev,result`. APPLIED memerlukan bukti sesuai aksi.
 PERSISTED_UNVERIFIED dan OUTCOME_UNKNOWN bukan sinonim gagal atau berhasil.
 Hasil tersedia lewat jurnal setelah reconnect; tidak bergantung broker offline history.
 
-Untuk `ppp.restart`, operasi yang diterima mula-mula mengirim `PPP_RESTART_REQUESTED` dengan
-`accepted_by_systemd: true`, timestamp request, dan nama unit tetap `t900-ppp.service`.
-Ground hanya melaporkan `APPLIED` setelah health yang lebih baru dari request diterima pada
-sesi node yang sama; status ini bukan bukti PPP atau link MQTT pulih. Ground tidak mengulang
-hasil yang tetap unknown. Request baru memerlukan health fresh yang lebih baru dari setiap
-request unresolved serta konfirmasi operator; record lama tetap unknown. Konfirmasi itu adalah
-intent lokal Ground, bukan field envelope MQTT. Request tidak dapat tiba setelah seluruh jalur
-Control putus.
+Untuk `ppp.restart`, operasi yang diterima mula-mula mengirim `ACCEPTED`, lalu
+`PPP_RESTART_REQUESTED` dengan `accepted_by_systemd: true`, timestamp request, dan nama unit tetap
+`t900-ppp.service`. Edge kemudian memantau link sampai 120 s dan mengirim ACK akhir:
+`APPLIED` dengan `proof: {ppp:"UP", peer:"REPLY", mqtt:"READY"|"DISABLED", cycled:true}` dan
+`elapsed_ms` setelah PPP berganti siklus, peer membalas ping, dan MQTT utama tersambung lewat
+link baru; atau `OUTCOME_UNKNOWN` dengan `reason` `T900_USB_MISSING`, `MQTT_NOT_RECOVERED`,
+`PPP_RECOVERY_TIMEOUT`, atau `PPP_CYCLE_NOT_OBSERVED`. Bila link pulih setelah ACK timeout itu,
+hanya snapshot lokal Edge yang berubah (`link.ppp_recovery.late: true`); tidak ada ACK kedua.
+Restart PPP memakai jalur sendiri di Edge: tidak ditolak `BUSY` oleh mutasi SDR, tetapi ditolak
+`PPP_RESTART_IN_PROGRESS` selama restart lain berjalan/dipantau dan `PPP_RESTART_TOO_SOON` dalam
+15 s setelah permintaan sebelumnya. Helper menerima unit `active`, `failed`, dan
+`activating/auto-restart` dari Ground; `inactive` hanya dari panel Edge lokal.
+
+Receiver Ground bawaan tetap memakai rekonsiliasinya sendiri: ia melaporkan `APPLIED` setelah
+health yang lebih baru dari request diterima pada sesi node yang sama, dan tidak mengganti record
+dengan ACK akhir pemantau Edge. Status Ground ini bukan bukti PPP atau link MQTT pulih. Ground
+tidak mengulang hasil yang tetap unknown. Request baru memerlukan health fresh yang lebih baru dari
+setiap request unresolved serta konfirmasi operator; record lama tetap unknown. Konfirmasi itu
+adalah intent lokal Ground, bukan field envelope MQTT. Request tidak dapat tiba setelah seluruh
+jalur Control putus; restart lokal dari panel Edge tetap tersedia. Lihat
+[CONTROL.md](CONTROL.md#restart-layanan-ppp-t900) dan [T900_PPP.md](T900_PPP.md).
+
+Record operasi publik di hasil `operation.get` memuat field aditif `origin`
+(`local`/`ground`/`backup`), `summary` (`{kind, changes}`), dan `reason`.
 
 ## API untuk dashboard lama
 

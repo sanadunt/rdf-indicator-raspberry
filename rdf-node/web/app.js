@@ -28,7 +28,10 @@ const ICONS={
  folder:'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',shield:'M12 3 4 6v6c0 5 3.4 8.4 8 9 4.6-.6 8-4 8-9V6z',
  hash:'M5 9h14M5 15h14M10 3 8 21M16 3l-2 18',screenoff:'M3 5h18v12H3zM8 21h8M12 17v4M2 2l20 20',type:'M4 7V4h16v3M9 20h6M12 4v16',
  drop:'M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z',check:'M5 12l5 5 9-10',sliders:'M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M16 4v4M10 10v4M18 16v4',
- backspace:'M9 5h11v14H9l-6-7zM12 9l5 6M17 9l-5 6'
+ backspace:'M9 5h11v14H9l-6-7zM12 9l5 6M17 9l-5 6',
+ radio:'M4 10h16v10H4zM7.5 10 16 4.5M9 13.2a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6zM14 14h3M14 17h3',
+ x:'M6 6l12 12M18 6 6 18',minus:'M6 12h12',history:'M3.5 12a8.5 8.5 0 1 0 2.5-6M3 4v4.5h4.5M12 7.5V12l3 2',
+ question:'M9.2 9a2.9 2.9 0 1 1 4 2.7c-.8.4-1.2 1-1.2 1.8v.6M12 17.5v.5'
 };
 function icon(name,extra=''){
  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');svg.setAttribute('focusable','false');
@@ -253,25 +256,373 @@ function renderData(s){
 const goodStages=new Set(['APPLIED','REBOOT_SCHEDULED','SHUTDOWN_SCHEDULED']);
 const badStages=new Set(['FAILED','REJECTED','EXPIRED','CONFLICT','CANCELLED']);
 const warnStages=new Set(['OUTCOME_UNKNOWN','PERSISTED_UNVERIFIED']);
-function stageTone(stage){return goodStages.has(stage)?'good':badStages.has(stage)?'bad':warnStages.has(stage)?'warn':'progress';}
+// PPP_RESTART_REQUESTED is only an intermediate stage when the Edge runs the PPP recovery observer
+// (link.ppp_recovery present); on an older Edge it is the last stage and must not pulse forever.
+function stageTone(stage){return goodStages.has(stage)?'good':badStages.has(stage)?'bad':warnStages.has(stage)?'warn':stage==='PPP_RESTART_REQUESTED'&&!(snapshot.link&&'ppp_recovery' in snapshot.link)?'warn':'progress';}
 let seenOperation=undefined,toastTimer=null;
 function showToast(message,tone){
  const toast=$('toast');toast.textContent=message;toast.className=`toast ${tone}`;toast.hidden=false;
  if(toastTimer)clearTimeout(toastTimer);
  toastTimer=setTimeout(()=>{toast.hidden=true;toastTimer=null;},4500);
 }
-// Stage codes are shown verbatim; colour only groups them. A finished stage is the journal
+// ---- Operation wording. origin, summary, reason, operation_seq, last_remote_operation and
+// remote_rejects are additive snapshot fields; every one of them may be missing on an older Edge.
+const READ_OPS=new Set(['config.get','operation.get']);
+const OP_LABELS={'config.get':'Baca config','config.patch':'Ubah config RF','processing.set':'Start/Stop SDR','service.restart':'Restart SDR','ppp.restart':'Restart T900',
+ 'system.reboot.prepare':'Siapkan reboot','system.reboot.execute':'Reboot','system.shutdown.prepare':'Siapkan shutdown','system.shutdown.execute':'Shutdown',
+ 'operation.get':'Status operasi','stream.set':'Profil telemetry'};
+const ORIGINS={local:{letter:'L',name:'Lokal',upper:'LOKAL'},ground:{letter:'G',name:'Ground',upper:'GROUND'},backup:{letter:'C',name:'Cadangan',upper:'CADANGAN'}};
+const PROFILE_NAMES={control:'CONTROL',balanced:'BALANCED',graph_u8:'GRAPH'};
+// [label, divisor, decimals, unit]; the order is the display order.
+const CONFIG_FIELDS={vfo0_frequency_hz:['Frekuensi VFO',1e6,3,'MHz'],center_frequency_hz:['Frekuensi center',1e6,3,'MHz'],vfo0_bandwidth_hz:['Bandwidth VFO',1e3,1,'kHz'],gain_db:['Gain',1,1,'dB'],vfo0_squelch_db:['Squelch VFO',1,1,'dB']};
+// Short Indonesian hints; the raw code stays available (title / Riwayat) for troubleshooting.
+const REASONS={
+ PPP_RECOVERY_TIMEOUT:'PPP/Ground belum pulih',PPP_CYCLE_NOT_OBSERVED:'PPP tidak terlihat restart',
+ T900_USB_MISSING:'T900 USB tidak terdeteksi',MQTT_NOT_RECOVERED:'PPP & ping pulih, MQTT utama belum',
+ PPP_SERVICE_NOT_LOADED:'unit t900-ppp tidak ada',PPP_SERVICE_STATUS_UNKNOWN:'status unit t900-ppp tidak diketahui',
+ PPP_SERVICE_NOT_ACTIVE:'unit t900-ppp tidak aktif',PPP_RESTART_PENDING:'job systemd t900-ppp masih antre',
+ PPP_RESTART_NOT_APPROVED:'belum ada approval root --ppp-restart',PPP_RESTART_IN_PROGRESS:'restart T900 sebelumnya masih dipantau',
+ PPP_RESTART_TOO_SOON:'tunggu 15 dtk sejak restart terakhir',BUSY:'operasi lain sedang berjalan',CONTROL_IN_PROGRESS:'operasi lain sedang berjalan',
+ CLOCK_UNTRUSTED:'jam sistem belum tepercaya',SESSION_MISMATCH:'sesi/boot Edge berbeda',CONFIG_REVISION_CONFLICT:'revisi config sudah berubah',
+ REMOTE_COMMANDS_DISABLED:'perintah remote nonaktif',EXPIRED_OR_INVALID_DEADLINE:'perintah kedaluwarsa',CAPABILITY_DISABLED:'fitur dinonaktifkan',
+ AGENT_RESTARTED_RECONCILE_NO_REPLAY:'agent restart; hasil tidak diketahui',SYSTEMD_ACTION_FAILED:'aksi systemd gagal',
+ SYSTEMD_ACTION_OUTCOME_UNKNOWN:'hasil systemd tidak diketahui',RPC_TIMEOUT:'helper tidak menjawab (timeout)',TIMEOUTERROR:'helper tidak menjawab (timeout)',HELPER_CLOSED:'koneksi helper terputus',LIFECYCLE_VERIFICATION_TIMEOUT:'verifikasi SDR timeout',
+ CONFIG_CHANGED_BEFORE_WRITE:'config berubah sebelum ditulis',NATIVE_RUNTIME_EVIDENCE_INCOMPLETE:'bukti runtime belum lengkap',
+ DEMO_NO_HARDWARE_CONTROL:'mode demo, tanpa kontrol hardware',REQUEST_RATE_LIMIT:'permintaan terlalu cepat'
+};
+const REASON_STAGES=new Set(['FAILED','REJECTED','OUTCOME_UNKNOWN','EXPIRED','CONFLICT','CANCELLED']);
+const STAGE_TEXT={ACCEPTED:'diproses…',APPLYING:'diproses…',VERIFYING:'diproses…',PPP_RESTART_REQUESTED:'restart diminta, memantau link…',
+ APPLIED:'diterapkan',PERSISTED_UNVERIFIED:'tersimpan, belum terbukti',FAILED:'gagal',REJECTED:'ditolak',OUTCOME_UNKNOWN:'hasil belum pasti',
+ EXPIRED:'kedaluwarsa',CONFLICT:'konflik',CANCELLED:'dibatalkan',REBOOT_SCHEDULED:'reboot dijadwalkan',SHUTDOWN_SCHEDULED:'shutdown dijadwalkan'};
+function reasonLabel(code){return REASONS[code]||String(code||'');}
+function opReason(op){const reason=op?.reason??op?.result?.error??op?.result?.reason;return typeof reason==='string'?reason:'';}
+function opChanges(op){const changes=op?.summary?.changes;return changes&&typeof changes==='object'&&!Array.isArray(changes)?changes:{};}
+function decimalId(value,divisor,decimals){return typeof value==='number'&&Number.isFinite(value)?(value/divisor).toFixed(decimals).replace('.',','):value==null?null:String(value);}
+function changeText(name,change){
+ const [title,divisor,decimals,unit]=CONFIG_FIELDS[name]||[name,1,null,''];
+ const show=value=>decimals==null?(value==null?null:String(value)):decimalId(value,divisor,decimals);
+ const from=show(change?.from),to=show(change?.to),suffix=unit?` ${unit}`:'';
+ if(to==null)return title;
+ return from==null?`${title} → ${to}${suffix}`:from===to?`${title} ${to}${suffix}`:`${title} ${from} → ${to}${suffix}`;
+}
+function processingLabel(op){const to=opChanges(op).desired?.to;return to==='RUNNING'?'Start SDR':to==='STOPPED'?'Stop SDR':'';}
+function profileName(value){return value==null?null:PROFILE_NAMES[value]||String(value).toUpperCase();}
+// Short label for the CMD row and toasts.
+function opLabel(op){
+ if(!op)return '';
+ if(op.op==='processing.set'&&processingLabel(op))return processingLabel(op);
+ if(op.op==='stream.set'){const to=profileName(opChanges(op).profile?.to);if(to)return `Profil ${to}`;}
+ if(op.op==='config.patch'){
+  const names=Object.keys(opChanges(op));
+  if(names.some(name=>name.endsWith('frequency_hz')))return 'Frekuensi';
+  if(names.length===1&&CONFIG_FIELDS[names[0]])return CONFIG_FIELDS[names[0]][0];
+ }
+ return OP_LABELS[op.op]||String(op.op||'?');
+}
+// Longer old -> new wording for the remote banner and Riwayat.
+function opSummary(op){
+ if(!op)return '';
+ const changes=opChanges(op);
+ if(op.op==='config.patch'){
+  const vfo=changes.vfo0_frequency_hz,order=Object.keys(CONFIG_FIELDS);
+  // The panel writes center and VFO0 together; one frequency line says it.
+  const names=Object.keys(changes).filter(name=>!(name==='center_frequency_hz'&&vfo&&vfo.to===changes[name]?.to))
+   .sort((a,b)=>(order.indexOf(a)+1||99)-(order.indexOf(b)+1||99));
+  if(names.length)return names.map(name=>changeText(name,changes[name])).join('; ');
+ }
+ if(op.op==='stream.set'&&changes.profile){
+  const from=profileName(changes.profile.from),to=profileName(changes.profile.to);
+  if(to)return from&&from!==to?`Profil ${from} → ${to}`:`Profil ${to}`;
+ }
+ return opLabel(op);
+}
+function stageText(op){
+ const stage=op?.stage;
+ if(stage==='APPLIED'&&String(op.op||'').endsWith('.prepare'))return 'disiapkan';
+ if(stage==='APPLIED'&&op.op==='ppp.restart')return 'tersambung lagi';
+ return STAGE_TEXT[stage]||(stageTone(stage)==='progress'?'diproses…':String(stage||'?'));
+}
+function clockText(ms){if(typeof ms!=='number'||!Number.isFinite(ms))return '--:--:--';const t=new Date(ms),pad=v=>String(v).padStart(2,'0');return `${pad(t.getHours())}:${pad(t.getMinutes())}:${pad(t.getSeconds())}`;}
+function setOriginChip(el,origin){
+ const o=ORIGINS[origin];if(!el)return el;
+ el.hidden=!o;el.className=`originchip origin-${o?origin:'none'}`;el.textContent=o?o.letter:'';
+ if(o){el.title=`Dari ${o.name}`;el.setAttribute('aria-label',`Asal ${o.name}`);}else{el.removeAttribute('title');el.removeAttribute('aria-label');}
+ return el;
+}
+// Adds the Indonesian hint to a known rejection code, like the backup-broker errors; the login
+// flow still sees AUTHENTICATION_AND_CSRF_REQUIRED unchanged.
+function withReasonHint(error){if(error&&REASONS[error.message])error.message=`${error.message}: ${REASONS[error.message]}`;return error;}
+function remoteFieldsSupported(s){return !!s&&Object.prototype.hasOwnProperty.call(s,'last_remote_operation');}
+// Stage codes stay verbatim in the chip; colour only groups them. A finished stage is the journal
 // outcome, not proof that runtime state changed (e.g. PERSISTED_UNVERIFIED stays amber).
-function renderOperation(op){
- const chip=$('cmdstage');
- $('command').textContent=op?op.op:'Belum ada operasi';
+function renderOperation(op,s){
+ const chip=$('cmdstage'),reasonEl=$('cmdreason'),reason=op&&REASON_STAGES.has(op.stage)?opReason(op):'';
+ setOriginChip($('cmdorigin'),op?.origin);
+ $('command').textContent=op?opLabel(op):'Belum ada operasi';
+ $('command').title=op?`${opSummary(op)} (${op.op})`:'';
+ // A restart that recovered after the 120 s limit keeps its journal stage (chip stays verbatim);
+ // while the Edge still shows that recovery, the hint says it recovered instead of the timeout text.
+ const recoveryNow=currentRecovery(s),lateRecovery=!!op&&op.op==='ppp.restart'&&recoveryLate(recoveryNow,op.id);
+ if(reasonEl){
+  reasonEl.textContent=lateRecovery?`pulih setelah batas ${Number.isFinite(recoveryNow.timeout_s)?recoveryNow.timeout_s:120} dtk`:reason?reasonLabel(reason):'';reasonEl.title=reason;
+  reasonEl.className=`cmdreason ${lateRecovery?'good':op?stageTone(op.stage):''}`.trim();
+ }
  chip.hidden=!op;
  if(op){chip.textContent=op.stage;chip.className=`stagechip ${stageTone(op.stage)}`;}
+ // Only a real snapshot sets the baseline, so a reload never toasts an old operation.
+ if(s?.snapshot_seq==null)return;
  const key=op?`${op.id}:${op.stage}`:null;
  if(seenOperation===undefined){seenOperation=key;return;}
  if(key===seenOperation)return;
  seenOperation=key;
- if(op&&stageTone(op.stage)!=='progress')showToast(`${op.op}: ${op.stage}`,stageTone(op.stage));
+ if(!op||READ_OPS.has(op.op)||stageTone(op.stage)==='progress')return;
+ // Ground/backup mutations are announced by the remote banner, which stays above dialogs.
+ if(remoteFieldsSupported(s)&&(op.origin==='ground'||op.origin==='backup'))return;
+ // The T900 recovery card already shows this restart's result.
+ if(op.op==='ppp.restart'&&recoveryCardShows(s,op.id))return;
+ showToast(`${opLabel(op)}: ${op.stage}${reason?` · ${reasonLabel(reason)}`:''}`,stageTone(op.stage));
+}
+// ---- Remote-command banner: Ground or the backup broker changed something on this Edge. ----
+// The host is created if a stale index.html lacks it, so a mismatched page never stops loading.
+const noticesHost=$('notices')||document.querySelector('.shell').appendChild(Object.assign(document.createElement('div'),{id:'notices'}));
+// The toast lives in the same column (CSS order puts it last), so a banner or the recovery card
+// pushes it down instead of covering it. While a dialog is open it stays hidden, as before.
+noticesHost.append($('toast'));
+let remoteSeen=undefined,remoteTimer=null,rejectSeen=undefined;
+const remoteBanner=(()=>{
+ const root=document.createElement('section');root.className='notice remote';root.hidden=true;root.setAttribute('role','status');root.setAttribute('aria-live','polite');
+ const chip=document.createElement('span');
+ const body=document.createElement('div');body.className='notice-text';
+ const title=document.createElement('b');title.className='notice-title';
+ const titleText=document.createElement('span'),time=document.createElement('time');title.append(titleText,time);
+ // Only the summary is clamped (with an ellipsis); the outcome has its own line and is never cut.
+ const summary=document.createElement('span');summary.className='notice-body';
+ const stage=document.createElement('em');stage.className='notice-stage';
+ body.append(title,summary,stage);
+ const close=document.createElement('button');close.type='button';close.className='notice-close';close.textContent='Tutup';
+ root.append(chip,body,close);noticesHost.append(root);
+ return {root,chip,titleText,time,summary,stage,close};
+})();
+function hideRemoteBanner(){remoteBanner.root.hidden=true;if(remoteTimer){clearTimeout(remoteTimer);remoteTimer=null;}}
+remoteBanner.close.onclick=hideRemoteBanner;
+function showRemoteBanner(op){
+ const b=remoteBanner,tone=stageTone(op.stage),origin=ORIGINS[op.origin],reason=REASON_STAGES.has(op.stage)?opReason(op):'';
+ setOriginChip(b.chip,op.origin);
+ b.root.dataset.tone=tone;
+ b.titleText.textContent=`Perintah dari ${origin?origin.upper:'REMOTE'}`;
+ b.time.textContent=clockText(op.updated_ms);
+ const summary=opSummary(op);
+ b.summary.textContent=summary;b.summary.title=summary;
+ b.stage.textContent=`${stageText(op)}${reason?`: ${reasonLabel(reason)}`:''}`;b.stage.className=`notice-stage ${tone}`;
+ b.stage.title=reason;
+ b.root.hidden=false;
+ if(remoteTimer){clearTimeout(remoteTimer);remoteTimer=null;}
+ if(op.stage==='APPLIED')remoteTimer=setTimeout(hideRemoteBanner,10000);
+ wakeScreen();
+}
+// Returns the operation it announced (or null) so a rejection in the same snapshot can compare times.
+function renderRemoteBanner(s){
+ if(s.snapshot_seq==null||!remoteFieldsSupported(s))return null;
+ const raw=s.last_remote_operation,op=raw&&typeof raw==='object'&&raw.id?raw:null;
+ const key=op?`${op.id}:${op.stage}`:null;
+ // Baseline from the first real snapshot: a reload or a new panel never re-announces.
+ if(remoteSeen===undefined){remoteSeen=key;return null;}
+ if(key===remoteSeen)return null;
+ remoteSeen=key;
+ if(op&&!READ_OPS.has(op.op)){showRemoteBanner(op);return op;}
+ return null;
+}
+// A rejected Ground/backup command is never journaled, so it only appears in remote_rejects.
+// Entries are matched by identity, not by time, so a clock step cannot hide or replay one.
+function rejectKey(entry){return `${entry.t}|${entry.origin}|${entry.op}|${entry.error}`;}
+function renderRemoteRejects(s,announced){
+ if(s.snapshot_seq==null||!Array.isArray(s.remote_rejects))return;
+ const list=s.remote_rejects.filter(entry=>entry&&typeof entry==='object'),keys=new Set(list.map(rejectKey));
+ if(rejectSeen===undefined){rejectSeen=keys;return;}
+ const fresh=list.filter(entry=>!rejectSeen.has(rejectKey(entry))&&!READ_OPS.has(entry.op));
+ rejectSeen=keys;
+ if(!fresh.length)return;
+ const time=entry=>typeof entry.t==='number'&&Number.isFinite(entry.t)?entry.t:-Infinity;
+ const latest=fresh.reduce((a,b)=>time(b)>time(a)?b:a);
+ if(announced&&typeof announced.updated_ms==='number'&&announced.updated_ms>time(latest))return;
+ showRemoteBanner({id:`rej-${latest.t}`,op:String(latest.op||''),origin:latest.origin,stage:'REJECTED',reason:String(latest.error||''),updated_ms:latest.t,summary:null});
+}
+// ---- T900/PPP recovery progress (link.ppp_recovery). Inside the open dialog when there is
+// one, otherwise a banner above the page. The Edge keeps it 90 s after it finishes. ----
+const RECOVERY_STEPS=[['requested','Restart diminta'],['cycled','PPP turun/naik'],['ppp_up','PPP UP'],['peer_reply','Ping Ground'],['mqtt_ready','MQTT utama']];
+const RECOVERY_END=new Set(['DONE','TIMEOUT','FAILED']);
+const RECOVERY_HEAD={REQUESTED:'Menunggu PPP turun/naik…',RESTARTING:'PPP sedang restart…',PPP_UP:'PPP UP, ping Ground…',PEER_OK:'Ground membalas, tunggu MQTT…',DONE:'Tersambung ke Ground ✓',FAILED:'Restart T900 gagal'};
+// A PPP restart cannot help while the radio itself is gone (pppd cannot even open the device).
+// Only a missing alias means the radio is gone; IDENTITY_MISMATCH is usually a site VID/PID/port setting.
+const USB_HINTS={MISSING:'T900 USB tidak terdeteksi — restart PPP tidak membantu; cek kabel/daya radio.'};
+const PPP_APPROVAL_HINT='Perlu approval root: sudo rdf-node controls approve --ppp-restart',HELPER_MISSING_HINT='Helper kontrol belum tersedia.';
+let recoveryDismissed=null,recoveryNote={id:null,text:'',at:0},recoveryWokeId=null;
+const recovery=(()=>{
+ // Only the headline is live: the elapsed counter changes every poll and must not be re-read aloud.
+ const root=document.createElement('section');root.className='recovery';root.hidden=true;root.setAttribute('aria-label','Progres restart T900');
+ const head=document.createElement('div');head.className='recovery-head';
+ const title=document.createElement('b');title.append(icon('radio'),'Restart T900');
+ const origin=document.createElement('span'),headline=document.createElement('span'),elapsed=document.createElement('span');
+ headline.className='recovery-headline';headline.setAttribute('role','status');headline.setAttribute('aria-live','polite');elapsed.className='recovery-elapsed';
+ const close=document.createElement('button');close.type='button';close.className='recovery-close';close.setAttribute('aria-label','Sembunyikan progres restart T900');close.append(icon('x'));
+ head.append(title,origin,headline,elapsed,close);
+ const list=document.createElement('ol');list.className='recovery-steps';
+ const steps=RECOVERY_STEPS.map(([key,name])=>{
+  const item=document.createElement('li'),dot=document.createElement('span'),caption=document.createElement('span'),sub=document.createElement('small');
+  dot.className='rdot';caption.className='rlabel';caption.textContent=name;sub.className='rsub';sub.textContent='nonaktif';sub.hidden=true;
+  item.append(dot,caption,sub);list.append(item);return {key,name,item,dot,sub,state:null};
+ });
+ // Reason, retry note and hints are separate lines that wrap; none of them is clamped.
+ const foot=document.createElement('div');foot.className='recovery-foot';
+ const reason=document.createElement('div');reason.className='recovery-reason';
+ const retry=document.createElement('button');retry.type='button';retry.className='recovery-retry';
+ const retryLabel=document.createElement('span');retryLabel.textContent='Coba lagi';retry.append(icon('sync'),retryLabel);
+ foot.append(reason,retry);root.append(head,list,foot);noticesHost.append(root);
+ return {root,origin,headline,elapsed,close,steps,foot,reason,retry,linesKey:''};
+})();
+// No wall-clock linger test here: the Pi has no RTC and NTP over the restored link can step the
+// clock by hours. The Edge drops the record 90 s after it ends, on its monotonic clock.
+function currentRecovery(s){
+ const r=s?.link?.ppp_recovery;
+ return r&&typeof r==='object'&&typeof r.phase==='string'?r:null;
+}
+function recoveryRunning(){const r=currentRecovery(snapshot);return !!r&&!RECOVERY_END.has(r.phase);}
+// The helper timed out or its socket failed: systemd may still have restarted the unit.
+function recoveryUncertain(r){return !!r&&r.phase==='FAILED'&&r.stage==='OUTCOME_UNKNOWN';}
+// The link came back after the 120 s limit; the journal/ACK keep their timeout stage.
+function recoveryLate(r,id){return !!r&&r.phase==='DONE'&&r.late===true&&(id===undefined||r.id===id);}
+// Hiding a running card only lasts until it finishes, so the outcome is always seen.
+function recoveryHidden(r){return !r||(recoveryDismissed?.id===r.id&&(recoveryDismissed.end||!RECOVERY_END.has(r.phase)));}
+function recoveryCardShows(s,id){const r=currentRecovery(s);return !!r&&r.id===id&&!recoveryHidden(r);}
+function usbHint(s){return USB_HINTS[s?.link?.usb]||'';}
+// The primary link is fully back: PPP up, Ground answers ping and primary MQTT is ready (or off).
+function linkHealthy(s){
+ const l=s?.link||{},ctrl=l.mqtt_control||{};
+ return l.ppp==='UP'&&l.ppp_probe==='REPLY'&&(ctrl.ready===true||(ctrl.state||'DISABLED')==='DISABLED');
+}
+function pppRestartBlockedHint(caps){return caps.ppp_restart?'':caps.helper_available?PPP_APPROVAL_HINT:HELPER_MISSING_HINT;}
+function placeRecovery(){
+ const slot=$('modalrecovery'),modalOpen=!!slot&&!$('modal').hidden,host=modalOpen?slot:noticesHost;
+ if(recovery.root.parentNode!==host)host.append(recovery.root);
+ recovery.root.classList.toggle('in-modal',modalOpen);
+ recovery.root.classList.toggle('compact',modalOpen&&$('modal').dataset.recovery==='compact');
+}
+function setStepState(step,state){
+ if(step.state===state)return;
+ step.state=state;step.item.dataset.state=state;
+ const glyph={done:'check',fail:'x',off:'minus',unknown:'question'}[state];
+ step.dot.replaceChildren(...(glyph?[icon(glyph)]:[]));
+ step.sub.hidden=state!=='off';
+}
+function setRecoveryLines(c,lines){
+ const key=JSON.stringify(lines);if(key===c.linesKey)return;c.linesKey=key;
+ c.reason.replaceChildren(...lines.map(([text,tone,title])=>{const line=document.createElement('span');line.className=`rline${tone?` ${tone}`:''}`;line.textContent=text;if(title)line.title=title;return line;}));
+}
+function renderRecovery(s){
+ const c=recovery,r=currentRecovery(s),end=!!r&&RECOVERY_END.has(r.phase);
+ const hidden=recoveryHidden(r);
+ c.root.hidden=hidden;placeRecovery();
+ if(hidden)return;
+ const uncertain=recoveryUncertain(r),late=recoveryLate(r);
+ const tone=r.phase==='DONE'?'good':r.phase==='TIMEOUT'||uncertain?'warn':r.phase==='FAILED'?'bad':'progress';
+ c.root.dataset.tone=tone;c.root.dataset.phase=r.phase;
+ setOriginChip(c.origin,r.origin);
+ const limit=Number.isFinite(r.timeout_s)?r.timeout_s:120,seconds=Number.isFinite(r.elapsed_s)?Math.floor(r.elapsed_s):null;
+ c.headline.textContent=r.phase==='TIMEOUT'?`Belum tersambung dalam ${limit} dtk`:uncertain?'Hasil restart T900 belum pasti':RECOVERY_HEAD[r.phase]||r.phase;
+ c.elapsed.textContent=seconds==null?'':end?`${seconds} dtk`:`${seconds} / ${limit} dtk`;
+ const steps=r.steps&&typeof r.steps==='object'?r.steps:{};let pointer=false;
+ for(const step of c.steps){
+  const value=steps[step.key];let state;
+  if(step.key==='mqtt_ready'&&value===null&&r.phase!=='FAILED')state='off';
+  else if(value===true)state='done';
+  else if(!pointer){pointer=true;state=uncertain?'unknown':r.phase==='TIMEOUT'||r.phase==='FAILED'?'fail':end?'pending':'active';}
+  else state='pending';
+  setStepState(step,state);
+ }
+ const caps=s.capabilities||{},healthy=linkHealthy(s),usb=usbHint(s);
+ const reason=typeof r.reason==='string'&&r.reason?r.reason:'';
+ const note=recoveryNote.id===r.id&&Date.now()-recoveryNote.at<15000?recoveryNote.text:'';
+ const lines=[];
+ if(late)lines.push([`Tersambung lagi setelah batas ${limit} dtk; CMD tetap ${r.stage||'OUTCOME_UNKNOWN'}.`,'good',reason]);
+ else if(reason&&!(reason==='T900_USB_MISSING'&&usb))lines.push([REASONS[reason]?`${REASONS[reason]} · ${reason}`:reason,tone==='progress'?'':tone,reason]);
+ if(usb)lines.push([usb,'warn',s.link.usb]);
+ // 'Coba lagi' re-sends ppp.restart. It is offered only when it can run and the link is still
+ // down: restarting a link that just came back would drop it again.
+ const retryPhase=r.phase==='TIMEOUT'||uncertain,busy=!!c.retry.dataset.busy;
+ const canRetry=retryPhase&&!healthy&&!!caps.ppp_restart;
+ if(retryPhase&&healthy&&!late)lines.push(['Link sudah sehat lagi (PPP, ping, MQTT) — tidak perlu restart.','good']);
+ else if(retryPhase&&!caps.ppp_restart)lines.push([pppRestartBlockedHint(caps),'']);
+ if(note)lines.push([note,'']);
+ setRecoveryLines(c,lines);
+ c.retry.hidden=!(canRetry||busy);
+ if(!busy){c.retry.disabled=false;c.retry.removeAttribute('title');}
+ c.foot.hidden=c.retry.hidden&&!lines.length;
+}
+recovery.close.onclick=()=>{const r=currentRecovery(snapshot);if(r)recoveryDismissed={id:r.id,end:RECOVERY_END.has(r.phase)};renderRecovery(snapshot);};
+recovery.retry.onclick=async()=>{
+ if(needLogin())return;
+ const r=currentRecovery(snapshot),button=recovery.retry;
+ if(!r||!snapshot.capabilities?.ppp_restart||linkHealthy(snapshot)||button.dataset.busy)return;
+ // Without the radio on USB a fresh pppd cannot open the device; ask first, with the warning.
+ if(usbHint(snapshot)){confirmPppRestart();return;}
+ button.dataset.busy='1';button.disabled=true;recoveryNote={id:r.id,text:'Mengirim restart T900…',at:Date.now()};renderRecovery(snapshot);
+ try{const result=await command('ppp.restart');recoveryNote={id:r.id,text:`Terkirim: ${result.stage}`,at:Date.now()};}
+ catch(e){
+  if(e.message==='AUTHENTICATION_AND_CSRF_REQUIRED'){authenticated=false;csrf=null;lastAdminSessionRefresh=0;recoveryNote={id:null,text:'',at:0};render(snapshot);login();}
+  else recoveryNote={id:r.id,text:withReasonHint(e).message,at:Date.now()};
+ }
+ finally{delete button.dataset.busy;renderRecovery(snapshot);}
+};
+// ---- Riwayat: the last 10 mutations, refreshed while open when an operation stage changes. ----
+let historyView=null;
+function historyKey(s){return s.operation_seq!=null?`seq:${s.operation_seq}`:s.last_operation?`${s.last_operation.id}:${s.last_operation.stage}`:'';}
+function historyRow(op){
+ const item=document.createElement('div');item.className='history-row';item.setAttribute('role','listitem');
+ const time=document.createElement('time');time.textContent=clockText(op.updated_ms);
+ const chip=setOriginChip(document.createElement('span'),op.origin);
+ if(chip.hidden){chip.hidden=false;chip.style.visibility='hidden';}
+ const main=document.createElement('span');main.className='history-main';
+ const title=document.createElement('b');title.textContent=opSummary(op);title.title=String(op.op||'');main.append(title);
+ const reason=opReason(op);
+ if(reason){const note=document.createElement('small');note.className=`history-reason ${stageTone(op.stage)}`;note.textContent=REASONS[reason]?`${REASONS[reason]} · ${reason}`:reason;main.append(note);}
+ const stage=document.createElement('span');stage.className=`stagechip ${stageTone(op.stage)}`;stage.textContent=op.stage||'?';
+ item.append(time,chip,main,stage);return item;
+}
+function renderHistoryRejects(s){
+ const view=historyView;if(!view)return;
+ const list=Array.isArray(s.remote_rejects)?s.remote_rejects.filter(entry=>entry&&typeof entry==='object'):[];
+ view.rejects.hidden=!list.length;
+ if(!list.length)return;
+ const latest=list.reduce((a,b)=>typeof b.t==='number'&&b.t>(typeof a.t==='number'?a.t:-1)?b:a,list[0]);
+ const origin=ORIGINS[latest.origin]?.upper||'REMOTE',error=String(latest.error||'?');
+ view.rejects.replaceChildren(icon('warn'),`${list.length} perintah remote ditolak · terakhir ${clockText(latest.t)} ${origin} ${OP_LABELS[latest.op]||latest.op||''}: ${REASONS[error]?`${REASONS[error]} (${error})`:error}`);
+}
+async function loadHistory(view){
+ if(view.loading){view.again=true;return;}
+ view.loading=true;
+ try{
+  const ops=await get('/api/v2/operations/latest');
+  if(historyView!==view)return;
+  if(!Array.isArray(ops))throw new Error('format tidak valid');
+  const items=ops.filter(op=>op&&typeof op==='object'&&!READ_OPS.has(op.op)).slice(0,10);
+  view.list.replaceChildren(...items.map(historyRow));
+  view.status.hidden=items.length>0;view.status.textContent=items.length?'':'Belum ada perintah yang mengubah sistem.';
+ }catch(e){if(historyView===view){view.status.hidden=false;view.status.textContent=`Riwayat tidak termuat: ${e.message}. Tutup lalu coba lagi.`;}}
+ finally{view.loading=false;if(view.again&&historyView===view){view.again=false;void loadHistory(view);}}
+}
+function openHistory(){
+ const box=modal('Riwayat perintah','history');
+ const rejects=document.createElement('p');rejects.className='history-rejects';rejects.hidden=true;
+ const status=text(box,'Memuat riwayat…');status.className='hint';
+ const list=document.createElement('div');list.className='history-list';list.setAttribute('role','list');
+ box.prepend(rejects);box.append(list);
+ const view={rejects,status,list,key:historyKey(snapshot),loading:false,again:false};historyView=view;
+ renderHistoryRejects(snapshot);void loadHistory(view);
+}
+function refreshHistory(s){
+ if(!historyView||$('modal').hidden)return;
+ renderHistoryRejects(s);
+ const key=historyKey(s);if(key!==historyView.key){historyView.key=key;void loadHistory(historyView);}
 }
 // Nav badges point at the tab that explains a problem; they never mark anything healthy.
 function tabAlerts(s){
@@ -313,7 +664,7 @@ function render(s){
  $('quality').textContent=showDiagnostic?`Gate: ${diagnosticReason}`:`PAPR ${fmt(d.confidence_native_db,2)} dB / P ${fmt(d.power_native_db)} dB`;
  label('daq',q.state==='HEALTHY'?'SINKRON':q.state||'UNKNOWN',q.state);
  label('sync',c.sdr_revision==null?'--':`r${c.sdr_revision}`,'');
- renderOperation(s.last_operation);
+ renderOperation(s.last_operation,s);
  const alerts=s.active_alerts||[];const a=alerts.find(x=>x.severity==='error')||alerts[0];
  $('alert').textContent=a?a.text:'Status lokal normal';$('alertbox').className=`alert ${a?(a.severity==='error'?'bad':'warn'):'good'}`;
  $('alerticon').textContent=a?'!':'\u2713';$('temp').textContent=`${fmt(h.temperature_c)}\u00b0C`;
@@ -323,7 +674,13 @@ function render(s){
  $('focusalert').textContent=a?a.text:'';$('focusalert').className=`focus-alert ${a?(a.severity==='error'?'bad':'warn'):''}`;
  const backup=mqttBackupState(l);
  if(!linkData){rows('linkrows',[["T900 USB",l.usb,l.usb,'plug'],["PPP / interface",`${l.ppp||'--'} / ${l.interface||'--'}`,l.ppp,'chain'],[`Ping ${l.ppp_peer||'peer'}`,pppProbeNames[l.ppp_probe]||'BELUM DICEK',l.ppp_probe,'radar'],["MQTT CTRL / BULK",`${l.mqtt_control?.state||'--'} / ${l.mqtt_bulk?.state||'--'}`,mqttPairState(l),'cloud'],["MQTT cadangan",backup.state,backup.code,'layers'],["TX / RX (PPP/IP)",`${fmt(l.tx_kbit_s,2)} / ${fmt(l.rx_kbit_s,2)} kbit/s`,'','updown']]);}
- else rows('linkrows',[["Profil diminta",l.profile,'','activity'],["Grafik pause",l.bulk_pause||'STREAMING','','pause'],["Queue CTRL / BULK",`${l.mqtt_control?.depth||0} / ${l.mqtt_bulk?.depth||0}`,'','layers'],["Parse / angular drop",`${d.parse_errors||0} / ${l.angular_aborted||0}`,'','xcircle'],["Error cadangan",backup.error||'--','','warn']]);
+ else{
+  // systemd state of t900-ppp.service; absent on an older Edge.
+  const svc=l.ppp_service&&typeof l.ppp_service==='object'?l.ppp_service:null,svcState=typeof svc?.state==='string'?svc.state:'';
+  const svcText=svcState?`${svcState}${svc.restarts!=null?` · restart ${svc.restarts}`:''}`:'--';
+  const svcCode=svcState==='ACTIVE'?'UP':svcState==='FAILED'?'FAILED':svcState&&svcState!=='UNKNOWN'?svcState:'';
+  rows('linkrows',[["Layanan PPP",svcText,svcCode,'radio'],["Profil diminta",l.profile,'','activity'],["Grafik pause",l.bulk_pause||'STREAMING','','pause'],["Queue CTRL / BULK",`${l.mqtt_control?.depth||0} / ${l.mqtt_bulk?.depth||0}`,'','layers'],["Parse / angular drop",`${d.parse_errors||0} / ${l.angular_aborted||0}`,'','xcircle'],["Error cadangan",backup.error||'--','','warn']]);
+ }
  const syn=q.sync||{},syncFlags=[syn.frame,syn.sample_delay,syn.iq];
  const syncCode=syncFlags.every(flag=>flag===true)?'SYNCED':syncFlags.includes(false)?'DEGRADED':'UNKNOWN';
  if(!hostPage) rows('sysrows',[["Engine / desired",`${p.observed||'--'} / ${p.desired||'BELUM DIAMBIL'}`,p.observed==='RUNNING'?'HEALTHY':p.observed,'cpu'],["Frame / Delay / IQ",`${syn.frame??'?'} / ${syn.sample_delay??'?'} / ${syn.iq??'?'}`,syncCode,'sync'],["Frame / progress",`${q.frame_index??'--'} / ${q.frame_progressing?'MAJU':'BELUM'}`,q.frame_progressing?'HEALTHY':'UNKNOWN','film'],["Drop total / delta",`${q.dropped_frames??'--'} / ${q.drop_delta??'--'}`,'','xcircle'],["DAQ umur / USB SDR",`${age(q.source_age_ms)} / ${h.usb_count??'--'} terdeteksi`,'','clock']]);
@@ -335,6 +692,10 @@ function render(s){
  document.body.dataset.accent=prefs.accent;document.body.dataset.font=prefs.font;
  renderData(s);
  renderTabAlerts(s);
+ renderRemoteRejects(s,renderRemoteBanner(s));
+ renderRecovery(s);
+ const usbWarn=$('pppusbwarn');if(usbWarn)setUsbWarning(usbWarn,s);
+ refreshHistory(s);
 }
 async function get(path){const response=await fetch(path,{cache:'no-store',signal:AbortSignal.timeout(1200)});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json();}
 async function post(path,body,timeout=6000){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf||''},body:JSON.stringify(body),signal:AbortSignal.timeout(timeout)});let j=await response.json();if(!response.ok){const error=new Error(j.error||j.result?.error||j.stage||'Permintaan gagal');error.status=response.status;throw error;}return j;}
@@ -410,7 +771,8 @@ async function keepAdminSessionAlive(){
 }
 setInterval(keepAdminSessionAlive,ADMIN_SESSION_CHECK_MS);
 // Black screen: an overlay only (the backlight stays under OS control). Any tap wakes it and
-// that tap is swallowed; a new error alert that appears while black wakes it automatically.
+// that tap is swallowed; a new error alert, a running T900 recovery or a new remote command
+// (showRemoteBanner) wakes it automatically.
 let blankErrors=new Set();
 function errorAlertCodes(){return new Set((snapshot.active_alerts||[]).filter(alert=>alert.severity==='error').map(alert=>alert.code||alert.text));}
 // The clock is the Pi system time; when the Edge reports it untrusted it is marked, not hidden.
@@ -424,7 +786,16 @@ function updateBlankClock(){
 }
 function enterBlank(){blankErrors=errorAlertCodes();updateBlankClock();$('blank').hidden=false;}
 function wakeScreen(){if($('blank').hidden)return false;$('blank').hidden=true;lastTouch=Date.now();void refreshSpectrum(snapshot);return true;}
-setInterval(()=>{const stale=Date.now()-lastProgress>5000;$('stale').hidden=!stale;if(stale)$('stalereason').textContent=Date.now()-lastApi>5000?'API lokal tidak merespons.':'API hidup, snapshot tidak bergerak.';const sec=snapshot.config?.preferences?.blank_after_seconds||0,errors=errorAlertCodes();if($('blank').hidden){if(sec>0&&Date.now()-lastTouch>sec*1000&&!errors.size)enterBlank();}else if([...errors].some(code=>!blankErrors.has(code)))wakeScreen();else updateBlankClock();},250);
+// A running recovery wakes the screen once per restart id; a manual 'Layar hitam' afterwards
+// sticks, while automatic blanking stays off until the recovery ends.
+setInterval(()=>{
+ const stale=Date.now()-lastProgress>5000;$('stale').hidden=!stale;
+ if(stale)$('stalereason').textContent=Date.now()-lastApi>5000?'API lokal tidak merespons.':'API hidup, snapshot tidak bergerak.';
+ const sec=snapshot.config?.preferences?.blank_after_seconds||0,errors=errorAlertCodes(),running=currentRecovery(snapshot),recovering=recoveryRunning();
+ if(recovering&&running.id!==recoveryWokeId){recoveryWokeId=running.id;wakeScreen();}
+ if($('blank').hidden){if(sec>0&&Date.now()-lastTouch>sec*1000&&!errors.size&&!recovering)enterBlank();}
+ else if([...errors].some(code=>!blankErrors.has(code)))wakeScreen();else updateBlankClock();
+},250);
 const tabOrder=Array.from(document.querySelectorAll('nav button'),button=>button.dataset.tab);
 function selectTab(tab,direction=0){
  for(const page of document.querySelectorAll('.page')){
@@ -462,8 +833,8 @@ function segmented(id,onChange){
 }
 segmented('linkpage',value=>{linkData=value;render(snapshot);});
 segmented('syspage',value=>{hostPage=value;$('systitle').textContent=hostPage?'RASPBERRY / HOST':'RDF / DAQ';render(snapshot);});
-function modal(title,iconName='',tone=''){if(mqttKeyboardDismiss){mqttKeyboardDismiss(false);mqttKeyboardDismiss=null;}const dialog=$('modal').querySelector('.dialog');dialog.querySelector('.dialoghead').append($('closemodal'));dialog.classList.remove('keyboard-open');$('modalbody').classList.remove('keyboard-open');modalReturnFocus=document.activeElement;pinKeyHandler=null;$('modaltitle').replaceChildren(...(iconName?[icon(iconName,tone)]:[]),title);$('modalbody').replaceChildren();$('modalmsg').textContent='';$('modal').hidden=false;return $('modalbody');}
-function dismissModal(){if(mqttKeyboardDismiss)mqttKeyboardDismiss(false);$('modal').hidden=true;pinKeyHandler=null;const target=modalReturnFocus;modalReturnFocus=null;if(target&&typeof target.focus==='function')target.focus();}
+function modal(title,iconName='',tone=''){if(mqttKeyboardDismiss){mqttKeyboardDismiss(false);mqttKeyboardDismiss=null;}const dialog=$('modal').querySelector('.dialog');dialog.querySelector('.dialoghead').append($('closemodal'));dialog.classList.remove('keyboard-open');$('modalbody').classList.remove('keyboard-open');modalReturnFocus=document.activeElement;pinKeyHandler=null;$('modaltitle').replaceChildren(...(iconName?[icon(iconName,tone)]:[]),title);$('modalbody').replaceChildren();$('modalbody').scrollTop=0;$('modalmsg').textContent='';historyView=null;$('modal').dataset.recovery='full';$('modal').hidden=false;placeRecovery();return $('modalbody');}
+function dismissModal(){if(mqttKeyboardDismiss)mqttKeyboardDismiss(false);$('modal').hidden=true;historyView=null;placeRecovery();pinKeyHandler=null;const target=modalReturnFocus;modalReturnFocus=null;if(target&&typeof target.focus==='function')target.focus();}
 $('closemodal').onclick=dismissModal;
 function modalKeydown(event){
  if($('modal').hidden)return;
@@ -491,7 +862,7 @@ function section(parent,title,iconName,klass=''){
 function needLogin(){if(authenticated)return false;login();return true;}
 function login(){
  let pin='',pending=false;
- const box=modal('PIN admin lokal','lock');
+ const box=modal('PIN admin lokal','lock');$('modal').dataset.recovery='compact';placeRecovery();
  const layout=document.createElement('div');layout.className='pin-layout';
  const pad=document.createElement('div');pad.className='pin-pad';pad.setAttribute('role','group');pad.setAttribute('aria-label','Keypad PIN');
  const readout=document.createElement('div');readout.className='pin-readout';readout.setAttribute('role','img');
@@ -921,15 +1292,41 @@ $('controlbtn').onclick=()=>{if(needLogin())return;const box=modal('Kontrol RDF'
   const shutdown=action(host,'Shutdown',()=>prepareShutdown(),true,'power');
   shutdown.disabled=!caps.shutdown||!shutdownHistoryChecked;
   shutdown.title=!shutdownHistoryChecked?'Riwayat operasi belum tersedia.':shutdownUncertain?'Periksa Raspberry secara lokal sebelum mengulangi shutdown.':'';
+  // Local T900/PPP restart: controlled mode + control.ppp_restart_enabled + helper approval.
+  const ppp=action(host,'Restart T900',()=>confirmPppRestart(),false,'radio');
+  ppp.disabled=!caps.ppp_restart;
   const rebootReason=!caps.helper_available?'Helper kontrol belum tersedia.':
    !caps.reboot?'Reboot lokal memerlukan mode controlled dan approval root (--reboot).':'';
-  if(rebootReason){const note=text(host,rebootReason);note.className='hint';}
+  const pppReason=caps.ppp_restart?'':!caps.helper_available?'Helper kontrol belum tersedia.':'Perlu approval root: sudo rdf-node controls approve --ppp-restart';
+  ppp.title=pppReason;
+  for(const reason of new Set([rebootReason,pppReason].filter(Boolean))){const note=text(host,reason);note.className='hint';}
 };
-function confirmOperation(label,op,extra){const box=modal(label,'warn','bad');text(box,'Pemrosesan RDF akan terhenti.');cancelAction(box);action(box,'Konfirmasi',()=>command(op,extra),true,'check');}
+function confirmOperation(label,op,extra,message='Pemrosesan RDF akan terhenti.'){const box=modal(label,'warn','bad');text(box,message);cancelAction(box);action(box,'Konfirmasi',()=>command(op,extra).catch(error=>{throw withReasonHint(error);}),true,'check');}
+// Live while the confirmation is open: replugging the radio clears the warning.
+function setUsbWarning(el,s){
+ const hint=usbHint(s);el.hidden=!hint;
+ if(el.dataset.text!==hint){el.dataset.text=hint;el.replaceChildren(...(hint?[icon('warn'),hint]:[]));}
+}
+// PPP restart cuts only the primary (T900) MQTT path; progress then shows in this dialog.
+function confirmPppRestart(){
+ const box=modal('Restart T900','warn','bad');
+ text(box,'Restart PPP T900? MQTT utama putus beberapa detik sampai PPP tersambung lagi. Broker cadangan (LAN/internet) tidak terpengaruh.');
+ const warning=document.createElement('p');warning.id='pppusbwarn';warning.className='usb-warning';warning.setAttribute('role','alert');
+ box.append(warning);setUsbWarning(warning,snapshot);
+ cancelAction(box);
+ action(box,'Konfirmasi',async()=>{
+  let result;try{result=await command('ppp.restart');}catch(error){throw withReasonHint(error);}
+  if(warning.isConnected&&$('modal').dataset.recovery==='compact'){$('modal').dataset.recovery='full';placeRecovery();}
+  return result;
+ },true,'check');
+ // An earlier card shows only its headline here so the warning and buttons stay in view; once
+ // this restart is accepted the dialog shows its full progress.
+ if(currentRecovery(snapshot)){$('modal').dataset.recovery='compact';placeRecovery();}
+}
 // The kiosk has no physical keyboard, so frequency entry uses an on-screen keypad. Range and
 // policy checks stay on the Edge; this only builds a well-formed MHz number.
 function frequency(){
- const box=modal('Frekuensi center + VFO0','wave');
+ const box=modal('Frekuensi center + VFO0','wave');$('modal').dataset.recovery='compact';placeRecovery();
  const start=snapshot.detection?.frequency_hz?(snapshot.detection.frequency_hz/1e6).toFixed(3):'';
  let value=start,fresh=true;
  const layout=document.createElement('div');layout.className='freq-layout';
@@ -1006,4 +1403,5 @@ async function prepareShutdown(){
 document.addEventListener('pointerdown',()=>{lastTouch=Date.now();if(wakeScreen()){swallowClick=true;setTimeout(()=>{swallowClick=false;},400);}},true);
 document.addEventListener('keydown',event=>{lastTouch=Date.now();if(wakeScreen())event.stopImmediatePropagation();},true);
 $('blankbtn').onclick=()=>enterBlank();
+if($('historybtn'))$('historybtn').onclick=openHistory;
 get('/api/v2/session').then(s=>{if(authenticated)return;authenticated=s.authenticated;csrf=s.csrf;lastAdminSessionRefresh=Date.now();render(snapshot);}).catch(()=>{});poll();
