@@ -107,7 +107,7 @@ def _is_loopback(host: str) -> bool:
 
 def validate_backup_config(b: dict, allow_insecure_loopback: bool) -> None:
     # The backup broker is a LAN or online mirror; its budget is not part of the T900 aggregate.
-    for key in ('enabled', 'tls', 'commands'):
+    for key in ('enabled', 'tls', 'commands', 'settings_report_plaintext'):
         if type(b[key]) is not bool:
             raise ValueError('BOOLEAN_REQUIRED')
     for key, lo, hi in (('port', 1, 65535), ('budget_bytes_s', 1000, 200000)):

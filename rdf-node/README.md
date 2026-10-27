@@ -302,7 +302,9 @@ Hal yang perlu diperhatikan:
   publish-only, matikan `Terima perintah`.
 - Command dari broker cadangan dijalankan **seperti command Ground** (termasuk reboot/shutdown).
   Batasi ACL publish `cmd/#` di broker itu dan jangan aktifkan `Terima perintah` di broker publik.
-  ACK command dari cadangan hanya dikirim ke cadangan; `config.get` dari cadangan memerlukan TLS.
+  ACK command dari cadangan hanya dikirim ke cadangan; `config.get` dari cadangan memerlukan TLS,
+  kecuali `Settings tanpa TLS: Izinkan` (`mqtt.backup.settings_report_plaintext: true`). Broker
+  utama menjawab `config.get` dengan atau tanpa TLS.
 - TLS dengan `ca_file: null` memakai CA sistem (broker online bersertifikat publik). Broker LAN
   self-signed memerlukan `mqtt.backup.ca_file`, atau TLS nonaktif hanya di LAN tepercaya.
 - Koneksi mengikuti routing OS. Bila route ke broker online lewat PPP, trafik cadangan memakai

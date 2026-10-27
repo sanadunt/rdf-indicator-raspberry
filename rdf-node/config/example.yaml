@@ -42,6 +42,7 @@ mqtt:
     ca_file: null
     credentials_file: null
     commands: true
+    settings_report_plaintext: false
     budget_bytes_s: 8000
 telemetry:
   profile: balanced

@@ -151,8 +151,14 @@ class BackupConfigTests(unittest.TestCase):
         c=load_config()
         self.assertEqual(c['mqtt']['backup'],{'enabled':False,'host':None,'port':8883,'transport':'tcp',
                                               'websocket_path':'/mqtt','tls':True,'ca_file':None,
-                                              'credentials_file':None,'commands':True,'budget_bytes_s':8000})
+                                              'credentials_file':None,'commands':True,
+                                              'settings_report_plaintext':False,'budget_bytes_s':8000})
         validate_config(c)
+    def test_backup_settings_report_plaintext_must_be_boolean(self):
+        validate_config(self.backup(settings_report_plaintext=True))
+        for value in ('true',1,None):
+            with self.subTest(value=value),self.assertRaisesRegex(ValueError,'BOOLEAN_REQUIRED'):
+                validate_config(self.backup(settings_report_plaintext=value))
     def test_enabled_backup_requires_host(self):
         c=self.backup(enabled=True)
         with self.assertRaisesRegex(ValueError,'MQTT_BACKUP_HOST_REQUIRED'):validate_config(c)

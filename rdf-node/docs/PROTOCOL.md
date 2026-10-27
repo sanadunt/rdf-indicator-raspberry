@@ -84,8 +84,9 @@ Aturan khusus per broker:
   memproses command itu seperti command Ground (actor `ground-controller`). ACK command dari
   cadangan hanya dikirim ke cadangan; ACK command dari broker utama atau panel lokal dikirim ke semua
   broker READY.
-- `config.get` memerlukan TLS pada broker asal request, dan `settings/reported` hanya dikirim ke
-  broker itu.
+- `config.get` dari broker utama dijawab dengan atau tanpa TLS. Dari broker cadangan, `config.get`
+  memerlukan TLS atau `mqtt.backup.settings_report_plaintext: true`. `settings/reported` hanya
+  dikirim ke broker asal request.
 
 Detail per topic ada di [MQTT_TOPIC_SUMMARY.md](MQTT_TOPIC_SUMMARY.md#broker-cadangan); konfigurasi,
 ACL, dan routing di [MQTT_GROUND.md](MQTT_GROUND.md#broker-cadangan-mirror-lanonline).
@@ -189,8 +190,11 @@ Edge merespons lewat `settings/reported` dengan QoS 1, non-retained, expiry 30 s
 
 Field wajib tepat `v,sid,boot,id,rev,t,settings_json`. `settings_json` menyimpan teks UTF-8
 persis dari file native yang berhasil dibaca, bukan normalisasi atau safe-field serialization.
-TLS wajib pada broker asal request; Edge menolak TLS-off, source settings unavailable/stale, atau
-compact envelope di atas 8.192 byte dengan error spesifik. Report hanya dikirim ke broker yang
+Broker utama dijawab dengan atau tanpa TLS, karena `mqtt.tls: false` berarti operator memilih link
+tepercaya yang juga membawa telemetry dan `config.patch`. Broker cadangan tanpa TLS ditolak
+`TLS_REQUIRED_FOR_SETTINGS_REPORT` kecuali `mqtt.backup.settings_report_plaintext: true`. Edge
+menolak source settings unavailable/stale atau compact envelope di atas 8.192 byte dengan error
+spesifik. Report hanya dikirim ke broker yang
 meminta (utama atau cadangan), tidak di-mirror. Edge tidak memotong atau memecah report. `ack/config` memuat
 status/error command; settings datang pada PUBLISH terpisah.
 

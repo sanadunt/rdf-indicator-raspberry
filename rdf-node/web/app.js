@@ -1159,10 +1159,13 @@ async function openMqttBackupSettings(){
  const tlsHint=text(grid,'');const clientHint=text(grid,'');tlsHint.className=clientHint.className='hint';
  mqttGroupHeading(grid,'Perintah dan akun','lock');
  const commands=mqttSelect(grid,'Terima perintah',[['on','Aktif'],['off','Nonaktif']],'on');
+ const settingsPlain=mqttSelect(grid,'Settings tanpa TLS',[['off','Tolak'],['on','Izinkan']],'off');
+ const settingsPlainField=settingsPlain.closest('label');
  const auth=mqttSelect(grid,'Akun',[['none','Tanpa akun'],['account','Pakai akun']],'none');
  const user=mqttField(grid,'User','','text','',128);user.autocomplete='off';
  const password=mqttField(grid,'Pass','','password','',512);password.autocomplete='new-password';
  const commandHint=text(grid,'');commandHint.className='hint';
+ const settingsHint=text(grid,'');settingsHint.className='hint';
  box.append(grid);
  function updateForm(){
   const tlsOn=tls.value==='on',trust=settings.trust_mode;
@@ -1178,17 +1181,24 @@ async function openMqttBackupSettings(){
   commandHint.textContent=commands.value==='on'
    ?'Edge subscribe cmd/* di broker ini; perintahnya diproses seperti dari Ground. Batasi lewat ACL broker.'
    :'Hanya publish; Edge tidak subscribe perintah di broker ini.';
+  // Plaintext settings reports are only an option on a backup without TLS; TLS backups always answer config.get.
+  settingsPlainField.hidden=tlsOn||commands.value!=='on';
+  settingsHint.hidden=settingsPlainField.hidden;
+  settingsHint.textContent=settingsPlain.value==='on'
+   ?'cmd/config/get dijawab settings/reported tanpa enkripsi di broker ini. Izinkan hanya untuk broker tepercaya, bukan broker bersama/publik.'
+   :'cmd/config/get di broker ini ditolak (TLS_REQUIRED_FOR_SETTINGS_REPORT) selama TLS nonaktif.';
+  settingsHint.classList.toggle('warn',settingsPlain.value==='on');
  }
  function applySettings(s){
   enabled.value=s.enabled===true?'on':'off';transport.value=s.transport==='websocket'?'websocket':'tcp';tls.value=s.tls===false?'off':'on';
   host.value=s.host??'';port.value=s.port==null?'':String(s.port);websocketPath.value=s.websocket_path||'/mqtt';
-  commands.value=s.commands===false?'off':'on';auth.value=s.auth==='account'||s.auth==='config'?'account':'none';
+  commands.value=s.commands===false?'off':'on';settingsPlain.value=s.settings_report_plaintext===true?'on':'off';auth.value=s.auth==='account'||s.auth==='config'?'account':'none';
   user.value='';password.value='';
   user.placeholder=password.placeholder=s.credentials_set===true?(s.credentials_source==='config'?'dari config':'tersimpan'):'wajib diisi';
   clientHint.textContent=s.client_id?`Client ID: ${s.client_id} (otomatis, berbeda dari broker utama).`:'Client ID dibuat otomatis, berbeda dari broker utama.';
   updateForm();
  }
- for(const select of [transport,tls,commands,auth])select.addEventListener('change',updateForm);
+ for(const select of [transport,tls,commands,settingsPlain,auth])select.addEventListener('change',updateForm);
  applySettings(settings);
  const saveButton=action(box,'Simpan',async()=>{
   const account=auth.value==='account';let saved;
@@ -1196,6 +1206,7 @@ async function openMqttBackupSettings(){
    saved=await post('/api/v2/mqtt/backup',{
     enabled:enabled.value==='on',host:host.value.trim(),port:Number(port.value),transport:transport.value,
     websocket_path:websocketPath.value,tls:tls.value==='on',commands:commands.value==='on',
+    settings_report_plaintext:tls.value!=='on'&&settingsPlain.value==='on',
     auth:auth.value,username:account?user.value:'',password:account?password.value:''
    });
   }catch(e){const hint=mqttBackupErrors[e.message];if(hint)e.message=`${e.message}: ${hint}`;throw e;}

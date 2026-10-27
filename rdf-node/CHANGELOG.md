@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- `cmd/config/get` on the primary broker is now answered with `settings/reported` whether or not
+  the primary uses TLS. `mqtt.tls: false` is the operator's choice of a trusted link (for example
+  the private PPP/T900 point-to-point link) that already carries telemetry and `config.patch` in
+  plaintext; before this change every `config.get` there was rejected
+  `TLS_REQUIRED_FOR_SETTINGS_REPORT`, so Ground never received settings. The backup broker keeps
+  the TLS requirement by default because it may be shared or public; the new boolean
+  `mqtt.backup.settings_report_plaintext` (default `false`, panel `Data > Cadangan > Settings tanpa
+  TLS`) allows plaintext reports there explicitly. `TLS_REQUIRED_FOR_SETTINGS_REPORT` now only
+  occurs for the backup broker. Everything else about `settings/reported` is unchanged: only after
+  `config.get`, only to the requesting broker (never mirrored), QoS 1, non-retained, expiry 30 s,
+  the same envelope and error codes, and one read request per second per broker. Panel backup
+  settings saved before this release (without the new key) keep loading, with the `config.yaml`
+  value.
 - Edge panel: **Restart T900** in `Kontrol > Raspberry` restarts the fixed `t900-ppp.service` from
   the touch panel. It needs the existing one-time `sudo rdf-node controls approve --ppp-restart`
   (controlled mode, `control.ppp_restart_enabled`, helper `allow_ppp_restart`); when disabled the
