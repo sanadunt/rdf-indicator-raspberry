@@ -84,7 +84,8 @@ Jangan menjalankan tester throughput bersamaan dengan operasi penting melalui ra
 tersedia.
 
 Coverage baru mencakup retensi byte settings native yang persis, `config.get` satu kali tanpa
-report otomatis, penolakan TLS-off/source unavailable/stale/payload di atas 8 KiB, serta
+report otomatis, report di broker utama plaintext, penolakan broker cadangan tanpa TLS kecuali
+opt-in `settings_report_plaintext`, penolakan source unavailable/stale/payload di atas 8 KiB, serta
 validasi Ground terhadap request ID, session, boot, freshness, dan JSON mentah. Edge menolak
 `config.get` lokal yang tidak punya consumer; Ground selalu memakai `state.cfg` sebagai
 `base_rev`, bukan nilai caller. Test command memastikan read-only `config.get` tidak butuh health

@@ -143,6 +143,7 @@ mqtt:
 | `ca_file` | `null` | `null` memakai trust store sistem (broker dengan sertifikat CA publik). Path absolut berarti hanya CA pada file itu yang dipercaya (CA privat/self-signed). Tidak mewarisi `mqtt.ca_file` broker utama. |
 | `credentials_file` | `null` | `null` berarti anonymous CONNECT. Path absolut ke JSON berisi tepat `username` dan `password` non-kosong. |
 | `commands` | `true` | Subscribe topic `cmd/*` di broker cadangan. `false` membuat cadangan publish-only. |
+| `settings_report_plaintext` | `false` | Boolean. `true` mengizinkan `settings/reported` (jawaban `cmd/config/get`) di broker cadangan tanpa TLS. Tidak berpengaruh bila `tls: true`. Biarkan `false` untuk broker bersama/publik. |
 | `budget_bytes_s` | `8000` | Token bucket client cadangan, integer 1000..200000 B/s. Tidak masuk pemeriksaan `AGGREGATE_BUDGET_TOO_HIGH`. |
 
 `keepalive` dan `reconnect_max` mengikuti `mqtt.keepalive` dan `mqtt.reconnect_max`. Schema tetap
@@ -168,6 +169,7 @@ sama. Dialog **Broker cadangan** berisi:
 | Port | 1..65535 |
 | Path WebSocket | Hanya tampil untuk WebSocket |
 | Terima perintah | `Aktif` / `Nonaktif` (lihat bagian perintah di bawah) |
+| Settings tanpa TLS | `Tolak` (default) / `Izinkan`; hanya tampil bila TLS nonaktif dan `Terima perintah` aktif. `Izinkan` = `settings_report_plaintext: true` |
 | Akun | `Tanpa akun` / `Pakai akun` |
 | User, Pass | Hanya untuk `Pakai akun`; kosongkan keduanya untuk memakai ulang akun yang ada (akun yang sedang dipakai, akun panel, lalu `credentials_file` dari `config.yaml`). Placeholder `tersimpan` atau `dari config` menunjukkan akun mana yang akan dipakai |
 
@@ -182,11 +184,13 @@ tersambung), supaya consumer di sana tidak melihat node tetap online.
 Panel menyimpan pengaturan di `state_dir` (default `/var/lib/rdf-node`):
 
 - `mqtt-ui-backup-settings.json`: `{schema:1, enabled, host, port, transport, websocket_path,
-  tls, commands, auth}`, dengan `auth` = `none`, `account`, atau `config`; mode 0600.
+  tls, commands, auth, settings_report_plaintext}`, dengan `auth` = `none`, `account`, atau
+  `config`; mode 0600. File lama tanpa `settings_report_plaintext` tetap dipakai, dengan nilai dari
+  `config.yaml` (default `false`).
 - `mqtt-ui-backup-account.json`: `{username, password}` dari `Pakai akun`; mode 0600.
 
 Saat start, file panel yang ada dan valid **menggantikan** `enabled`, `host`, `port`,
-`transport`, `websocket_path`, `tls`, `commands`, dan pilihan akun dari `config.yaml`, sama seperti
+`transport`, `websocket_path`, `tls`, `commands`, `settings_report_plaintext`, dan pilihan akun dari `config.yaml`, sama seperti
 prioritas pengaturan broker utama. `auth: config` berarti memakai `mqtt.backup.credentials_file`;
 panel menampilkannya sebagai `Pakai akun` dengan placeholder `dari config`. File yang tidak ada,
 rusak, schema berbeda, atau berstatus aktif tetapi CA/credential-nya tidak tersedia diabaikan, lalu
@@ -240,7 +244,9 @@ Routing ACK:
 - Command dari broker cadangan dijawab (`ack/config`, `ack/operation`) hanya ke broker cadangan,
   sehingga tidak memakai budget T900.
 - Command dari broker utama atau dari panel Edge lokal dijawab ke semua broker yang READY.
-- `config.get` dari broker cadangan memerlukan TLS aktif pada broker cadangan
+- `config.get` dari broker utama dijawab dengan atau tanpa TLS (`mqtt.tls: false` = link pilihan
+  operator yang tepercaya). `config.get` dari broker cadangan memerlukan TLS aktif pada broker
+  cadangan, atau opt-in eksplisit `mqtt.backup.settings_report_plaintext: true`
   (`TLS_REQUIRED_FOR_SETTINGS_REPORT` bila tidak). `settings/reported` hanya dikirim ke broker yang
   meminta, tidak di-mirror.
 
@@ -360,8 +366,10 @@ Restart PPP dari panel Edge dan pemantau pemulihannya dijelaskan di [T900_PPP.md
 
 Setelah MQTT dikonfigurasi:
 1. Pastikan kedua client READY pada tab Link dan health receiver bertambah dengan DAQ yang benar.
-2. Gunakan `Refresh config` secara eksplisit. TLS harus aktif; pastikan `cmd/config/get` diikuti
+2. Gunakan `Refresh config` secara eksplisit; pastikan `cmd/config/get` diikuti
    `settings/reported` yang cocok dengan session dan request ID. Report tidak muncul otomatis.
+   Di broker utama ini berlaku dengan atau tanpa TLS; di broker cadangan tanpa TLS, ACK berisi
+   `TLS_REQUIRED_FOR_SETTINGS_REPORT` kecuali `settings_report_plaintext` aktif.
 3. Validasi output source lalu lihat DoA serta satu PUBLISH `telemetry/angular` berformat JSON,
    dengan `encoding="json"` dan tepat 360 angka pada `values`.
 4. Jika authority/angle approval belum ada tetapi seluruh gate integritas data lulus, pastikan Edge tetap mengirim `telemetry/doa` (`ok=0`, RAW) dan `telemetry/angular` (flags parsial) pada topic normal. Ground menampilkan keduanya sebagai `UNVERIFIED`; detection tetap invalid.

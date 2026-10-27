@@ -98,7 +98,6 @@ class ApplicationTests(unittest.TestCase):
     def test_config_get_rejects_unavailable_tls_or_oversized_settings(self):
         agent=self.a
         cases=(
-            ('tls', 'TLS_REQUIRED_FOR_SETTINGS_REPORT'),
             ('unavailable', 'SETTINGS_UNAVAILABLE'),
             ('stale', 'SETTINGS_STALE'),
             ('oversized', 'SETTINGS_REPORT_TOO_LARGE'),
@@ -107,8 +106,7 @@ class ApplicationTests(unittest.TestCase):
             agent.cfg['mqtt']['tls']=True;agent.source.config_error=None
             agent.source.raw_settings=compact(settings())
             agent.source.settings_seen=time.monotonic()
-            if case=='tls':agent.cfg['mqtt']['tls']=False
-            elif case=='unavailable':
+            if case=='unavailable':
                 agent.source.raw_settings=None;agent.source.config_error='OSError:SETTINGS_UNAVAILABLE'
             elif case=='stale':agent.source.settings_seen-=4
             elif case=='oversized':
@@ -119,6 +117,14 @@ class ApplicationTests(unittest.TestCase):
             self.assertEqual(result['stage'],'REJECTED',case)
             self.assertEqual(result['result']['error'],error,case)
         self.assertIsNone(getattr(agent,'settings_request_id',None))
+
+    def test_config_get_answers_on_plaintext_primary(self):
+        # mqtt.tls false is the operator's trusted PPP/T900 link; telemetry and config.patch already use it.
+        agent=self.a;agent.cfg['mqtt']['tls']=False
+        (agent.source.path/'settings.json').write_bytes(compact(settings()));agent.source.poll(force=True)
+        result=agent.commands.submit(self.request(),'ground-controller',topic=agent.prefix+'/cmd/config/get')
+        self.assertEqual(result['stage'],'APPLIED',result)
+        self.assertEqual((agent.settings_request_id,agent.settings_request_link),(result['id'],'primary'))
 
     def test_read_only_query_works(self):
         self.assertEqual(self.a.commands.submit(
@@ -1416,6 +1422,43 @@ class EndToEndTests(unittest.TestCase):
                 broker.stop()
 
 
+    def test_ground_settings_request_roundtrip_over_plaintext_primary(self):
+        # The deployed setup: primary broker over the private PPP/T900 link with mqtt.tls false.
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp);initial=make_agent(path);cfg=initial.cfg;initial.journal.close()
+            broker=Broker();creds=path/'mqtt.json'
+            creds.write_bytes(compact({'username':'test','password':'test-password'}))
+            cfg['mqtt'].update(enabled=True,host='127.0.0.1',port=broker.port,tls=False,allow_insecure_loopback=True,
+                               control_credentials_file=str(creds),bulk_credentials_file=str(creds))
+            raw=compact(settings())
+            atomic_write(path/'share'/'settings.json',raw)
+            agent=Agent(cfg);agent.monitor=FakeMonitor(cfg);agent.source.poll(force=True)
+            ground_cfg=copy.deepcopy(cfg);ground_cfg['state_dir']=str(path/'ground')
+            ground=Ground(ground_cfg)
+            agent_started=False;ground_started=False
+            try:
+                agent.start();agent_started=True
+                ground.start();ground_started=True
+                self.assertTrue(wait(lambda:ground.client.ready and
+                                     all(client.ready for client in agent.clients.values()) and
+                                     ground.node_state.get('sid')==agent.sid,15),
+                                [agent.snapshot(),ground.snapshot(),broker.errors])
+                self.assertEqual(ground.submit_command({'id':'ground-settings-plain','op':'config.get'})['stage'],'REQUESTED')
+                self.assertTrue(wait(lambda:ground.settings_json==raw.decode('utf-8'),10),
+                                [agent.snapshot(),ground.snapshot(),broker.errors])
+                with broker.lock: messages=list(broker.messages)
+                acks=[json.loads(m['payload']) for m in messages if m['topic']=='sdr/v2/uav-01/ack/config']
+                self.assertIn(('ground-settings-plain','APPLIED'),[(a['id'],a['status']) for a in acks])
+                self.assertFalse(any(a.get('result',{}).get('error') for a in acks))
+                reports=[m for m in messages if m['topic']=='sdr/v2/uav-01/settings/reported']
+                self.assertEqual(len(reports),1)
+                self.assertEqual((reports[0]['qos'],reports[0]['retain']),(1,False))
+                self.assertFalse(broker.errors)
+            finally:
+                if ground_started: ground.stop()
+                if agent_started: agent.stop()
+                broker.stop()
+
     def test_unverified_regular_telemetry_never_advances_detection(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp);initial=make_agent(path);cfg=initial.cfg;initial.journal.close()
@@ -1624,7 +1667,7 @@ def backup_body(**changes):
     body.update(changes);return body
 
 BACKUP_DEFAULT_VIEW={'enabled':False,'host':'','port':8883,'transport':'tcp','websocket_path':'/mqtt','tls':True,
-                     'commands':True,'auth':'none','credentials_set':False,'credentials_source':None,'trust_mode':'system',
+                     'commands':True,'settings_report_plaintext':False,'auth':'none','credentials_set':False,'credentials_source':None,'trust_mode':'system',
                      'client_id':'uav-01-backup','editable':True,'apply_pending':False}
 
 
@@ -1830,41 +1873,61 @@ class BackupLinkTests(unittest.TestCase):
         self.assertEqual(a.commands.submit(primary,'ground-controller',topic=topic,link='primary')['stage'],'APPLIED')
         self.assertEqual(a.settings_request_link,'primary')
 
-    def test_config_get_requires_tls_on_the_requesting_link(self):
+    def test_config_get_plaintext_rule_follows_the_requesting_link(self):
         a=self.a
         (a.source.path/'settings.json').write_bytes(compact(settings()));a.source.poll(force=True)
-        a.cfg['mqtt']['tls']=True
+        a.cfg['mqtt']['tls']=False
         control,bulk,backup=self.links(backup_tls=False)
         topic=a.prefix+'/cmd/config/get'
+        # Plaintext backup without the opt-in: rejected, ACK on the backup only, nothing queued.
         plain=self.request('config.get')
         result=a.commands.submit(plain,'ground-controller',topic=topic,link='backup')
         self.assertEqual((result['stage'],result['result']['error']),('REJECTED','TLS_REQUIRED_FOR_SETTINGS_REPORT'))
         self.assertEqual(self.ack_ids(backup,'ack/config'),[(plain['id'],'REJECTED')])
         self.assertEqual(self.ack_ids(control,'ack/config'),[])
         self.assertIsNone(a.settings_request_id)
-        # Backup TLS on: the raw settings report goes back to the backup only.
-        a.backup_active=dict(a.backup_active,tls=True);a.commands.last_rate.clear()
-        secure=self.request('config.get')
-        self.assertEqual(a.commands.submit(secure,'ground-controller',topic=topic,link='backup')['stage'],'APPLIED')
-        self.assertEqual(a.settings_request_link,'backup')
-        for client in (control,bulk,backup):client.sent.clear()
-        self.run_once()
-        reports=self.payloads(backup,'settings/reported')
-        self.assertEqual([p['id'] for p in reports],[secure['id']])
-        self.assertNotIn('settings/reported',self.suffixes(control)+self.suffixes(bulk))
-        self.assertIsNone(a.settings_request_id)
-        # Primary plaintext: rejected even though the backup is TLS; primary TLS: report to primary only.
-        a.cfg['mqtt']['tls']=False;a.commands.last_rate.clear()
-        primary_plain=self.request('config.get')
-        result=a.commands.submit(primary_plain,'ground-controller',topic=topic,link='primary')
-        self.assertEqual(result['result']['error'],'TLS_REQUIRED_FOR_SETTINGS_REPORT')
-        a.cfg['mqtt']['tls']=True;a.commands.last_rate.clear()
+        # Plaintext primary (mqtt.tls false): applied, and the report goes to the primary only.
+        a.commands.last_rate.clear()
         primary=self.request('config.get')
         self.assertEqual(a.commands.submit(primary,'ground-controller',topic=topic,link='primary')['stage'],'APPLIED')
+        self.assertEqual(a.settings_request_link,'primary')
         for client in (control,bulk,backup):client.sent.clear()
         self.run_once()
-        self.assertEqual([p['id'] for p in self.payloads(control,'settings/reported')],[primary['id']])
-        self.assertNotIn('settings/reported',self.suffixes(backup))
+        reports=self.payloads(control,'settings/reported')
+        self.assertEqual([p['id'] for p in reports],[primary['id']])
+        self.assertEqual(set(reports[0]),{'v','sid','boot','id','rev','t','settings_json'})
+        options=[o for _,t,_,o in control.sent if t.endswith('/settings/reported')][0]
+        self.assertEqual((options['qos'],options['retain'],options['expiry']),(1,False,30))
+        self.assertNotIn('settings/reported',self.suffixes(backup)+self.suffixes(bulk))
+        self.assertIsNone(a.settings_request_id)
+        # Explicit opt-in on the backup: applied and reported to the backup only.
+        a.backup_active=dict(a.backup_active,settings_report_plaintext=True);a.commands.last_rate.clear()
+        opted=self.request('config.get')
+        self.assertEqual(a.commands.submit(opted,'ground-controller',topic=topic,link='backup')['stage'],'APPLIED')
+        for client in (control,bulk,backup):client.sent.clear()
+        self.run_once()
+        self.assertEqual([p['id'] for p in self.payloads(backup,'settings/reported')],[opted['id']])
+        self.assertNotIn('settings/reported',self.suffixes(control)+self.suffixes(bulk))
+        # A TLS backup never needed the opt-in.
+        a.backup_active=dict(a.backup_active,tls=True,settings_report_plaintext=False);a.commands.last_rate.clear()
+        secure=self.request('config.get')
+        self.assertEqual(a.commands.submit(secure,'ground-controller',topic=topic,link='backup')['stage'],'APPLIED')
+        for client in (control,bulk,backup):client.sent.clear()
+        self.run_once()
+        self.assertEqual([p['id'] for p in self.payloads(backup,'settings/reported')],[secure['id']])
+        self.assertNotIn('settings/reported',self.suffixes(control))
+
+    def test_backup_opt_in_turned_off_before_delivery_keeps_report_on_hold(self):
+        a=self.a
+        (a.source.path/'settings.json').write_bytes(compact(settings()));a.source.poll(force=True)
+        control,bulk,backup=self.links(backup_tls=False)
+        a.backup_active=dict(a.backup_active,settings_report_plaintext=True)
+        request=self.request('config.get')
+        self.assertEqual(a.commands.submit(request,'ground-controller',topic=a.prefix+'/cmd/config/get',
+                                           link='backup')['stage'],'APPLIED')
+        a.backup_active=dict(a.backup_active,settings_report_plaintext=False)
+        self.run_once()
+        self.assertNotIn('settings/reported',self.suffixes(backup)+self.suffixes(control))
 
     def test_config_get_rate_limit_is_per_link(self):
         a=self.a
@@ -2031,7 +2094,8 @@ class BackupApiTests(unittest.TestCase):
         settings_file=self.state('mqtt-ui-backup-settings.json');account_file=self.state('mqtt-ui-backup-account.json')
         self.assertEqual(json.loads(settings_file.read_bytes()),
                          {'schema':1,'enabled':True,'host':'backup.example.net','port':8883,'transport':'tcp',
-                          'websocket_path':'/mqtt','tls':True,'commands':True,'auth':'account'})
+                          'websocket_path':'/mqtt','tls':True,'commands':True,'auth':'account',
+                          'settings_report_plaintext':False})
         self.assertEqual(json.loads(account_file.read_bytes()),{'username':'backup-user','password':'backup-secret'})
         self.assertEqual(stat.S_IMODE(settings_file.stat().st_mode),0o600)
         self.assertEqual(stat.S_IMODE(account_file.stat().st_mode),0o600)
@@ -2111,6 +2175,26 @@ class BackupApiTests(unittest.TestCase):
         self.a._apply_pending_backup()
         self.assertEqual(self.a.backup_client.cfg['ca_file'],str(ca))
 
+    def test_backup_settings_report_plaintext_option_round_trips(self):
+        self.login();body=backup_body(tls=False,port=1883)
+        code,view=self.post(dict(body,settings_report_plaintext=True))
+        self.assertEqual((code,view.get('settings_report_plaintext')),(200,True),view)
+        saved=json.loads(self.a.backup_state_path.read_text())
+        self.assertIs(saved['settings_report_plaintext'],True)
+        self.assertNotIn('backup-secret',self.a.backup_state_path.read_text())
+        self.a._apply_pending_backup()
+        self.assertTrue(self.a.settings_report_allowed('backup'))
+        for value in ('true',1,None):
+            with self.subTest(value=value):
+                self.assertEqual(self.post(dict(body,settings_report_plaintext=value)),
+                                 (400,{'error':'INVALID_MQTT_BACKUP_SETTINGS'}))
+        # A panel that predates the option sends no key: the safe default applies.
+        code,view=self.post(body)
+        self.assertEqual((code,view['settings_report_plaintext']),(200,False))
+        self.a._apply_pending_backup()
+        self.assertFalse(self.a.settings_report_allowed('backup'))
+        self.assertTrue(self.a.settings_report_allowed('primary'))
+
     def test_invalid_saved_backup_settings_fall_back_to_config(self):
         defaults=self.a._backup_defaults()
         saved={'schema':1,'enabled':True,'host':'backup.example.net','port':8883,'transport':'tcp',
@@ -2120,8 +2204,17 @@ class BackupApiTests(unittest.TestCase):
             with self.subTest(value=value):
                 atomic_write(self.a.backup_state_path,compact(value),0o600)
                 self.assertEqual(self.a._load_backup_settings(),defaults)
+        # A file saved before settings_report_plaintext existed keeps working with the config default.
         atomic_write(self.a.backup_state_path,compact(saved),0o600)
-        self.assertEqual(self.a._load_backup_settings(),{k:saved[k] for k in Agent.BACKUP_KEYS})
+        self.assertEqual(self.a._load_backup_settings(),dict({k:saved[k] for k in saved if k!='schema'},
+                                                            settings_report_plaintext=False))
+        self.a.cfg['mqtt']['backup']['settings_report_plaintext']=True
+        self.assertTrue(self.a._load_backup_settings()['settings_report_plaintext'])
+        self.a.cfg['mqtt']['backup']['settings_report_plaintext']=False
+        atomic_write(self.a.backup_state_path,compact(dict(saved,settings_report_plaintext=True)),0o600)
+        self.assertTrue(self.a._load_backup_settings()['settings_report_plaintext'])
+        atomic_write(self.a.backup_state_path,compact(dict(saved,settings_report_plaintext='yes')),0o600)
+        self.assertEqual(self.a._load_backup_settings(),defaults)
         # 'config' credentials disappear from config.yaml: fall back to config, never to anonymous.
         atomic_write(self.a.backup_state_path,compact(dict(saved,auth='config')),0o600)
         self.assertIsNone(self.a.cfg['mqtt']['backup']['credentials_file'])

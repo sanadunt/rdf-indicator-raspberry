@@ -223,12 +223,15 @@ class Agent:
             self.bulk_resume_after=time.monotonic()+self.cfg['telemetry']['resume_stable_seconds']
             self.bulk_reason='MQTT_RECONFIGURED'
     # ---- backup broker (LAN/online mirror) ----
-    BACKUP_KEYS=('enabled','host','port','transport','websocket_path','tls','commands','auth')
+    BACKUP_KEYS=('enabled','host','port','transport','websocket_path','tls','commands','auth','settings_report_plaintext')
+    # Added after the first panel release; settings saved before it may lack the key and keep the config default.
+    BACKUP_OPTIONAL_KEYS=frozenset({'settings_report_plaintext'})
     def _backup_defaults(self):
         b=self.cfg['mqtt']['backup']
         return {'enabled':b['enabled'],'host':b['host'] or '','port':b['port'],'transport':b['transport'],
                 'websocket_path':b['websocket_path'],'tls':b['tls'],'commands':b['commands'],
-                'auth':'config' if b['credentials_file'] else 'none'}
+                'auth':'config' if b['credentials_file'] else 'none',
+                'settings_report_plaintext':b['settings_report_plaintext']}
     def _backup_credentials_path(self,settings):
         if settings['auth']=='account': return self.backup_account_path
         if settings['auth']=='config': return self.cfg['mqtt']['backup']['credentials_file']
@@ -240,7 +243,7 @@ class Agent:
         if path and not (replacing_account and settings['auth']=='account') and not self._credentials_ready(path): return False
         return True
     def _validate_backup_settings(self,settings):
-        for key in ('enabled','tls','commands'):
+        for key in ('enabled','tls','commands','settings_report_plaintext'):
             if type(settings[key]) is not bool: raise ValueError('INVALID_MQTT_BACKUP_SETTINGS')
         if settings['transport'] not in ('tcp','websocket'): raise ValueError('INVALID_MQTT_TRANSPORT')
         if settings['auth'] not in ('none','account','config'): raise ValueError('INVALID_MQTT_BACKUP_SETTINGS')
@@ -253,9 +256,10 @@ class Agent:
         if self.demo: return dict(defaults,enabled=False)
         try:
             value=strict_json(stable_read(self.backup_state_path,4096,nofollow=True))
-            if not isinstance(value,dict) or value.get('schema')!=1 or set(value)!={'schema',*self.BACKUP_KEYS}:
-                return defaults
-            settings={key:value[key] for key in self.BACKUP_KEYS}
+            if not isinstance(value,dict) or value.get('schema')!=1: return defaults
+            keys=set(value)-{'schema'}
+            if keys-set(self.BACKUP_KEYS) or set(self.BACKUP_KEYS)-keys-self.BACKUP_OPTIONAL_KEYS: return defaults
+            settings={key:value.get(key,defaults[key]) for key in self.BACKUP_KEYS}
             self._validate_backup_settings(settings)
             if settings['auth']=='config' and not self.cfg['mqtt']['backup']['credentials_file']: return defaults
             if settings['enabled'] and not self._backup_transport_ready(settings): return defaults
@@ -302,6 +306,7 @@ class Agent:
             return {'enabled':settings['enabled'],'host':settings['host'],'port':settings['port'],
                     'transport':settings['transport'],'websocket_path':settings['websocket_path'],
                     'tls':settings['tls'],'commands':settings['commands'],
+                    'settings_report_plaintext':settings['settings_report_plaintext'],
                     'auth':'none' if settings['auth']=='none' else 'account',
                     'credentials_set':ready,
                     'credentials_source':({'account':'panel','config':'config'}[source] if ready else None),
@@ -311,7 +316,10 @@ class Agent:
                     'apply_pending':self.backup_reconfigure.is_set()}
     def configure_mqtt_backup(self,value):
         keys={'enabled','host','port','transport','websocket_path','tls','commands','auth','username','password'}
-        if self.demo or not isinstance(value,dict) or set(value)!=keys: raise ValueError('INVALID_MQTT_BACKUP_SETTINGS')
+        if self.demo or not isinstance(value,dict) or not keys<=set(value)<=keys|self.BACKUP_OPTIONAL_KEYS:
+            raise ValueError('INVALID_MQTT_BACKUP_SETTINGS')
+        # A client that predates the option never enables plaintext settings reports.
+        value={'settings_report_plaintext':False,**value}
         if value['auth'] not in ('none','account'): raise ValueError('INVALID_MQTT_BACKUP_SETTINGS')
         username=value['username']; password=value['password']
         if not isinstance(username,str) or not isinstance(password,str): raise ValueError('INVALID_MQTT_CREDENTIALS')
@@ -651,9 +659,14 @@ class Agent:
             self.journal.update(r['id'],stage,result)
             self.operation_changed(r['id'],'ppp.restart',stage,result,link=r['link'])
         except Exception: pass
-    def link_tls(self,link):
-        if link=='backup': return bool(self.backup_client and self.backup_active['tls'])
-        return bool(self.cfg['mqtt']['tls'])
+    def settings_report_allowed(self,link):
+        # The primary broker's link is the operator's choice: plaintext there (mqtt.tls false, PPP/T900) is
+        # already trusted for telemetry and config.patch. A backup broker may be shared or public, so its
+        # plaintext reports need the explicit mqtt.backup.settings_report_plaintext opt-in.
+        if link=='backup':
+            active=self.backup_active
+            return bool(self.backup_client and (active['tls'] or active['settings_report_plaintext']))
+        return True
     def _state(self,s):
         return {'v':2,'sid':self.sid,'boot':self.boot,'instance':self.instance,'t':now_ms(),
                 'run':s.get('processing',{}).get('observed','UNKNOWN'),'daq':s.get('daq',{}).get('healthy',False),
@@ -756,7 +769,7 @@ class Agent:
                     settings_id=self.settings_request_id; settings_payload=self.settings_request_payload
                     settings_link=self.settings_request_link or 'primary'
                 # Raw settings only travel over TLS, and only back to the link that asked for them.
-                if settings_id and settings_payload is not None and settings_link in ready and self.link_tls(settings_link):
+                if settings_id and settings_payload is not None and settings_link in ready and self.settings_report_allowed(settings_link):
                     if self._offer('settings:'+settings_id,'settings/reported',settings_payload,
                                    1,False,expiry=30,priority=3,links=(settings_link,)):
                         with self.settings_request_lock:

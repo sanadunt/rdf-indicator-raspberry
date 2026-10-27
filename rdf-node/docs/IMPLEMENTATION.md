@@ -64,8 +64,9 @@ Command inbound ditandai dengan link asal (`primary` atau `backup`) dan epoch ko
 ulang pengaturan salah satu broker hanya mengganti client broker itu, menaikkan epoch-nya sehingga
 command lama yang masih antre diabaikan, dan membersihkan request settings yang tertunda dari link
 itu; client broker lain tidak di-restart. ACK command dari cadangan hanya dikirim ke cadangan; ACK
-dari broker utama atau panel lokal dikirim ke semua link READY. `config.get` memerlukan TLS pada
-link asal, dan `settings/reported` hanya dikirim ke link itu. Command cadangan memakai paling banyak
+dari broker utama atau panel lokal dikirim ke semua link READY. `config.get` dijawab di link
+utama dengan atau tanpa TLS; di link cadangan hanya bila TLS aktif atau
+`mqtt.backup.settings_report_plaintext: true`. `settings/reported` hanya dikirim ke link asal. Command cadangan memakai paling banyak
 separuh antrean inbound (16 dari 32 slot), dan batas read-only satu per detik dihitung per link.
 
 Pengaturan panel disimpan di `/var/lib/rdf-node/mqtt-ui-backup-settings.json`
@@ -261,8 +262,10 @@ pada saat dibaca dan timestamp setelah config berubah. UI membedakan:
 - runtime: field perubahan telah diverifikasi dari evidence yang diperlukan.
 
 Ground menampilkan revision `state.cfg`. Tombol `Refresh config` meminta settings native melalui
-`config.get`; Edge mengirim teks file pada `settings/reported` hanya saat TLS aktif, source fresh,
-dan compact envelope berukuran paling banyak 8 KiB. Respons non-retained QoS 1 ber-expiry 30 s.
+`config.get`; Edge mengirim teks file pada `settings/reported` hanya saat source fresh dan compact
+envelope berukuran paling banyak 8 KiB. Di broker utama TLS boleh aktif atau nonaktif
+(`mqtt.tls: false` berarti link tepercaya pilihan operator); di broker cadangan TLS wajib kecuali
+`mqtt.backup.settings_report_plaintext: true`. Respons non-retained QoS 1 ber-expiry 30 s.
 Tidak ada report otomatis saat startup, reconnect, atau perubahan revision. Edge membersihkan
 request ID satu kali hanya setelah outbox lokal menerima response. Settings request menunjukkan
 isi file saat diminta, bukan bukti semua parameter sudah diterapkan runtime. `REPORTED_SAME` bukan

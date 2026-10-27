@@ -56,8 +56,9 @@ hanya mengganti client cadangan; koneksi broker utama tidak diputus. `ca_file`,
 [MQTT_GROUND.md](MQTT_GROUND.md#broker-cadangan-mirror-lanonline).
 Source permission memakai ACL terbatas pada _share; tidak chmod777 atau recursive home read.
 Untuk menampilkan file settings native dari Ground, operator harus memakai `Refresh config`.
-Export memerlukan MQTT TLS aktif, source settings tersedia dan fresh, serta compact MQTT
-envelope utuh tidak lebih dari 8.192 byte. Edge tidak mengirim settings otomatis saat startup,
+Export memerlukan source settings tersedia dan fresh serta compact MQTT envelope utuh tidak lebih
+dari 8.192 byte. Broker utama boleh TLS atau plaintext; broker cadangan memerlukan TLS kecuali
+`mqtt.backup.settings_report_plaintext: true`. Edge tidak mengirim settings otomatis saat startup,
 reconnect, atau config change.
 
 ACL perlu diperiksa kembali jika deployment engine membuat file dengan mode yang menolak

@@ -77,7 +77,7 @@ class CommandManager:
                 self.last_rate[(actor,link)]=time.monotonic()
                 if op=='config.get':
                     source=a.source
-                    if not a.link_tls(link): raise ValueError('TLS_REQUIRED_FOR_SETTINGS_REPORT')
+                    if not a.settings_report_allowed(link): raise ValueError('TLS_REQUIRED_FOR_SETTINGS_REPORT')
                     if source.config_error or source.raw_settings is None or source.settings_seen is None:
                         raise ValueError('SETTINGS_UNAVAILABLE')
                     if time.monotonic()-source.settings_seen>self.cfg['freshness']['source_status_ms']/1000:

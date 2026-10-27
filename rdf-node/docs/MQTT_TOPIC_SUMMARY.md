@@ -61,7 +61,7 @@ per topic:
 | `telemetry/angular` | Jadwal sendiri: `max(interval_profile, (payload + topic + 160) / mqtt.backup.budget_bytes_s)`. Tidak dipause oleh `BULK_NOT_READY`, `CONTROL_BACKLOG`, atau `WAIT_STABLE`; tetap dipause oleh `PROFILE_CONTROL`, `SOURCE_NOT_ELIGIBLE`, dan `CONTROL_IN_PROGRESS`. |
 | `telemetry/diagnostic/angular` | Hanya saat alasan level source memblokir Angular dan profile bukan `control`; minimum 6 s selama detection tidak valid (termasuk UNVERIFIED) atau 30 s selama detection valid tetapi Angular diblokir (misalnya command berjalan), diperpanjang oleh budget cadangan. Sequence `q` diagnostic dipakai bersama kedua broker, jadi dapat melompat di salah satu broker. |
 | `ack/config`, `ack/operation` | Command yang datang dari broker cadangan dijawab hanya di broker cadangan. Command dari broker utama atau panel Edge lokal dijawab ke semua broker READY. |
-| `settings/reported` | Hanya ke broker yang mengirim `cmd/config/get`, dan hanya bila broker itu memakai TLS. Tidak di-mirror. |
+| `settings/reported` | Hanya ke broker yang mengirim `cmd/config/get`. Tidak di-mirror. Di broker cadangan hanya bila TLS aktif atau `mqtt.backup.settings_report_plaintext: true`; selain itu `TLS_REQUIRED_FOR_SETTINGS_REPORT`. |
 | `cmd/*` | Disubscribe di broker cadangan hanya bila `Terima perintah` aktif. Command diproses seperti command Ground (actor `ground-controller`). |
 
 ## Daftar lengkap topic
@@ -78,7 +78,7 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | `telemetry/angular` | Edge -> Ground | Bulk | 0 | Tidak | Profile-dependent; expiry 3 s | Frame 360 sampel; flags `63` untuk LIVE atau trust-only partial untuk UNVERIFIED. |
 | `state` | Edge -> Ground | Control | 1 | Ya | Saat state berubah dan paling lambat tiap 60 s | Status run/DAQ, profile, clock dan identitas boot. Jangan dipakai sebagai heartbeat. |
 | `capabilities` | Edge -> Ground | Control | 1 | Ya | Saat generation koneksi Control berubah | Versi, identitas, codec, profile dan capability yang diizinkan. |
-| `settings/reported` | Edge -> Ground | Control | 1 | Tidak | Hanya setelah `cmd/config/get`; expiry 30 s | `v,sid,boot,id,rev,t,settings_json`; teks native UTF-8 persis; TLS wajib; compact envelope maksimum 8 KiB. |
+| `settings/reported` | Edge -> Ground | Control | 1 | Tidak | Hanya setelah `cmd/config/get`; expiry 30 s | `v,sid,boot,id,rev,t,settings_json`; teks native UTF-8 persis; broker utama TLS atau plaintext, broker cadangan TLS kecuali opt-in plaintext; compact envelope maksimum 8 KiB. |
 | `availability` | Edge -> Ground | Control | 1 | Ya | Online saat koneksi siap; Last Will saat koneksi hilang | Ketersediaan Control, bukan bukti DAQ sehat. |
 | `ack/config` | Edge -> Ground | Control | 1 | Tidak | Saat progress/hasil command `config.*`; expiry 30 s | ACK command konfigurasi. |
 | `ack/operation` | Edge -> Ground | Control | 1 | Tidak | Saat progress/hasil command selain `config.*`; expiry 30 s | ACK command operation. |
@@ -380,9 +380,13 @@ harus memiliki field di atas saja, dipublish QoS 1, non-retained, expiry 30 s. U
 compact envelope tidak boleh melebihi 8.192 byte; Edge tidak memotong atau memecahnya.
 
 `config.get` hanya dapat dikirim saat MQTT Ground READY dan `state.sid`/`state.boot` tersedia;
-fresh health tidak diperlukan untuk read-only request ini. Edge menolak settings TLS-off,
-unavailable/stale, atau oversized dengan error `TLS_REQUIRED_FOR_SETTINGS_REPORT`,
-`SETTINGS_UNAVAILABLE`, `SETTINGS_STALE`, atau `SETTINGS_REPORT_TOO_LARGE`. Tidak ada report
+fresh health tidak diperlukan untuk read-only request ini. Broker utama dijawab baik dengan
+maupun tanpa TLS: `mqtt.tls: false` berarti operator sudah memilih link tepercaya (misalnya
+PPP/T900 point-to-point privat), dan telemetry serta `config.patch` sudah plaintext di link yang
+sama. Broker cadangan bisa berupa broker bersama/publik, jadi `config.get` dari sana tanpa TLS
+ditolak `TLS_REQUIRED_FOR_SETTINGS_REPORT`, kecuali `mqtt.backup.settings_report_plaintext: true`
+(panel `Settings tanpa TLS: Izinkan`). Edge juga menolak settings unavailable/stale atau oversized
+dengan `SETTINGS_UNAVAILABLE`, `SETTINGS_STALE`, atau `SETTINGS_REPORT_TOO_LARGE`. Tidak ada report
 otomatis saat startup, reconnect, atau perubahan revision. `ack/config` membawa status/error
 command; respons settings datang terpisah di topic ini.
 
