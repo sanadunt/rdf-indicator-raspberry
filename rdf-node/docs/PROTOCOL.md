@@ -139,7 +139,7 @@ tidak menambahkan SNR yang belum terbukti sumbernya.
 | `DAQ_NOT_HEALTHY` | DAQ tidak sehat (`daq_ok`, salah satu sync, atau frame tidak maju). |
 | `CLOCK_UNTRUSTED` | Jam Edge tidak tersinkron NTP. |
 | `SOURCE_UNVERIFIED`, `ANGLE_UNVERIFIED` | Authority source dan/atau konvensi sudut belum disetujui (`sudo rdf-node setup --verify-source`). |
-| `CONFIG_UNAVAILABLE` | `settings.json` tidak terbaca atau tidak valid. |
+| `CONFIG_UNAVAILABLE` | `settings.json` tidak terbaca, bukan JSON object, atau tidak ada satu pun field aman. Satu field aman yang rusak tidak lagi memicu kode ini: field itu dikeluarkan dari subset aman dan namanya muncul di `config.invalid_settings` snapshot. |
 | `CONFIG_ATTRIBUTION_UNVERIFIED` | Sampel tidak bisa dipastikan dibuat dengan settings yang sekarang (mis. sesaat setelah settings berubah). |
 | `CONTROL_IN_PROGRESS` | Sebuah perintah SDR sedang berjalan. |
 | kode parse lain | Kesalahan baca `DOA_value.html`, mis. `CSV_FIELD_COUNT`, `OUTPUT_VFO_MISMATCH`, `VFO_RECORD_AMBIGUOUS_OR_MISSING`, `FILE_TOO_LARGE_OR_NOT_REGULAR`, `FileNotFoundError:DOA_UNAVAILABLE`. |
@@ -171,7 +171,8 @@ Clock: 0 untrusted, 1 synced. Field unavailable dapat null. Health q tetap maju 
 `telemetry/health/detail` (tiap 10 s) menambah field aditif status link PPP: `ppp` (`UP`/`DOWN`),
 `peer` (hasil ping peer), `ppp_svc` (`ActiveState` unit `t900-ppp.service`), dan `ppp_restarts`
 (`NRestarts` systemd), serta `perr`: daftar topic yang gagal disusun pada putaran publish terakhir
-(kosong bila semua berhasil; satu topic yang gagal tidak menghentikan topic lain). Consumer harus
+(kosong bila semua berhasil; satu topic yang gagal tidak menghentikan topic lain) dan `crej`: jumlah
+command masuk yang dibuang sebelum diproses (lihat [Command envelope](#command-envelope)). Consumer harus
 menerima field yang tidak ada dari Edge lama. Lihat
 [MQTT_TOPIC_SUMMARY.md](MQTT_TOPIC_SUMMARY.md#telemetryhealthdetail).
 
@@ -363,9 +364,24 @@ PPP restart uses the ordinary v2 envelope on `cmd/service/ppp/restart`:
 ```
 
 Semua nilai contoh adalah fixture, jangan dikirim mentah. Ground membuat envelope dari identity
-terkini dan `state.cfg` untuk `base_rev`. TTL default 15 s, maksimum 30 s. Unknown fields ditolak.
-ID sama+payload sama mengembalikan hasil/progress tersimpan, bukan eksekusi ulang.
-ID sama+payload berbeda ditolak. Topic harus sesuai `op` dan command tidak retained.
+terkini dan `state.cfg` untuk `base_rev`. TTL default 15 s, maksimum 30 s.
+
+Field yang tidak dikenal Edge diabaikan: tidak disimpan di jurnal, tidak berpengaruh apa pun, dan
+namanya (maks. 16, masing-masing maks. 64 karakter) dikembalikan di `result.ignored` pada ACK
+pertama (`ACCEPTED`, `APPLIED` untuk read op, atau `REJECTED`). Sebelumnya command seperti itu ditolak
+`UNKNOWN_COMMAND_FIELD`. Pengaman tidak ikut longgar: `sid`/`boot`, `issued_ms`/`expires_ms`,
+`base_rev` untuk mutation, field wajib tiap op, dan batas nilai tetap wajib, jadi field wajib yang
+salah eja tetap membuat command ditolak (misalnya `base_revision` diabaikan, lalu `base_rev` yang
+hilang ditolak `CONFIG_REVISION_CONFLICT`). ID sama dengan payload sama, setelah field asing dibuang,
+mengembalikan hasil atau progress yang tersimpan, bukan eksekusi ulang. ID sama dengan payload
+berbeda ditolak. Topic harus sesuai `op`, dan command tidak boleh retained.
+
+Command di atas 4.096 byte ditolak `COMMAND_TOO_LARGE`. Sampai 64 KiB, Edge masih mem-parse-nya
+untuk membaca `id`, lalu mengirim ACK `REJECTED`; di atas itu, atau bila payload bukan JSON
+(`COMMAND_NOT_JSON`), ID tidak terbaca sehingga tidak ada ACK. Antrean inbound yang penuh membuang
+command dengan `COMMAND_QUEUE_FULL`. Semua penolakan tanpa ACK tetap terlihat: masuk `remote_rejects`
+di snapshot panel, dihitung di `link.command_drops`, dan jumlahnya ada di `telemetry/health/detail`
+sebagai `crej`.
 
 ACK berisi `v,sid,id,status,t,rev,result`. APPLIED memerlukan bukti sesuai aksi.
 PERSISTED_UNVERIFIED dan OUTCOME_UNKNOWN bukan sinonim gagal atau berhasil.

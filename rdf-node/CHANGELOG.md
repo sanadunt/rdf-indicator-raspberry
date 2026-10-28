@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- Lenient reading (planned release 1.6.0).
+  - Commands: fields this Edge does not know are dropped and listed in `result.ignored` on the
+    first ACK instead of rejecting the whole command `UNKNOWN_COMMAND_FIELD`. Session, deadline,
+    `base_rev`, each operation's own fields, and value limits are still required.
+  - Dropped commands are visible:
+    - A command over 4,096 bytes is answered `REJECTED COMMAND_TOO_LARGE` when its `id` can still
+      be read (up to 64 KiB).
+    - Non-JSON payloads (`COMMAND_NOT_JSON`) and a full inbound queue (`COMMAND_QUEUE_FULL`) cannot
+      be answered by id. All three go to `remote_rejects` and the snapshot's `link.command_drops`,
+      and are counted in `telemetry/health/detail.crej`.
+  - KrakenSDR `DOA_value.html`: empty or `NaN` metadata (latency, latitude, longitude, GPS/compass
+    heading) becomes null and is named in `detection.null_fields`; the record is no longer lost.
+    Timestamp, angle, confidence, power, frequency, and the 360 values stay strict.
+  - The read limit for `DOA_value.html` is `max_record_bytes` times `active_vfos` (1-16), so a
+    multi-VFO file is no longer rejected for size.
+  - `status.json`: a malformed `daq_num_dropped_frames` or `data_frame_index` becomes null
+    (`daq.null_fields`) instead of failing the whole status. `adc_overdrive` is read as a boolean,
+    and 0/1 are accepted.
+  - `settings.json`: one malformed safe field is left out of the safe subset and its digest and
+    listed in `config.invalid_settings`, instead of making all settings `CONFIG_UNAVAILABLE` and
+    blocking DoA.
 - Readable command errors (planned release 1.5.0). Every `REJECTED`, `FAILED`, and
   `OUTCOME_UNKNOWN` result now carries `message` (Indonesian operator text) and, when there is a
   technical cause, `detail` (at most 200 characters) next to the unchanged `error` code. Raw

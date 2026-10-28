@@ -169,7 +169,7 @@ Ukuran fixture bukan ukuran maksimum; digit metadata dan nilai source dapat meng
 | `telemetry/doa` | Maks. 1/s, setiap sampel baru (valid atau berlabel) | 139 B verified; 201 B berlabel (1 alasan); 283 B approval-only | 177 B verified; 239 B; 321 B |
 | `telemetry/diagnostic/doa` | Setiap 3 s selama XML tersedia; heartbeat mengulang sampel yang sama | 303 B | 352 B |
 | `telemetry/health` | 1/s | 122 B (`why` kosong) | 163 B |
-| `telemetry/health/detail` | 1/10 s | 251 B | 299 B |
+| `telemetry/health/detail` | 1/10 s | 260 B | 308 B |
 | `telemetry/angular` (`balanced`) | Minimum 4 s; contoh JSON dipace sekitar 8.96 s pada Bulk 350 B/s | 2,946 B | 2,988 B |
 | `telemetry/angular` (`graph_u8`) | Minimum 2 s; format JSON dan pace sama dengan `balanced` | 2,946 B | 2,988 B |
 | `telemetry/angular` (`control`) | Tidak dipublish | — | — |
@@ -329,7 +329,7 @@ Ground memperlakukan health fresh sampai 8 s dan memerlukan `q` yang maju. Healt
 ### `telemetry/health/detail`
 
 ```json
-{"v":2,"sid":"7a8b9c0d","t":1790668800000,"usb":2,"sync":[true,true,true],"cpu":22.1,"mem":41.7,"disk_free":83.2,"throt":false,"uv":false,"tx":12.34,"rx":8.21,"adrop":0,"parse":0,"ppp":"UP","peer":"REPLY","ppp_svc":"ACTIVE","ppp_restarts":0,"perr":[]}
+{"v":2,"sid":"7a8b9c0d","t":1790668800000,"usb":2,"sync":[true,true,true],"cpu":22.1,"mem":41.7,"disk_free":83.2,"throt":false,"uv":false,"tx":12.34,"rx":8.21,"adrop":0,"parse":0,"ppp":"UP","peer":"REPLY","ppp_svc":"ACTIVE","ppp_restarts":0,"perr":[],"crej":0}
 ```
 
 - `usb`: jumlah device USB yang terhitung, dapat `null`.
@@ -349,6 +349,8 @@ Ground memperlakukan health fresh sampai 8 s dan memerlukan `q` yang maju. Healt
   `null` bila tidak terbaca.
 - `perr`: topic yang gagal disusun pada putaran publish terakhir, mis. `["telemetry/doa"]`; kosong
   bila semua berhasil. Satu topic yang gagal tidak menghentikan topic lain.
+- `crej`: jumlah command masuk yang dibuang sebelum diproses sejak agent start (terlalu besar, bukan
+  JSON, atau antrean penuh). Rinciannya per kode ada di snapshot panel `link.command_drops`.
 
 Empat field PPP bersifat aditif; Edge versi lama tidak mengirimnya, jadi consumer harus menerima
 field yang tidak ada. Detail juga dikirim ke broker cadangan, sehingga consumer di sana tetap dapat

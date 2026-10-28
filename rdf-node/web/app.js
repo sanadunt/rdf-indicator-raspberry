@@ -291,7 +291,8 @@ const REASONS={
  DEMO_NO_HARDWARE_CONTROL:'mode demo, tanpa kontrol hardware',REQUEST_RATE_LIMIT:'permintaan terlalu cepat',
  HELPER_UNAVAILABLE:'helper kontrol tidak berjalan; tidak dijalankan',HELPER_ACCESS_DENIED:'tidak ada izin ke socket helper',
  HELPER_TIMEOUT:'helper tidak menjawab (timeout)',HELPER_CONNECTION_LOST:'koneksi helper terputus',HELPER_INTERNAL_ERROR:'error di helper kontrol',
- INTERNAL_ERROR:'error internal Edge',INVALID_COMMAND_FIELD:'field perintah tidak valid',JOURNAL_UNAVAILABLE:'journal perintah tidak bisa ditulis'
+ INTERNAL_ERROR:'error internal Edge',INVALID_COMMAND_FIELD:'field perintah tidak valid',JOURNAL_UNAVAILABLE:'journal perintah tidak bisa ditulis',
+ COMMAND_TOO_LARGE:'perintah terlalu besar (>4 KB)',COMMAND_NOT_JSON:'perintah bukan JSON',COMMAND_QUEUE_FULL:'antrean perintah penuh'
 };
 const REASON_STAGES=new Set(['FAILED','REJECTED','OUTCOME_UNKNOWN','EXPIRED','CONFLICT','CANCELLED']);
 const STAGE_TEXT={ACCEPTED:'diproses…',APPLYING:'diproses…',VERIFYING:'diproses…',PPP_RESTART_REQUESTED:'restart diminta, memantau link…',

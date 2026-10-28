@@ -74,7 +74,8 @@ atau panel lokal dikirim ke semua broker yang READY. `config.get` dari broker ut
 atau tanpa TLS. `config.get` dari broker cadangan memerlukan TLS pada broker cadangan atau opt-in
 `mqtt.backup.settings_report_plaintext: true`, dan `settings/reported`-nya hanya dikirim ke broker
 cadangan. Command
-cadangan memakai paling banyak separuh antrean inbound; kelebihannya dibuang tanpa ACK. Command
+cadangan memakai paling banyak separuh antrean inbound; kelebihannya dibuang tanpa ACK, tetapi
+tercatat di `remote_rejects` dan `link.command_drops` sebagai `COMMAND_QUEUE_FULL`. Command
 yang masih antre dari sesi cadangan lama dibuang saat pengaturan cadangan disimpan ulang.
 
 ## Supported settings

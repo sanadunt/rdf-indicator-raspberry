@@ -840,9 +840,36 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(operation['stage'],'APPLIED')
         self.assertEqual(helper.challenges[request['id']][2],'reboot')
     def test_remote_payload_cannot_choose_origin(self):
-        request=self.request('stream.set',profile='balanced',origin='ground-controller')
+        # Unknown fields are dropped and named, never obeyed: the origin stays the broker it came from.
+        request=self.request('stream.set',profile='balanced',origin='local-admin');acks=[]
+        self.a.operation_changed=lambda id,op,stage,result,link=None:acks.append((stage,result))
         result=self.a.commands.submit(request,'ground-controller')
-        self.assertEqual(result['result']['error'],'UNKNOWN_COMMAND_FIELD')
+        self.assertEqual((result['stage'],result['result']),('ACCEPTED',{'ignored':['origin']}))
+        self.assertEqual(acks[0],('ACCEPTED',{'ignored':['origin']}))
+        operation=self.a.journal.lookup(request['id'])
+        self.assertEqual(operation['link'],'ground');self.assertNotIn('origin',operation['request'])
+
+    def test_dropped_commands_are_counted_shown_and_answered_when_possible(self):
+        acks=[];self.a.operation_changed=lambda id,op,stage,result,link=None:acks.append((id,stage,result['error']))
+        topic=self.a.prefix+'/'+OPS['stream.set']
+        big=self.request('stream.set',profile='balanced',note='x'*5000)
+        self.a._incoming(topic,compact(big),False)
+        self.a._incoming(topic,b'{not json',False)
+        self.a._incoming(topic,b'x'*70000,False)
+        worker=threading.Thread(target=self.a._events,daemon=True);worker.start()
+        self.a.events.join();self.a.stop_event.set();worker.join(2)
+        self.assertEqual(acks,[(big['id'],'REJECTED','COMMAND_TOO_LARGE')])
+        self.assertEqual(self.a.inbound_rejects,{'COMMAND_TOO_LARGE':2,'COMMAND_NOT_JSON':1})
+        self.assertEqual([(r['op'],r['error']) for r in self.a.remote_rejects],
+                         [('stream.set','COMMAND_NOT_JSON'),('stream.set','COMMAND_TOO_LARGE'),('stream.set','COMMAND_TOO_LARGE')])
+
+    def test_unknown_fields_never_excuse_a_missing_safeguard(self):
+        # A misspelled base_rev is ignored, so the real one is missing and the write is still refused.
+        request=self.request('stream.set',profile='balanced',base_revision=self.a.source.revision)
+        del request['base_rev']
+        result=self.a.commands.submit(request,'ground-controller')
+        self.assertEqual(result['result']['error'],'CONFIG_REVISION_CONFLICT')
+        self.assertEqual(result['result']['ignored'],['base_revision'])
 
     def test_ground_remote_capabilities_do_not_enable_local_panel_actions(self):
         self.a.helper_status={'allow_config':False,'allow_lifecycle':False,'allow_reboot':False,
@@ -984,9 +1011,13 @@ class CommandTests(unittest.TestCase):
         helper.assert_called_once_with({'op':'ppp.restart','origin':'ground-controller'})
 
     def test_remote_payload_cannot_choose_ground_confirmation(self):
+        self.a.helper_status={'allow_ppp_restart':False}
+        self.a.commands.start();self.addCleanup(self.a.commands.stop)
         request=self.request('ppp.restart',confirm_previous_unknown=True)
-        result=self.a.commands.submit(request,'ground-controller')
-        self.assertEqual(result['result']['error'],'UNKNOWN_COMMAND_FIELD')
+        with mock.patch.object(self.a.commands,'_helper',return_value={'requested':True,'service':'t900-ppp.service'}):
+            result=self.a.commands.submit(request,'ground-controller');self.a.commands.join_ppp()
+        self.assertEqual((result['stage'],result['result']),('ACCEPTED',{'ignored':['confirm_previous_unknown']}))
+        self.assertNotIn('confirm_previous_unknown',self.a.journal.lookup(request['id'])['request'])
 
     def test_unrecognized_actor_is_rejected(self):
         result=self.a.commands.submit(self.request('stream.set',profile='balanced'),'untrusted-caller')

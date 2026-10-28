@@ -264,6 +264,27 @@ class ParserTests(unittest.TestCase):
                 with self.assertRaises(ValueError):parse_doa_xml(document)
 
 
+    def test_missing_gps_and_heading_become_null_not_a_lost_record(self):
+        r=record();r[6]='';r[8]='nan';r[9]='';r[10]='NaN';r[11]='x'
+        rec=parse_csv(csv_bytes(r),settings())
+        self.assertEqual((rec['raw_doa_deg'],len(rec['values'])),(10,360))
+        self.assertEqual([rec[k] for k in ('acquisition_latency_ms','latitude','longitude','gps_heading_deg','compass_heading_deg')],
+                         [None]*5)
+        self.assertEqual(rec['null_fields'],['acquisition_latency_ms','latitude','longitude','gps_heading_deg','compass_heading_deg'])
+        self.assertEqual(parse_csv(csv_bytes(record()),settings())['null_fields'],[])
+    def test_status_counters_and_overdrive_are_read_leniently(self):
+        s=status();s['daq_num_dropped_frames']='many';s['daq_status']['data_frame_index']=-1;s['daq_status']['adc_overdrive']=0
+        st=parse_status(compact(s))
+        self.assertEqual((st['dropped_frames'],st['frame_index'],st['adc_overdrive']),(None,None,False))
+        self.assertEqual(st['null_fields'],['dropped_frames','frame_index'])
+        s=status();s['daq_status']['adc_overdrive']=True;self.assertIs(parse_status(compact(s))['adc_overdrive'],True)
+        s=status();del s['timestamp_ms']
+        with self.assertRaises((ValueError,TypeError)):parse_status(compact(s))
+    def test_one_broken_setting_leaves_the_others_usable(self):
+        s=settings();s['uniform_gain']='auto';invalid=[]
+        safe=safe_settings(s,invalid)
+        self.assertNotIn('gain_db',safe);self.assertEqual(safe['center_frequency_hz'],433920000)
+        self.assertEqual(invalid,['gain_db'])
     def test_settings_redaction(self):
         s=settings();s.update(api_key='do-not-export',password='secret',remote_url='secret')
         result=safe_settings(s);self.assertNotIn('secret',str(result));self.assertNotIn('api_key',result)
@@ -295,6 +316,22 @@ class SourceTests(unittest.TestCase):
         self.assertIn('DOA_FILE_NOT_UPDATING',reasons)
         self.write(2);self.src.poll(force=True)
         self.assertNotIn('DOA_FILE_NOT_UPDATING',self.src.view(True)['reasons'])
+    def test_one_broken_setting_does_not_block_doa(self):
+        s=settings();s['vfo_squelch_0']='off';(self.path/'settings.json').write_bytes(compact(s))
+        time.sleep(.01);self.write(2);self.src.poll(force=True);self.write(3);self.src.poll(force=True)
+        view=self.src.view(True)
+        self.assertNotIn('CONFIG_UNAVAILABLE',view['reasons'])
+        self.assertEqual(self.src.settings_invalid,['vfo0_squelch_db'])
+        self.assertEqual(self.src.safe['gain_db'],15.7)
+    def test_doa_file_with_many_vfos_is_read_past_the_single_row_limit(self):
+        s=settings();s['active_vfos']=8;(self.path/'settings.json').write_bytes(compact(s))
+        t=now_ms();rows=[]
+        for vfo in range(8):
+            r=record(t);r[4]=433920000+vfo*25000;rows.append(csv_bytes(r))
+        data=b''.join(rows);self.assertGreater(len(data),self.cfg['source']['max_record_bytes'])
+        time.sleep(.01);(self.path/'DOA_value.html').write_bytes(data)
+        self.src.poll(force=True)
+        self.assertIsNone(self.src.error);self.assertEqual(self.src.record['frequency_hz'],433920000)
     def test_raw_settings_preserve_exact_successful_file_bytes(self):
         raw=b' \n'+compact(settings())+b'\n'
         (self.path/'settings.json').write_bytes(raw)

@@ -26,6 +26,8 @@ ANGULAR_CONTROL_BASELINE_INVALID=510
 # Bulk yields the shared PPP link while a Control PUBACK is this late or this many Bulk bytes are unACKed.
 BULK_YIELD_PENDING_MS=1000
 DIAGNOSTIC_ANGULAR_MIN_GAP_S=6
+# Commands above COMMAND_MAX_BYTES are refused; up to COMMAND_READ_MAX_BYTES they are parsed to ACK the id.
+COMMAND_MAX_BYTES=4096; COMMAND_READ_MAX_BYTES=65536
 BULK_YIELD_BACKLOG_BYTES=2048
 
 class Agent:
@@ -42,7 +44,7 @@ class Agent:
         self.settings_request_id=None; self.settings_request_payload=None
         self.stop_event=threading.Event(); self.events=queue.Queue(32)
         self.bulk_resume_after=time.monotonic()+cfg['telemetry']['resume_stable_seconds']
-        self.hq=0; self.last_doa_q=0; self.last_angular_q=0; self.publish_errors={}
+        self.hq=0; self.last_doa_q=0; self.last_angular_q=0; self.publish_errors={}; self.inbound_rejects={}
         self.diagnostic_q=0; self.diagnostic_angular_q=0
         self.angular_abort=0; self.bulk_reason='BOOTSTRAP'; self.helper_status={}
         self.clients={}; self._generation=-1; self.last_config_rev=None; self.last_sent_state=None
@@ -415,19 +417,32 @@ class Agent:
         for t in self.threads: t.join(3)
         # A long lifecycle worker may still be reconciling; daemon exits without replay.
         if not self.commands.thread.is_alive(): self.journal.close()
+    def _command_dropped(self,topic,link,code):
+        # A command that never reaches CommandManager still shows up in the panel and in health/detail.
+        with self.lock: self.inbound_rejects[code]=self.inbound_rejects.get(code,0)+1
+        suffix=topic[len(self.prefix)+1:] if isinstance(topic,str) and topic.startswith(self.prefix+'/') else ''
+        op=next((name for name,path in OPS.items() if path==suffix),'unknown')
+        self.remote_rejected(CommandManager.origin('ground-controller',link),op,code)
     def _incoming(self,topic,payload,retained,link='primary',epoch=None):
-        if len(payload)>4096: return
+        # Larger payloads are still read far enough to answer them; only absurd ones go unanswered.
+        if len(payload)>COMMAND_READ_MAX_BYTES: return self._command_dropped(topic,link,'COMMAND_TOO_LARGE')
         # Keep half of the queue for the primary (Ground) link.
-        if link=='backup' and self.events.qsize()>=self.events.maxsize//2: return
+        if link=='backup' and self.events.qsize()>=self.events.maxsize//2:
+            return self._command_dropped(topic,link,'COMMAND_QUEUE_FULL')
         try: self.events.put_nowait((link,epoch,topic,payload,retained))
-        except queue.Full: pass
+        except queue.Full: self._command_dropped(topic,link,'COMMAND_QUEUE_FULL')
     def _events(self):
         while not self.stop_event.is_set():
             try: link,epoch,topic,data,retained=self.events.get(timeout=.2)
             except queue.Empty: continue
             try:
                 if epoch is not None and epoch!=self.link_epoch.get(link): continue
-                j=strict_json(data)
+                try: j=strict_json(data)
+                except (ValueError,RecursionError):
+                    self._command_dropped(topic,link,'COMMAND_NOT_JSON'); continue
+                if len(data)>COMMAND_MAX_BYTES:
+                    with self.lock: self.inbound_rejects['COMMAND_TOO_LARGE']=self.inbound_rejects.get('COMMAND_TOO_LARGE',0)+1
+                    self.commands.reject(j,'ground-controller',link,'COMMAND_TOO_LARGE'); continue
                 self.commands.submit(j,'ground-controller',retained=retained,topic=topic,link=link)
             except (ValueError,TypeError,KeyError,RecursionError): pass
             finally: self.events.task_done()
@@ -495,7 +510,7 @@ class Agent:
                       'ppp_recovery':self._ppp_recovery_view(),
                       'tx_kbit_s':host['tx_kbit_s'],'rx_kbit_s':host['rx_kbit_s'],
                       'traffic_layer':'PPP_IP_COUNTERS','profile':self.profile,'bulk_pause':self.bulk_reason,'angular_aborted':self.angular_abort,
-                      'publish_errors':dict(self.publish_errors)},
+                      'publish_errors':dict(self.publish_errors),'command_drops':dict(self.inbound_rejects)},
               'config':self.config_view(),'capabilities':self.capabilities(),
               'last_operation':self.commands.public(latest[0]) if latest else None,
               'last_remote_operation':self.commands.public(remote[0]) if remote else None,
@@ -505,7 +520,7 @@ class Agent:
         with self.lock: return copy.deepcopy(self.snapshot_data)
     def config_view(self):
         return {'sdr_revision':self.source.revision,'digest':self.source.safe_digest,'proof':self.config_proof,
-                'safe_settings':dict(self.source.safe),
+                'safe_settings':dict(self.source.safe),'invalid_settings':list(self.source.settings_invalid),
                 'profile':self.profile,'source_configured':self.source.path is not None,
                 'authority_verified':self.cfg['source']['authority_verified'],'angle_verified':self.cfg['source']['angle_verified'],
                 'mqtt_configured':self.cfg['mqtt']['enabled'],
@@ -781,7 +796,7 @@ class Agent:
                             'tx':h['tx_kbit_s'],'rx':h['rx_kbit_s'],'adrop':self.angular_abort,'parse':self.source.parse_errors,
                             'ppp':h.get('ppp'),'peer':h.get('ppp_probe'),
                             'ppp_svc':(h.get('ppp_service') or {}).get('state'),'ppp_restarts':(h.get('ppp_service') or {}).get('restarts'),
-                            'perr':sorted(self.publish_errors)},
+                            'perr':sorted(self.publish_errors),'crej':sum(self.inbound_rejects.values())},
                             expiry=15,priority=4,links=ready)
                 except Exception as e: self._publish_failed('telemetry/health/detail',e)
                 else: self._publish_ok('telemetry/health/detail')

@@ -23,6 +23,8 @@ SUMMARY_KIND={'config.patch':'config','stream.set':'profile','processing.set':'p
               'system.shutdown.prepare':'shutdown','system.shutdown.execute':'shutdown',
               'config.get':'read','operation.get':'read'}
 PPP_RESTART_MIN_GAP_S=15
+COMMAND_FIELDS=frozenset({'v','id','sid','boot','issued_ms','expires_ms','base_rev','op','changes','desired','profile',
+                          'target_id','prepare_id','challenge'})
 # Operations that only the root helper can carry out (stream.set and the read ops stay in the agent).
 HELPER_OPS=set(OPS)-READ_OPS-{'stream.set'}
 CODE_RE=re.compile(r'[A-Z][A-Z0-9_]{0,63}')
@@ -40,10 +42,13 @@ ERROR_MESSAGES={
     'INTERNAL_ERROR':'Error internal di agent Edge; lihat detail.',
     'INVALID_COMMAND_FIELD':'Ada field perintah yang tipe atau nilainya tidak valid.',
     'JOURNAL_UNAVAILABLE':'Journal perintah di Edge tidak bisa ditulis; perintah tidak dijalankan.',
+    'COMMAND_TOO_LARGE':'Perintah lebih besar dari 4.096 byte dan tidak diproses.',
+    'COMMAND_NOT_JSON':'Isi perintah bukan JSON yang sah, jadi tidak bisa dijawab per ID.',
+    'COMMAND_QUEUE_FULL':'Antrean perintah masuk penuh; perintah dibuang tanpa diproses.',
     'RETAINED_COMMAND_REJECTED':'Perintah retained ditolak; kirim perintah tanpa flag retain.',
     'INVALID_COMMAND_ACTOR':'Asal perintah tidak dikenal.',
     'COMMAND_OBJECT_REQUIRED':'Isi perintah harus berupa objek JSON.',
-    'UNKNOWN_COMMAND_FIELD':'Perintah memuat field yang tidak dikenal.',
+    'UNKNOWN_COMMAND_FIELD':'Perintah memuat field yang tidak dikenal (kode lama; field asing kini diabaikan).',
     'INVALID_COMMAND_ID':'ID perintah kosong, terlalu panjang, atau memuat karakter tidak sah.',
     'UNSUPPORTED_OPERATION_OR_VERSION':'Operasi atau versi perintah (v) tidak didukung Edge ini.',
     'UNSUPPORTED_OPERATION':'Operasi tidak didukung Edge ini.',
@@ -166,13 +171,16 @@ class CommandManager:
         return {}
     def submit(self,request,actor,*,retained=False,topic=None,link='primary'):
         # link: broker the command arrived on ('primary' Ground link or 'backup'); ACKs go back there.
-        a=self.agent; origin=self.origin(actor,link)
+        a=self.agent; origin=self.origin(actor,link); ignored=[]
         try:
             if retained: raise ValueError('RETAINED_COMMAND_REJECTED')
             if actor not in ('ground-controller','local-admin'): raise ValueError('INVALID_COMMAND_ACTOR')
             if not isinstance(request,dict): raise ValueError('COMMAND_OBJECT_REQUIRED')
-            allowed={'v','id','sid','boot','issued_ms','expires_ms','base_rev','op','changes','desired','profile','target_id','prepare_id','challenge'}
-            if set(request)-allowed: raise ValueError('UNKNOWN_COMMAND_FIELD')
+            # Fields this Edge does not know are dropped and named in the ACK, so a newer Ground can still
+            # command it. Everything that keeps a command safe (session, deadline, revision, value limits,
+            # each operation's own fields) is still required below.
+            ignored=sorted(str(k)[:64] for k in request if k not in COMMAND_FIELDS)[:16]
+            if ignored: request={k:v for k,v in request.items() if k in COMMAND_FIELDS}
             id=request.get('id'); op=request.get('op')
             if not isinstance(id,str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,80}',id): raise ValueError('INVALID_COMMAND_ID')
             if op not in OPS or request.get('v')!=2: raise ValueError('UNSUPPORTED_OPERATION_OR_VERSION')
@@ -184,6 +192,7 @@ class CommandManager:
                 if old['hash']!=digest(request): raise ValueError('COMMAND_ID_CONFLICT')
                 self._send(id,op,old['stage'],old['result'],link=link)
                 return self.public(old)
+            extra={'ignored':ignored} if ignored else {}
             if request.get('sid')!=a.sid or request.get('boot')!=a.boot: raise ValueError('SESSION_MISMATCH')
             n=now_ms()
             issued=integer(request.get('issued_ms'),1); expires=integer(request.get('expires_ms'),1)
@@ -203,7 +212,7 @@ class CommandManager:
                              't':now_ms(),'settings_json':source.raw_settings.decode('utf-8')}
                     settings_payload=compact(payload)
                     if len(settings_payload)>8192: raise ValueError('SETTINGS_REPORT_TOO_LARGE')
-                    result={'revision':source.revision,'proof':a.config_proof}
+                    result={'revision':source.revision,'proof':a.config_proof,**extra}
                     with a.settings_request_lock:
                         if a.settings_request_id is not None: raise ValueError('SETTINGS_REQUEST_PENDING')
                         self.journal.accept(request,actor,origin); self.journal.update(id,'APPLIED',result)
@@ -211,7 +220,7 @@ class CommandManager:
                         a.settings_request_link=link
                 else:
                     target=self.journal.lookup(str(request.get('target_id','')))
-                    result={'operation':self.public(target) if target else None}
+                    result={'operation':self.public(target) if target else None,**extra}
                     self.journal.accept(request,actor,origin); self.journal.update(id,'APPLIED',result)
                 self._send(id,op,'APPLIED',result,link=link)
                 return {'id':id,'stage':'APPLIED','result':result}
@@ -250,27 +259,31 @@ class CommandManager:
             if op in HELPER_OPS: self._require_helper()
             meta=self._before(op,request)
             if op=='ppp.restart':
-                return self._submit_ppp(request,actor,link,origin,meta)
+                return self._submit_ppp(request,actor,link,origin,meta,extra)
             with self.lock:
                 if self.busy: raise ValueError('BUSY')
                 self.journal.accept(request,actor,origin,meta)
                 self.busy=True; self.active_id=id
                 self.queue.put_nowait((request,actor,link))
-            self._send(id,op,'ACCEPTED',link=link)
-            return {'id':id,'stage':'ACCEPTED'}
+            self._send(id,op,'ACCEPTED',extra,link=link)
+            return {'id':id,'stage':'ACCEPTED',**({'result':extra} if extra else {})}
         except Exception as e:
             if CODE_RE.fullmatch(str(e)) and isinstance(e,ValueError): code=str(e)
             elif isinstance(e,sqlite3.Error): code='JOURNAL_UNAVAILABLE'
             elif isinstance(e,(TypeError,ValueError,KeyError,OverflowError)): code='INVALID_COMMAND_FIELD'
             else: code='INTERNAL_ERROR'
-            result=error_result(code,e)
-            if actor=='ground-controller':
-                op_name=request.get('op') if isinstance(request,dict) and request.get('op') in OPS else 'unknown'
-                remember=getattr(a,'remote_rejected',None)
-                if remember: remember(origin,op_name,code)
-            if isinstance(request,dict) and isinstance(request.get('id'),str) and len(request['id'])<=80:
-                self._send(request['id'],str(request.get('op','unknown')),'REJECTED',result,link=link)
-            return {'id':request.get('id') if isinstance(request,dict) else None,'stage':'REJECTED','result':result}
+            return self.reject(request,actor,link,code,e,ignored)
+    def reject(self,request,actor,link,code,error=None,ignored=()):
+        """Answer a command that will not run: ACK it when its id is readable and keep it visible."""
+        result=error_result(code,error)
+        if ignored: result['ignored']=list(ignored)
+        if actor=='ground-controller':
+            op_name=request.get('op') if isinstance(request,dict) and request.get('op') in OPS else 'unknown'
+            remember=getattr(self.agent,'remote_rejected',None)
+            if remember: remember(self.origin(actor,link),op_name,code)
+        if isinstance(request,dict) and isinstance(request.get('id'),str) and len(request['id'])<=80:
+            self._send(request['id'],str(request.get('op','unknown'))[:64],'REJECTED',result,link=link)
+        return {'id':request.get('id') if isinstance(request,dict) else None,'stage':'REJECTED','result':result}
     @staticmethod
     def public(op):
         if not op: return None
@@ -287,7 +300,7 @@ class CommandManager:
                     origin=op.get('link') if op.get('link') in ('local','ground','backup') else None,
                     summary={'kind':SUMMARY_KIND.get(name,'other'),'changes':changes},
                     reason=reason if isinstance(reason,str) else None)
-    def _submit_ppp(self,request,actor,link,origin,meta):
+    def _submit_ppp(self,request,actor,link,origin,meta,extra=None):
         a=self.agent; id=request['id']
         with self.ppp_lock:
             recovering=getattr(a,'ppp_recovery_active',lambda:False)()
@@ -296,10 +309,10 @@ class CommandManager:
                 raise ValueError('PPP_RESTART_TOO_SOON')
             self.journal.accept(request,actor,origin,meta)
             self.ppp_active=id; self.ppp_last=time.monotonic()
-        self._send(id,'ppp.restart','ACCEPTED',link=link)
+        self._send(id,'ppp.restart','ACCEPTED',extra,link=link)
         self.ppp_thread=threading.Thread(target=self._run_ppp,args=(request,actor,link,origin),daemon=True,name='ppp-restart')
         self.ppp_thread.start()
-        return {'id':id,'stage':'ACCEPTED'}
+        return {'id':id,'stage':'ACCEPTED',**({'result':extra} if extra else {})}
     def join_ppp(self,timeout=10):
         thread=self.ppp_thread
         if thread: thread.join(timeout)
