@@ -247,7 +247,9 @@ function diagnosticTimestamp(ms){return Number.isSafeInteger(ms)?`${new Date(ms)
 function renderDiagnostic(d){
  if(!d?.available){$('diagnostic-state').textContent='Belum ada data diagnostik dari node.';$('diagnostic-angle').textContent='DoA raw: --';$('diagnostic-frequency').textContent='Frekuensi: --';$('diagnostic-source-time').textContent='TIME sumber: --';$('diagnostic-observed-time').textContent='Observasi Edge: --';$('diagnostic-age').textContent='Usia: --';$('diagnostic-reasons').textContent='Gate: --';return;}
  $('diagnostic-state').textContent=d.stale?`UNVERIFIED / STALE DATA (${d.received_age_ms??'--'} ms)`:'UNVERIFIED / RECEIVED';
- $('diagnostic-angle').textContent=`DoA raw: ${Number.isFinite(d.raw_doa_deg)?d.raw_doa_deg.toFixed(1):'--'}°`;
+ // Labelled ok=1 samples Ground could not confirm carry the relative angle instead of the raw one.
+ $('diagnostic-angle').textContent=Number.isFinite(d.raw_doa_deg)||!Number.isFinite(d.relative_doa_deg)
+  ?`DoA raw: ${Number.isFinite(d.raw_doa_deg)?d.raw_doa_deg.toFixed(1):'--'}°`:`DoA relatif: ${d.relative_doa_deg.toFixed(1)}°`;
  $('diagnostic-frequency').textContent=`Frekuensi: ${Number.isFinite(d.frequency_mhz)?d.frequency_mhz.toFixed(3):'--'} MHz`;
  $('diagnostic-source-time').textContent=`TIME sumber: ${diagnosticTimestamp(d.source_timestamp_ms)}`;
  $('diagnostic-observed-time').textContent=`Observasi Edge: ${diagnosticTimestamp(d.observed_timestamp_ms)}`;

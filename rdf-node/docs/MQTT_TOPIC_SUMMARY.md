@@ -686,12 +686,12 @@ Gunakan `GET /api/v2/snapshot` untuk memeriksa `node_state`, `config`, `health_f
 | 4 | 16 | Atribusi konfigurasi cocok. |
 | 5 | 32 | Authority source diverifikasi. |
 
-Untuk `telemetry/angular`, mask integritas minimum adalah `1|2|4|16 = 23`. Jika
-`flags & 23 != 23`, frame tidak memenuhi bukti integritas dan ditolak. Jika mask minimum lolos
-dan `flags == 63`, frame dapat masuk LIVE setelah seluruh gate lain lolos. `revision` tidak
-dibandingkan dengan `state.cfg`. Jika mask minimum lolos tetapi `flags != 63`, simpan sebagai
-`UNVERIFIED` di jalur diagnostic; hilangnya bit convention dan/atau authority tidak membuatnya
-valid.
+Untuk `telemetry/angular`, frame masuk LIVE hanya bila `flags == 63`, timestamp fresh, dan health
+fresh dengan `daq=1`. `revision` tidak dibandingkan dengan `state.cfg`. Frame lain tidak dibuang
+(sejak 1.5.0): ia disimpan sebagai `UNVERIFIED` di jalur diagnostic, dan `validation_reasons`
+menyebut bit yang hilang (`SOURCE_FRESHNESS_UNVERIFIED`, `DAQ_NOT_HEALTHY_AT_EDGE`,
+`CONFIG_ATTRIBUTION_UNVERIFIED`, dan seterusnya), `SOURCE_STALE`, atau `HEALTH_STALE`. Rilis
+sebelum 1.5.0 menolak frame dengan `flags & 23 != 23` atau tanpa health fresh.
 
 `telemetry/diagnostic/angular` juga membawa satu JSON object dengan 360 values. Ground menyimpannya
 terpisah sebagai `UNVERIFIED`; ia tidak mengisi Angular LIVE. Endpoint diagnostic menambahkan
@@ -704,17 +704,23 @@ belum memiliki authority/convention.
 |---|---|
 | `BAD_ANGULAR_JSON` | Payload harus JSON object dengan `v=2` dan `encoding="json"`; decoder binary lama tidak kompatibel. |
 | `EXPECTED_360_SAMPLES` | Payload harus memuat seluruh 360 angka dalam satu PUBLISH, bukan potongan atau array parsial. |
-| `SOURCE_TIMESTAMP_NOT_FRESH` | `timestamp_ms` adalah Unix ms dari source; cek satuan, freshness source, dan sinkronisasi clock kedua host. |
-| `ANGULAR_EVIDENCE_INCOMPLETE` | Salah satu bit parsed, fresh, DAQ, atau config tidak ada. Perbaiki bukti di Edge/source; jangan mengisi bit di Ground. |
-| `ANGULAR_WITHOUT_HEALTH` | Health belum diterima, sudah stale, atau `daq` bukan `1`. Tunggu health fresh sebelum memproses frame LIVE. |
-| `flags` lolos mask `23`, tetapi bukan `63` | Frame trust-only `UNVERIFIED`; baca endpoint diagnostic. `detection.valid=false` adalah hasil yang diharapkan, bukan kegagalan JSON. |
-| `link.rejected` bertambah | Counter tidak mengungkap alasan. Periksa bentuk payload/topic dan korelasi `sid`, waktu, health, flags, dan sequence. |
+| `SOURCE_STALE` / `SOURCE_TIME_FUTURE` di diagnostic | `timestamp_ms` adalah Unix ms dari source; cek satuan, freshness source, dan sinkronisasi clock kedua host. |
+| Bit hilang di diagnostic (`..._UNVERIFIED`, `DAQ_NOT_HEALTHY_AT_EDGE`) | Perbaiki bukti di Edge/source; jangan mengisi bit di Ground. |
+| `HEALTH_STALE` di diagnostic | Health belum diterima, sudah stale, atau timestamp-nya jauh dari jam Ground (`health_time_ok=false`). |
+| `flags` bukan `63` | Frame `UNVERIFIED`; baca endpoint diagnostic. `detection.valid=false` adalah hasil yang diharapkan, bukan kegagalan JSON. |
+| `link.rejected` bertambah | Hanya payload yang tidak bisa dibaca sama sekali (bukan JSON, sid/identitas rusak, nilai inti bukan angka). Alasannya dihitung di `link.reject_reasons`. |
 
-Untuk DoA, `telemetry/doa` dengan `ok=1` dapat mengisi detection setelah freshness, sequence,
-sample values, dan health lolos; Ground tidak membandingkan `rev` dengan `state.cfg`.
-`ok=0` hanya diterima sebagai raw `UNVERIFIED` bila `trust`, `angle_reference="RAW"`, revision,
-health, dan reasons yang diizinkan cocok; ia tidak mengisi detection. `telemetry/diagnostic/doa`
-juga selalu terpisah dari deteksi LIVE.
+Untuk DoA, `telemetry/doa` dengan `ok=1` mengisi detection setelah freshness, sequence, sample
+values, dan health lolos; Ground tidak membandingkan `rev` dengan `state.cfg`. Sejak 1.5.0 sampel
+lain tidak dibuang. `ok=0` dengan alasan apa pun, dan `ok=1` yang tidak bisa dikonfirmasi Ground
+(timestamp basi, health stale, DAQ tidak sehat), tampil sebagai `diagnostic_doa` `UNVERIFIED`.
+`validation_reasons`-nya adalah `reason` Edge ditambah label Ground (`SOURCE_STALE`,
+`HEALTH_STALE`, `DAQ_NOT_HEALTHY`, `PREVIOUS_CONFIG`, `OK_FLAG_MISSING`), lengkap dengan `clk` dan
+`source_age_ms`. `ok=1` yang dilabeli membawa `relative_doa_deg` dengan `angle_reference="RELATIVE"`;
+`ok=0` membawa `raw_doa_deg`. Keduanya tidak mengisi detection. `telemetry/diagnostic/doa` juga
+selalu terpisah dari deteksi LIVE. Health dengan timestamp jauh dari jam Ground disimpan dan
+ditampilkan, tetapi `health_fresh` dan `health_time_ok` bernilai `false`, sehingga health itu tidak
+membuat DoA LIVE dan tidak meloloskan command.
 
 Versi Edge yang mengirim Angular JSON tidak kompatibel dengan Ground RDF2 yang mengharapkan
 binary chunk. Perbarui decoder Ground ke kontrak JSON v2 sebelum mengubah gate validitas.

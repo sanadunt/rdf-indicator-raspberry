@@ -36,6 +36,22 @@ below were numbered afterwards; their packages still reported `version: "1.0.0"`
     account.
   - `docs/UJI_SINYAL_437.md`: tell approval-only `ok: 0`, "no signal above squelch", and a stuck
     pipeline apart at 437.425 MHz, with a test transmitter or a temporarily lowered squelch.
+- Ground receiver (`rdf-ground`) labels instead of dropping (decision D4).
+  - DoA with `ok: 0` and any reasons, and `ok: 1` samples Ground cannot confirm (stale timestamp,
+    stale health, DAQ not healthy), appear in `diagnostic_doa` as `UNVERIFIED`, with the Edge
+    `reason` plus Ground labels (`SOURCE_STALE`, `HEALTH_STALE`, `DAQ_NOT_HEALTHY`,
+    `PREVIOUS_CONFIG`, `OK_FLAG_MISSING`), `clk`, and `source_age_ms`.
+  - Angular frames without `flags: 63`, fresh time, or fresh health go to the diagnostic view with
+    their reasons, instead of `ANGULAR_EVIDENCE_INCOMPLETE`/`ANGULAR_WITHOUT_HEALTH`.
+  - Health with a skewed timestamp is kept and shown, but `health_fresh`/`health_time_ok` stay
+    false. It never makes DoA LIVE, never lets a command through, and never reconciles a reboot or
+    PPP restart.
+  - `diagnostic/doa` with missing labels is accepted (always `UNVERIFIED`); an out-of-order older
+    `doa.xml` sample is skipped instead of counted as rejected.
+  - `settings/reported` with extra fields is accepted.
+  - Only unreadable payloads still count in `link.rejected`, and the reason is now counted per
+    code in `link.reject_reasons`.
+  - A rejected message no longer leaves the Ground event queue unfinished.
 - Lenient reading.
   - Commands: fields this Edge does not know are dropped and listed in `result.ignored` on the
     first ACK instead of rejecting the whole command `UNKNOWN_COMMAND_FIELD`. Session, deadline,
@@ -107,7 +123,7 @@ below were numbered afterwards; their packages still reported `version: "1.0.0"`
 - Compatibility: consumers that only read `ok: 1` DoA are unaffected. Ground Console 3.0.0 and
   the bundled `rdf-ground` receiver still treat `ok: 0` DoA with reasons other than
   `SOURCE_UNVERIFIED`/`ANGLE_UNVERIFIED` as invalid and drop it; they keep working on health and
-  verified DoA until they are updated to read the new labels.
+  verified DoA until they are updated to read the new labels (`rdf-ground` does from 1.5.0).
 
 
 ## 1.3.0 - 2026-10-27

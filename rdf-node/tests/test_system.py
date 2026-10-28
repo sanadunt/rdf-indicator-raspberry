@@ -212,8 +212,65 @@ class ApplicationTests(unittest.TestCase):
         ground.receive(ground.prefix+'/telemetry/diagnostic/doa',compact(newer))
         self.assertEqual(ground.snapshot()['diagnostic_doa']['q'],2)
         older=dict(newer,q=3,source_timestamp_ms=timestamp+500)
-        with self.assertRaises(ValueError):
-            ground.receive(ground.prefix+'/telemetry/diagnostic/doa',compact(older))
+        ground.receive(ground.prefix+'/telemetry/diagnostic/doa',compact(older))
+        self.assertEqual(ground.snapshot()['diagnostic_doa']['q'],2)
+        unlabelled={k:v for k,v in dict(sample,q=4,source_timestamp_ms=timestamp+2000).items() if k!='validation_reasons'}
+        ground.receive(ground.prefix+'/telemetry/diagnostic/doa',compact(unlabelled))
+        self.assertEqual(ground.snapshot()['diagnostic_doa']['validation_reasons'],['DIAGNOSTIC_UNVERIFIED'])
+
+    def test_ground_shows_labelled_doa_instead_of_dropping_it(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-labelled')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd';t=now_ms()
+        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test','cfg':7}))
+        ground.receive(ground.prefix+'/telemetry/health',compact(
+            {'v':2,'sid':sid,'q':1,'t':t,'run':1,'daq':0,'drop':0,'age':9000,'temp':None,'clk':0,'rev':7,
+             'why':['DAQ_NOT_HEALTHY','CLOCK_UNTRUSTED']}))
+        # Edge 1.4+: a stale, clock-untrusted sample is labelled ok=0 with its reasons.
+        labelled={'v':2,'sid':sid,'q':1,'t':t-60000,'f':437425000,'a':123.4,'c':3.1,'p':-80.0,'rev':7,'ok':0,
+                  'clk':0,'age':60000,'reason':['DAQ_NOT_HEALTHY','CLOCK_UNTRUSTED','NO_FRESH_DOA'],
+                  'trust':'UNVERIFIED','angle_reference':'RAW'}
+        ground.receive(ground.prefix+'/telemetry/doa',compact(labelled))
+        shown=ground.snapshot()['diagnostic_doa']
+        self.assertEqual((shown['raw_doa_deg'],shown['trust'],shown['clk'],shown['source_age_ms']),(123.4,'UNVERIFIED',0,60000))
+        self.assertEqual(shown['validation_reasons'],['DAQ_NOT_HEALTHY','CLOCK_UNTRUSTED','NO_FRESH_DOA','SOURCE_STALE'])
+        self.assertTrue(shown['stale']);self.assertFalse(ground.snapshot()['detection']['valid'])
+        # ok=1 that Ground cannot confirm (DAQ not healthy here) is shown with its relative angle, not LIVE.
+        ground.receive(ground.prefix+'/telemetry/doa',compact(dict(labelled,q=2,t=now_ms(),ok=1,reason=[])))
+        shown=ground.snapshot()['diagnostic_doa']
+        self.assertEqual((shown['relative_doa_deg'],shown['raw_doa_deg'],shown['angle_reference']),(123.4,None,'RELATIVE'))
+        self.assertEqual(shown['validation_reasons'],['DAQ_NOT_HEALTHY'])
+        self.assertEqual(ground.doa,{});self.assertEqual(ground.rejected,0)
+        # What cannot be read at all is still counted, with its reason.
+        ground._incoming(ground.prefix+'/telemetry/doa',b'not json',False)
+        worker=threading.Thread(target=ground._loop,daemon=True);worker.start()
+        ground.events.join();ground.stop_event.set();worker.join(2)
+        self.assertEqual(ground.rejected,1)
+        self.assertEqual(ground.snapshot()['link']['reject_reasons'],{'JSONDECODEERROR':1})
+
+    def test_ground_keeps_health_with_a_wrong_clock_but_never_trusts_it(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-skewed')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        ground.client=mock.Mock(ready=True);ground.client.offer.return_value=True
+        sid='12ab34cd'
+        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test','cfg':7}))
+        ground.receive(ground.prefix+'/telemetry/health',compact(
+            {'v':2,'sid':sid,'q':1,'t':now_ms()-3600000,'run':1,'daq':1,'drop':0,'age':0,'temp':None,'clk':0,'rev':7}))
+        snapshot=ground.snapshot()
+        self.assertEqual(snapshot['health']['q'],1)
+        self.assertFalse(snapshot['health_fresh']);self.assertFalse(snapshot['health_time_ok'])
+        self.assertEqual(ground.submit_command({'op':'stream.set','profile':'balanced'})['error'],'NODE_NOT_FRESH')
+
+    def test_ground_accepts_settings_report_with_extra_fields(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-settings-extra')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd';boot='boot-current'
+        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':boot,'instance':'test','cfg':7}))
+        ground.settings_request_id='settings-1';raw=compact(settings()).decode('utf-8')
+        ground.receive(ground.prefix+'/settings/reported',compact(
+            {'v':2,'sid':sid,'boot':boot,'id':'settings-1','rev':7,'t':now_ms(),'settings_json':raw,'contract':'1.6'}))
+        self.assertEqual(ground.config_view()['settings_json'],raw)
+        self.assertNotIn('contract',ground.config_view()['reported'])
 
     def test_ground_routes_regular_unverified_doa_to_diagnostics(self):
         cfg=load_config();cfg['state_dir']=str(self.path/'ground-unverified-doa')
@@ -282,10 +339,12 @@ class ApplicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ground.receive(ground.prefix+'/telemetry/angular',compact(dict(payload,q=2,sid='98ab76cd')))
         ground.health_seen=time.monotonic()-9
-        with self.assertRaisesRegex(ValueError,'ANGULAR_WITHOUT_HEALTH'):
-            ground.receive(ground.prefix+'/telemetry/angular',compact(dict(payload,q=3)))
-        with self.assertRaisesRegex(ValueError,'ANGULAR_EVIDENCE_INCOMPLETE'):
-            ground.receive(ground.prefix+'/telemetry/angular',compact(dict(payload,q=4,flags=7)))
+        # Without fresh health or with incomplete evidence a frame is shown labelled, never LIVE.
+        ground.receive(ground.prefix+'/telemetry/angular',compact(dict(payload,q=3)))
+        self.assertIn('HEALTH_STALE',ground.diagnostic_angular_view()['validation_reasons'])
+        ground.health_seen=time.monotonic()
+        ground.receive(ground.prefix+'/telemetry/angular',compact(dict(payload,q=4,flags=7)))
+        self.assertIn('CONFIG_ATTRIBUTION_UNVERIFIED',ground.diagnostic_angular_view()['validation_reasons'])
         self.assertEqual(ground.angular_view()['q'],1)
 
     def test_settings_report_requires_current_request_session_and_boot(self):
@@ -335,10 +394,12 @@ class ApplicationTests(unittest.TestCase):
         self.assertIn('SOURCE_AUTHORITY_UNVERIFIED_AT_EDGE',view['validation_reasons'])
         self.assertIsNone(ground.angular_view())
         self.assertFalse(ground.snapshot()['detection']['valid'])
-        rejected=dict(payload,q=2,flags=27)
-        with self.assertRaisesRegex(ValueError,'ANGULAR_EVIDENCE_INCOMPLETE'):
-            ground.receive(ground.prefix+'/telemetry/angular',compact(rejected))
-        self.assertEqual(ground.diagnostic_angular_view()['q'],1)
+        incomplete=dict(payload,q=2,flags=27)
+        ground.receive(ground.prefix+'/telemetry/angular',compact(incomplete))
+        view=ground.diagnostic_angular_view()
+        self.assertEqual((view['q'],view['trust']),(2,'UNVERIFIED'))
+        self.assertIn('DAQ_NOT_HEALTHY_AT_EDGE',view['validation_reasons'])
+        self.assertIsNone(ground.angular_view())
 
     def test_scheduler_publishes_trust_only_unverified_data_on_regular_topics(self):
         agent=self.a;agent.cfg['source'].update(authority_verified=False,angle_verified=False)
@@ -632,7 +693,7 @@ class ApplicationTests(unittest.TestCase):
         ground=Ground(cfg);self.addCleanup(ground.journal.close)
         ground.client=mock.Mock(ready=True);ground.client.offer.return_value=True
         ground.node_state={'sid':'12ab34cd','boot':'boot-current'};ground.node_config={'rev':7}
-        ground.health={'q':1};ground.health_seen=time.monotonic()
+        ground.health={'q':1,'t':now_ms()};ground.health_seen=time.monotonic()
         request={'id':'ground-client-0123456789abcdef','op':'system.shutdown.execute',
                  'prepare_id':'prepare-id','challenge':'challenge','base_rev':7}
         result=ground.submit_command(request)
@@ -643,7 +704,7 @@ class ApplicationTests(unittest.TestCase):
         ground=Ground(cfg);self.addCleanup(ground.journal.close)
         ground.client=mock.Mock(ready=True);ground.client.offer.return_value=True
         ground.node_state={'sid':'12ab34cd','boot':'boot-current'};ground.node_config={'rev':7}
-        ground.health={'q':1};ground.health_seen=time.monotonic()
+        ground.health={'q':1,'t':now_ms()};ground.health_seen=time.monotonic()
         result=ground.submit_command({'id':'invalid id','op':'system.shutdown.prepare','base_rev':7})
         self.assertEqual(result['error'],'INVALID_COMMAND_ID')
     def test_idempotent_query_does_not_redo(self):

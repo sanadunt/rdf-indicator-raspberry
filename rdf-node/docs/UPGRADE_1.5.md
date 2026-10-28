@@ -33,10 +33,9 @@ Ground Console terpisah dari paket ini dan tidak ikut prosedur ini. Ground Conso
 payload 1.5.0 (field tambahan diabaikan). `main` Ground Console terbaru juga menampilkan DoA
 berlabel `ok: 0`.
 
-Catatan D4 (belum diputuskan): receiver `rdf-ground` bawaan paket ini, walaupun sudah 1.5.0,
-masih membuang DoA `ok: 0` yang alasannya bukan `SOURCE_UNVERIFIED` atau `ANGLE_UNVERIFIED`.
-Health dan DoA terverifikasi tetap tampil. DoA berlabel lain hanya terlihat di Ground Console
-sampai rdf-ground dilonggarkan.
+Receiver `rdf-ground` 1.5.0 juga menampilkan DoA berlabel (keputusan D4). Sampel `ok: 0`
+dengan alasan apa pun, dan sampel yang basi atau tanpa health fresh, tampil di preview sebagai
+"UNVERIFIED" beserta alasannya. Deteksi LIVE dan gate command tetap ketat.
 
 ## 0. Paket
 
