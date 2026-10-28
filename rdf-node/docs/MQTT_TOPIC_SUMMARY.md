@@ -199,6 +199,7 @@ Ukuran event memakai contoh JSON yang dicantumkan di bawah. State dapat dipublis
 | `ack/operation` | Progress/hasil operation lain | 226 B* | 266 B* |
 
 `*` Kedua baris ACK memakai JSON fixture `ack/config` di bawah hanya untuk mengukur ukuran paket; payload ACK aktual berubah mengikuti status dan `result` operation.
+ACK error membawa `message` dan `detail` (lihat `PROTOCOL.md#error-di-ack`): contoh `REJECTED HELPER_UNAVAILABLE` dengan path socket di `detail` berukuran 340 B; batas `detail` 200 karakter membuat ACK error tetap di bawah sekitar 500 B. ACK hanya dikirim saat ada command, jadi tidak masuk rate periodik.
 `settings/reported` bersifat request-only dan tidak masuk rate periodik. Payload compact JSON maksimum 8.192 byte; ukuran paket PUBLISH mencakup overhead MQTT tambahan.
 
 Ukuran command adalah fixture dengan envelope dan nilai umum yang sama seperti contoh `config.patch`; command execute reboot/shutdown memakai placeholder challenge 32 karakter. Nilai aktual bergantung ID, timestamp, operation field, dan isi `changes`.

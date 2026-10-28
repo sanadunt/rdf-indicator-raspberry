@@ -748,6 +748,27 @@ class HelperTests(unittest.TestCase):
         connection.__enter__.return_value.recv.return_value=compact({'ok':False,'error':'SYSTEMD_ACTION_OUTCOME_UNKNOWN'})+b'\n'
         with mock.patch('rdf_node.helper.socket.socket',return_value=connection):
             with self.assertRaises(TimeoutError):call_helper('/tmp/control.sock',{'op':'status'})
+    def test_helper_socket_failures_name_what_happened(self):
+        import socket,socketserver,threading
+        from rdf_node.helper import call_helper,HelperUnavailable,Handler
+        # Nothing listening: nothing was sent, so nothing ran.
+        missing=str(self.path/'missing.sock')
+        with self.assertRaises(HelperUnavailable) as caught:call_helper(missing,{'op':'status'})
+        self.assertEqual(str(caught.exception),'HELPER_UNAVAILABLE')
+        self.assertIn('FileNotFoundError',caught.exception.detail);self.assertIn(missing,caught.exception.detail)
+        # Listening but never answering: the request may have arrived, so the outcome is unknown.
+        silent=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);self.addCleanup(silent.close)
+        silent.bind(str(self.path/'silent.sock'));silent.listen(1)
+        with self.assertRaisesRegex(TimeoutError,'^HELPER_TIMEOUT$'):
+            call_helper(str(self.path/'silent.sock'),{'op':'status'},timeout=0.2)
+        # An unexpected error inside the helper comes back as a code plus its technical cause.
+        server=socketserver.UnixStreamServer(str(self.path/'helper.sock'),Handler)
+        server.controller=mock.Mock();server.controller.dispatch.side_effect=OSError(28,'No space left on device')
+        threading.Thread(target=server.serve_forever,daemon=True).start()
+        self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
+        with self.assertRaises(HelperError) as caught:call_helper(str(self.path/'helper.sock'),{'op':'status'})
+        self.assertEqual(str(caught.exception),'HELPER_INTERNAL_ERROR')
+        self.assertIn('No space left on device',caught.exception.detail)
     def test_patch_digest_compare_swap(self):
         file=self.path/'settings.json';file.write_bytes(compact(settings()))
         with self.assertRaises(ValueError):patch_file(file,{'gain_db':15.7},'wrong',self.p)

@@ -156,6 +156,7 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(result['result']['error'],'CAPABILITY_DISABLED')
     def test_local_reboot_accepts_explicit_edge_capability(self):
         self.a.cfg['runtime_mode']='controlled';self.a.cfg['control']['reboot_enabled']=True
+        self.a.helper_status={'allow_reboot':True}
         result=self.a.commands.submit(self.request('system.reboot.prepare'),'local-admin')
         self.assertEqual(result['stage'],'ACCEPTED',result)
     def test_ground_reboot_bypasses_remote_and_capability_approval_flags(self):
@@ -879,12 +880,60 @@ class CommandTests(unittest.TestCase):
     def test_ground_settings_write_bypasses_root_capability_flag(self):
         self.a.cfg['runtime_mode']='read_only'
         self.a.cfg['control']['config_patch_enabled']=False
+        self.a.helper_status={'allow_config':False}
         result=self.a.commands.submit(self.request('config.patch',changes={'gain_db':20.7}),'ground-controller')
         self.assertEqual(result['stage'],'ACCEPTED',result)
+
+    def test_write_without_helper_is_rejected_up_front_with_a_reason(self):
+        missing=str(self.path/'missing.sock');self.a.cfg['control']['helper_socket']=missing
+        self.a.helper_status={};acks=[]
+        self.a.operation_changed=lambda id,op,stage,result,link=None:acks.append((stage,result))
+        request=self.request('config.patch',changes={'gain_db':20.7})
+        result=self.a.commands.submit(request,'ground-controller')
+        self.assertEqual((result['stage'],result['result']['error']),('REJECTED','HELPER_UNAVAILABLE'))
+        self.assertIn('rdf-control-helper',result['result']['message'])
+        self.assertIn(missing,result['result']['detail'])
+        self.assertEqual(acks,[('REJECTED',result['result'])])
+        self.assertIsNone(self.a.journal.lookup(request['id']))
+        self.assertEqual(self.a.remote_rejects[0]['error'],'HELPER_UNAVAILABLE')
+        # stream.set never needs the helper.
+        self.assertEqual(self.a.commands.submit(self.request('stream.set',profile='balanced'),'ground-controller')['stage'],
+                         'ACCEPTED')
+
+    def test_helper_gone_after_accept_fails_instead_of_unknown(self):
+        self.a.cfg['control']['helper_socket']=str(self.path/'missing.sock')
+        self.a.helper_status={'allow_lifecycle':False}
+        self.a.commands.start();self.addCleanup(self.a.commands.stop)
+        request=self.request('processing.set',desired='STOPPED')
+        self.assertEqual(self.a.commands.submit(request,'ground-controller')['stage'],'ACCEPTED')
+        self.a.commands.queue.join()
+        operation=self.a.journal.lookup(request['id'])
+        self.assertEqual((operation['stage'],operation['result']['error']),('FAILED','HELPER_UNAVAILABLE'))
+        self.assertIn('tidak dijalankan',operation['result']['message'])
+
+    def test_unexpected_errors_get_a_code_message_and_detail(self):
+        self.a.helper_status={'allow_lifecycle':False}
+        self.a.commands.start();self.addCleanup(self.a.commands.stop)
+        cases=((TimeoutError('timed out'),'OUTCOME_UNKNOWN','HELPER_TIMEOUT'),
+               (BrokenPipeError(32,'Broken pipe'),'OUTCOME_UNKNOWN','HELPER_CONNECTION_LOST'),
+               (RuntimeError('boom'),'FAILED','INTERNAL_ERROR'))
+        for error,stage,code in cases:
+            request=self.request('processing.set',desired='STOPPED')
+            with self.subTest(code=code),mock.patch.object(self.a.commands,'_helper',side_effect=error):
+                self.a.commands.submit(request,'ground-controller');self.a.commands.queue.join()
+                result=self.a.journal.lookup(request['id'])['result']
+                self.assertEqual((self.a.journal.lookup(request['id'])['stage'],result['error']),(stage,code))
+                self.assertTrue(result['message']);self.assertIn(type(error).__name__,result['detail'])
+        # A malformed field is named as such, not as a journal error.
+        malformed=self.request('stream.set',profile='balanced');malformed['issued_ms']='soon'
+        rejected=self.a.commands.submit(malformed,'ground-controller')
+        self.assertEqual(rejected['result']['error'],'INVALID_COMMAND_FIELD')
+        self.assertIn('ValueError',rejected['result']['detail'])
 
     def test_ground_lifecycle_write_bypasses_root_capability_flags(self):
         self.a.cfg['runtime_mode']='read_only'
         self.a.cfg['control'].update(processing_enabled=False,restart_enabled=False)
+        self.a.helper_status={'allow_lifecycle':False}
         result=self.a.commands.submit(self.request('processing.set',desired='STOPPED'),'ground-controller')
         self.assertEqual(result['stage'],'ACCEPTED',result)
 
@@ -1262,6 +1311,7 @@ class ApiTests(unittest.TestCase):
         code,_,response=self.http('POST','/api/v2/commands',request)
         self.assertEqual((code,json.loads(response)['result']['error']),(400,'CAPABILITY_DISABLED'))
         self.a.cfg['runtime_mode']='controlled';self.a.cfg['control']['reboot_enabled']=True
+        self.a.helper_status={'allow_reboot':True}
         request['id']='local-reboot-approved'
         code,_,response=self.http('POST','/api/v2/commands',request)
         self.assertEqual((code,json.loads(response)['stage']),(202,'ACCEPTED'))

@@ -114,6 +114,7 @@ function pppRecordMessage(record){
  };
  let message=messages[record.stage]||`Status ${record.stage}.`;
  if(record.result?.error)message+=` Alasan: ${String(record.result.error)}`;
+ if(record.result?.error&&typeof record.result.message==='string')message+=` — ${record.result.message}`;
  if(record.confirmedBy||record.result?.confirmed_by)message+=' Request baru dikirim setelah operator meninjau hasil lama; hasil lama tetap tidak diketahui.';
  return message;
 }

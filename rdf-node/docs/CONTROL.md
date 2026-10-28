@@ -211,8 +211,9 @@ ACCEPTED -> APPLYING (jurnal saja) -> FAILED | OUTCOME_UNKNOWN   (request helper
   `steps`. Bila ping peer dan MQTT utama (atau MQTT nonaktif) terbukti pulih terlambat, tampilan
   snapshot menjadi `phase: "DONE"` dengan `late: true`; `stage` tetap `OUTCOME_UNKNOWN` dan
   `reason` tetap alasan timeout. Jurnal dan ACK tidak ditulis ulang, dan tidak ada ACK baru.
-- Bila request helper sendiri timeout atau socket-nya gagal, stage menjadi `OUTCOME_UNKNOWN` dengan
-  `error` (misalnya `SYSTEMD_ACTION_OUTCOME_UNKNOWN` atau `TIMEOUTERROR`), karena systemd mungkin
+- Bila request helper sendiri timeout atau socket-nya putus setelah request terkirim, stage menjadi
+  `OUTCOME_UNKNOWN` dengan `error` (`SYSTEMD_ACTION_OUTCOME_UNKNOWN`, `HELPER_TIMEOUT`, atau
+  `HELPER_CONNECTION_LOST`), karena systemd mungkin
   sudah me-restart unit. `link.ppp_recovery` lalu berfase `FAILED` dengan `stage`
   `OUTCOME_UNKNOWN`; panel menampilkannya sebagai hasil belum pasti, bukan gagal pasti. Penolakan
   helper yang pasti tetap `FAILED`.
@@ -335,3 +336,34 @@ Hasil reboot berstatus scheduled direkonsiliasi dengan boot baru.
 Batas retained terminal journal 2.000 record/30 hari; unresolved unknown tidak dibuang otomatis.
 Pantau penggunaan storage dan rekonsiliasi unknown dalam maintenance; release tidak
 menjalankan cleanup agresif terhadap bukti operasi yang belum selesai.
+
+## Pesan error di ACK
+
+Setiap penolakan atau kegagalan command membawa `error` (kode stabil), `message` (teks Indonesia
+untuk operator), dan, bila ada, `detail` (penyebab teknis, maks. 200 karakter). Teks yang sama
+dikembalikan API panel lokal dan disimpan di jurnal, sehingga `operation.get` juga mengembalikannya.
+Panel Edge menampilkan label pendek miliknya sendiri. Bila kodenya belum dikenal panel, panel memakai
+`message` dari Edge. Preview Ground menampilkan kode dan `message`.
+
+Mutation yang butuh helper root ditolak sebelum masuk jurnal bila helper tidak tersedia. Status
+helper yang di-cache agent hanya petunjuk: bila cache kosong, Edge mencoba `status` sekali lagi ke
+socket (timeout 1 s) sebelum menolak. Bila socket ada tetapi lambat menjawab, command tetap
+diterima, dan worker melaporkan hasil sebenarnya.
+
+| Kode | Stage | Yang terjadi | Yang dilakukan operator |
+|---|---|---|---|
+| `HELPER_UNAVAILABLE` | `REJECTED` (sebelum jurnal) atau `FAILED` (helper hilang setelah diterima) | Socket `control.helper_socket` tidak ada atau tidak menerima koneksi. Perintah tidak dijalankan. | `systemctl status rdf-control-helper.service`; pastikan `/run/rdf-node-control/control.sock` ada. |
+| `HELPER_ACCESS_DENIED` | `REJECTED` atau `FAILED` | Socket ada, tetapi user agent tidak boleh membukanya. Perintah tidak dijalankan. | Periksa owner/mode socket dan `allowed_user` di policy helper. |
+| `HELPER_TIMEOUT` | `OUTCOME_UNKNOWN` | Request sudah terkirim ke helper, jawaban tidak datang. | Periksa hasil nyata (state, health, unit) sebelum mengulang. |
+| `HELPER_CONNECTION_LOST` | `OUTCOME_UNKNOWN` | Koneksi putus setelah request terkirim. | Sama dengan `HELPER_TIMEOUT`. |
+| `HELPER_CLOSED` | `FAILED` | Helper menutup koneksi tanpa jawaban. | Lihat journal `rdf-control-helper.service`. |
+| `HELPER_INTERNAL_ERROR` | `FAILED` | Exception tak terduga di helper; `detail` memuat jenis dan pesannya. | Lihat `detail` dan journal helper. |
+| `INVALID_COMMAND_FIELD` | `REJECTED` | Tipe atau nilai field salah (misalnya `issued_ms` bukan angka). | Perbaiki pengirim command. |
+| `JOURNAL_UNAVAILABLE` | `REJECTED` | Jurnal SQLite tidak bisa ditulis. | Periksa ruang disk dan `state_dir`. |
+| `INTERNAL_ERROR` | `REJECTED` atau `FAILED` | Error lain di agent; `detail` memuat penyebabnya. | Laporkan beserta `detail`. |
+
+Kode lain (`CLOCK_UNTRUSTED`, `CONFIG_REVISION_CONFLICT`, `SESSION_MISMATCH`, `BUSY`,
+`PPP_RESTART_TOO_SOON`, dan seterusnya) tidak berubah dan kini juga membawa `message`. Tabel lengkap
+teksnya ada di `ERROR_MESSAGES` dalam `src/rdf_node/control.py`. Kode lama (`OSERROR`,
+`TIMEOUTERROR`, `JOURNAL_OR_REQUEST_ERROR`) tetap punya teks, untuk record yang ditulis sebelum
+rilis ini.

@@ -251,6 +251,40 @@ dan timestamp fresh. Ground mem-parse teks sebagai JSON object, menyimpan teks m
 menurunkan subset safe untuk form mutation. Safe settings hanya diberikan bila report `rev`
 cocok dengan `state.cfg`; teks mentah tetap dapat ditampilkan.
 
+### Error di ACK
+
+ACK `REJECTED`, `FAILED`, dan `OUTCOME_UNKNOWN` karena error membawa tiga field di `result`:
+
+```json
+{"v":2,"sid":"7a8b9c0d","id":"g01-00001235","status":"REJECTED","t":1790668800456,"rev":7,
+ "result":{"error":"HELPER_UNAVAILABLE",
+           "message":"Helper kontrol (rdf-control-helper) tidak berjalan atau socket-nya tidak ada; perintah tidak dijalankan.",
+           "detail":"FileNotFoundError (No such file or directory): /run/rdf-node-control/control.sock"}}
+```
+
+| Field | Isi |
+|---|---|
+| `error` | Kode stabil `[A-Z][A-Z0-9_]*` untuk mesin. Field ini sudah ada sejak 1.0.0. |
+| `message` | Penjelasan bahasa Indonesia untuk operator. Selalu ada bersama `error`; kode yang belum punya teks khusus mendapat teks umum dengan kodenya. |
+| `detail` | Opsional, maks. 200 karakter: penyebab teknis (jenis exception dan pesannya, misalnya path socket). Tidak pernah memuat isi credential. |
+
+Edge tidak lagi mengirim nama tipe exception mentah (`OSERROR`, `TIMEOUTERROR`,
+`JOURNAL_OR_REQUEST_ERROR`). Penggantinya:
+
+| Dulu | Sekarang | Stage | Arti |
+|---|---|---|---|
+| `OSERROR` saat socket helper tidak ada | `HELPER_UNAVAILABLE` | `REJECTED` sebelum jurnal, atau `FAILED` bila helper hilang setelah perintah diterima | Socket tidak bisa dibuka; tidak ada yang dikirim, jadi tidak ada yang dijalankan. |
+| `PERMISSIONERROR` | `HELPER_ACCESS_DENIED` | `REJECTED` atau `FAILED` | Socket ada, tetapi user agent tidak boleh membukanya. |
+| `TIMEOUTERROR` | `HELPER_TIMEOUT` | `OUTCOME_UNKNOWN` | Request sudah terkirim, jawaban tidak datang. |
+| `OSERROR` setelah request terkirim | `HELPER_CONNECTION_LOST` | `OUTCOME_UNKNOWN` | Socket putus setelah request terkirim. |
+| `OSERROR`, `PERMISSIONERROR`, dan sejenisnya dari dalam helper | `HELPER_INTERNAL_ERROR` | `FAILED` | Error tak terduga di helper; `detail` memuat penyebabnya. |
+| `JOURNAL_OR_REQUEST_ERROR` | `INVALID_COMMAND_FIELD`, `JOURNAL_UNAVAILABLE`, atau `INTERNAL_ERROR` | `REJECTED` | Tipe/nilai field salah, journal SQLite gagal, atau error lain di agent. |
+
+Mutation yang butuh helper (`config.patch`, `processing.set`, `service.restart`, `ppp.restart`,
+`system.reboot.*`, `system.shutdown.*`) ditolak `REJECTED HELPER_UNAVAILABLE` sebelum masuk jurnal
+bila helper tidak menjawab status. `stream.set`, `config.get`, dan `operation.get` tidak butuh
+helper. Teks lengkap per kode ada di `docs/CONTROL.md#pesan-error-di-ack`.
+
 ## Telemetry delivery and evidence
 
 Ground tidak mengirim konfirmasi aplikasi untuk telemetry. QoS 1 PUBACK hanya berarti broker

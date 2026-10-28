@@ -1,11 +1,12 @@
 from __future__ import annotations
 import queue
 import re
+import sqlite3
 import threading
 import time
 from .util import digest, now_ms, finite, integer, compact
 from .journal import TERMINAL
-from .helper import call_helper
+from .helper import call_helper,HelperUnavailable
 from .config import PROFILES
 
 OPS={
@@ -22,6 +23,113 @@ SUMMARY_KIND={'config.patch':'config','stream.set':'profile','processing.set':'p
               'system.shutdown.prepare':'shutdown','system.shutdown.execute':'shutdown',
               'config.get':'read','operation.get':'read'}
 PPP_RESTART_MIN_GAP_S=15
+# Operations that only the root helper can carry out (stream.set and the read ops stay in the agent).
+HELPER_OPS=set(OPS)-READ_OPS-{'stream.set'}
+CODE_RE=re.compile(r'[A-Z][A-Z0-9_]{0,63}')
+# Operator text for every ACK error. `error` stays the stable machine code; `message` explains it and
+# `detail` (when there is one) keeps the technical cause for whoever debugs it.
+ERROR_MESSAGES={
+    'HELPER_UNAVAILABLE':'Helper kontrol (rdf-control-helper) tidak berjalan atau socket-nya tidak ada; perintah tidak dijalankan.',
+    'HELPER_ACCESS_DENIED':'Agent tidak punya izin membuka socket helper kontrol; perintah tidak dijalankan.',
+    'HELPER_TIMEOUT':'Helper kontrol tidak menjawab tepat waktu; perintah mungkin sudah atau belum dijalankan.',
+    'HELPER_CONNECTION_LOST':'Koneksi ke helper kontrol terputus setelah perintah dikirim; hasilnya belum pasti.',
+    'HELPER_CLOSED':'Helper kontrol menutup koneksi tanpa jawaban; hasilnya belum pasti.',
+    'HELPER_RESPONSE_LIMIT':'Jawaban helper kontrol terlalu besar dan tidak dibaca.',
+    'HELPER_INTERNAL_ERROR':'Helper kontrol mengalami error internal; lihat detail.',
+    'HELPER_FAILED':'Helper kontrol menolak perintah tanpa alasan.',
+    'INTERNAL_ERROR':'Error internal di agent Edge; lihat detail.',
+    'INVALID_COMMAND_FIELD':'Ada field perintah yang tipe atau nilainya tidak valid.',
+    'JOURNAL_UNAVAILABLE':'Journal perintah di Edge tidak bisa ditulis; perintah tidak dijalankan.',
+    'RETAINED_COMMAND_REJECTED':'Perintah retained ditolak; kirim perintah tanpa flag retain.',
+    'INVALID_COMMAND_ACTOR':'Asal perintah tidak dikenal.',
+    'COMMAND_OBJECT_REQUIRED':'Isi perintah harus berupa objek JSON.',
+    'UNKNOWN_COMMAND_FIELD':'Perintah memuat field yang tidak dikenal.',
+    'INVALID_COMMAND_ID':'ID perintah kosong, terlalu panjang, atau memuat karakter tidak sah.',
+    'UNSUPPORTED_OPERATION_OR_VERSION':'Operasi atau versi perintah (v) tidak didukung Edge ini.',
+    'UNSUPPORTED_OPERATION':'Operasi tidak didukung Edge ini.',
+    'SETTINGS_REQUEST_GROUND_ONLY':'Permintaan settings hanya boleh dari Ground.',
+    'COMMAND_TOPIC_MISMATCH':'Operasi tidak cocok dengan topik tempat perintah dikirim.',
+    'COMMAND_ID_CONFLICT':'ID perintah sudah dipakai untuk perintah lain.',
+    'SESSION_MISMATCH':'sid/boot perintah tidak cocok dengan sesi Edge sekarang; baca ulang state lalu kirim lagi.',
+    'EXPIRED_OR_INVALID_DEADLINE':'Perintah sudah kedaluwarsa atau batas waktunya tidak sah (maks. 30 dtk); periksa jam Ground.',
+    'REQUEST_RATE_LIMIT':'Permintaan baca terlalu cepat; tunggu 1 dtk.',
+    'TLS_REQUIRED_FOR_SETTINGS_REPORT':'Settings tidak dikirim lewat broker cadangan tanpa TLS kecuali diizinkan.',
+    'SETTINGS_UNAVAILABLE':'Settings KrakenSDR belum terbaca di Edge.',
+    'SETTINGS_STALE':'Settings KrakenSDR yang terbaca sudah basi.',
+    'SETTINGS_REPORT_TOO_LARGE':'Settings KrakenSDR terlalu besar untuk dikirim lewat MQTT (maks. 8 KiB).',
+    'SETTINGS_REQUEST_PENDING':'Permintaan settings sebelumnya masih dikirim; coba lagi sebentar.',
+    'DEMO_NO_HARDWARE_CONTROL':'Mode demo tidak mengendalikan perangkat.',
+    'REMOTE_COMMANDS_DISABLED':'Perintah dari Ground dinonaktifkan di Edge ini.',
+    'CLOCK_UNTRUSTED':'Jam Edge belum tersinkron, jadi batas waktu perintah tidak bisa dipercaya.',
+    'CONFIG_REVISION_CONFLICT':'Revisi config (base_rev) sudah berubah; baca ulang settings lalu kirim lagi.',
+    'UNSUPPORTED_PROFILE':'Profil stream tidak dikenal.',
+    'CAPABILITY_DISABLED':'Fitur ini belum diaktifkan atau belum disetujui root di Edge.',
+    'INVALID_DESIRED_STATE':'Status yang diminta harus RUNNING atau STOPPED.',
+    'INVALID_PATCH':'Perubahan settings kosong atau memuat field yang tidak boleh diubah.',
+    'BUSY':'Operasi lain sedang berjalan; tunggu sampai selesai.',
+    'PPP_RESTART_IN_PROGRESS':'Restart T900 sebelumnya masih berjalan atau dipantau.',
+    'PPP_RESTART_TOO_SOON':'Restart T900 terakhir kurang dari 15 dtk lalu.',
+    'PPP_RESTART_PENDING':'Job systemd untuk t900-ppp masih antre.',
+    'PPP_RESTART_NOT_APPROVED':'Restart T900 belum disetujui root (rdf-node controls approve --ppp-restart).',
+    'PPP_SERVICE_NOT_LOADED':'Unit t900-ppp.service tidak ada di Edge.',
+    'PPP_SERVICE_NOT_ACTIVE':'Unit t900-ppp.service tidak aktif; hanya panel lokal yang boleh menyalakannya.',
+    'PPP_SERVICE_STATUS_UNKNOWN':'Status unit t900-ppp.service tidak bisa dibaca.',
+    'SYSTEMD_ACTION_FAILED':'systemd menolak atau gagal menjalankan aksi.',
+    'SYSTEMD_ACTION_OUTCOME_UNKNOWN':'systemd tidak memberi jawaban pasti; aksi mungkin sudah berjalan.',
+    'LIFECYCLE_NOT_APPROVED':'Start/stop SDR belum disetujui root.',
+    'LIFECYCLE_TARGET_NOT_READY':'Unit SDR yang disetujui belum siap.',
+    'UNSAFE_ENGINE_UNIT':'Unit SDR yang dikonfigurasi tidak aman untuk dikendalikan.',
+    'CONFIG_ADAPTER_NOT_APPROVED':'Penulisan settings KrakenSDR belum disetujui root.',
+    'CONFIG_TARGET_NOT_READY':'File settings KrakenSDR yang disetujui belum siap.',
+    'CONFIG_CHANGED_BEFORE_WRITE':'Settings berubah sebelum sempat ditulis; baca ulang lalu kirim lagi.',
+    'EXTERNAL_WRITER_CONFLICT':'Settings diubah program lain saat ditulis; perubahan dibatalkan.',
+    'CONTROL_REQUIRES_SINGLE_VFO0':'Ubah settings hanya didukung dengan satu VFO aktif (VFO0).',
+    'CENTER_CHANGE_REQUIRES_VFO0_TARGET':'Frekuensi tengah hanya boleh diubah bersama frekuensi VFO0.',
+    'MVP_CENTER_MUST_EQUAL_VFO0':'Frekuensi tengah harus sama dengan frekuensi VFO0.',
+    'GAIN_NOT_IN_APPROVED_TABLE':'Nilai gain tidak ada di tabel gain yang diizinkan.',
+    'UNSUPPORTED_SETTINGS_FIELD':'Field settings ini tidak boleh diubah.',
+    'SETTINGS_FILE_INVALID':'File settings KrakenSDR tidak valid.',
+    'SETTINGS_OBJECT_REQUIRED':'File settings KrakenSDR bukan objek JSON.',
+    'SETTINGS_TOO_LARGE':'File settings KrakenSDR terlalu besar.',
+    'NUMBER_OUT_OF_RANGE':'Ada nilai di luar batas aman.',
+    'INTEGER_OUT_OF_RANGE':'Ada nilai bilangan bulat di luar batas.',
+    'BOOLEAN_AS_NUMBER':'Nilai angka dikirim sebagai boolean.',
+    'BOOLEAN_AS_INTEGER':'Nilai bilangan bulat dikirim sebagai boolean.',
+    'PEER_UID_DENIED':'Helper kontrol menolak proses pemanggil.',
+    'RPC_SIZE_LIMIT':'Permintaan ke helper kontrol terlalu besar.',
+    'TOO_MANY_ACTIVE_CHALLENGES':'Terlalu banyak persiapan reboot/shutdown yang masih aktif.',
+    'REBOOT_PREPARE_REQUIRED':'Reboot perlu langkah persiapan (prepare) dan challenge-nya.',
+    'SHUTDOWN_PREPARE_REQUIRED':'Shutdown perlu langkah persiapan (prepare) dan challenge-nya.',
+    'SHUTDOWN_ALREADY_SCHEDULED':'Shutdown sudah dijadwalkan.',
+    'SHUTDOWN_UNIT_ACTIVE':'Unit shutdown masih aktif.',
+    'SHUTDOWN_UNIT_STATUS_UNKNOWN':'Status unit shutdown tidak bisa dibaca.',
+    'SHUTDOWN_INTENT_INVALID':'Catatan rencana shutdown tidak valid.',
+    'LIFECYCLE_VERIFICATION_TIMEOUT':'SDR belum terbukti berjalan/berhenti dalam batas waktu verifikasi.',
+    'NATIVE_RUNTIME_EVIDENCE_INCOMPLETE':'Settings tersimpan, tetapi belum terbukti dipakai KrakenSDR.',
+    # Codes an older helper or agent may still report.
+    'OSERROR':'Error sistem saat menghubungi helper kontrol (kode lama).',
+    'TIMEOUTERROR':'Helper kontrol tidak menjawab tepat waktu (kode lama).',
+    'RPC_TIMEOUT':'Helper kontrol tidak menjawab tepat waktu.',
+    'JOURNAL_OR_REQUEST_ERROR':'Perintah tidak bisa diproses (kode lama).',
+}
+def error_result(code,error=None):
+    """ACK result for a failure: the stable code, operator text, and the technical cause if any."""
+    result={'error':code,'message':ERROR_MESSAGES.get(code,'Perintah tidak dapat diproses (kode '+code+').')}
+    detail=getattr(error,'detail',None)
+    if detail is None and error is not None:
+        cause=error.__cause__ or error
+        if cause is not error or not CODE_RE.fullmatch(str(error)):
+            detail=f'{type(cause).__name__}: {cause}' if str(cause) else type(cause).__name__
+    if isinstance(detail,str) and detail: result['detail']=detail[:200]
+    return result
+def classify_failure(error):
+    """(stage, code) for an exception raised while running an accepted operation."""
+    # A helper that was never reached ran nothing; a socket error after sending leaves it unknown.
+    unknown=isinstance(error,OSError)
+    code=str(error) if CODE_RE.fullmatch(str(error)) else (
+        'HELPER_TIMEOUT' if isinstance(error,TimeoutError) else
+        'HELPER_CONNECTION_LOST' if isinstance(error,OSError) else 'INTERNAL_ERROR')
+    return ('OUTCOME_UNKNOWN' if unknown else 'FAILED'),code
 class CommandManager:
     def __init__(self,agent):
         self.agent=agent; self.cfg=agent.cfg; self.journal=agent.journal
@@ -35,6 +143,15 @@ class CommandManager:
     def stop(self): self.stop_event.set(); self.thread.join(3)
     def _helper(self,r,timeout=8):
         return call_helper(self.cfg['control']['helper_socket'],r,timeout)
+    def _require_helper(self):
+        # Reject before journaling when the helper is known to be gone: nothing would run anyway.
+        # The cached status is only a hint, so an empty one is checked once more against the socket.
+        a=self.agent
+        if a.helper_status: return
+        try: status=self._helper({'op':'status'},timeout=1)
+        except OSError: return  # reached but slow: the worker reports what the operation itself gets
+        if isinstance(status,dict) and status: a.helper_status=status
+        else: raise HelperUnavailable('HELPER_UNAVAILABLE')
     def _send(self,id,op,stage,result=None,link=None):
         self.agent.operation_changed(id,op,stage,result or {},link=link)
     @staticmethod
@@ -130,6 +247,7 @@ class CommandManager:
                     changes=request.get('changes')
                     if not isinstance(changes,dict) or not changes or set(changes)-set(FIELD_MAP): raise ValueError('INVALID_PATCH')
                     for v in changes.values(): finite(v,-200,5e9)
+            if op in HELPER_OPS: self._require_helper()
             meta=self._before(op,request)
             if op=='ppp.restart':
                 return self._submit_ppp(request,actor,link,origin,meta)
@@ -141,14 +259,18 @@ class CommandManager:
             self._send(id,op,'ACCEPTED',link=link)
             return {'id':id,'stage':'ACCEPTED'}
         except Exception as e:
-            code=str(e) if isinstance(e,ValueError) and str(e).isupper() else 'JOURNAL_OR_REQUEST_ERROR'
+            if CODE_RE.fullmatch(str(e)) and isinstance(e,ValueError): code=str(e)
+            elif isinstance(e,sqlite3.Error): code='JOURNAL_UNAVAILABLE'
+            elif isinstance(e,(TypeError,ValueError,KeyError,OverflowError)): code='INVALID_COMMAND_FIELD'
+            else: code='INTERNAL_ERROR'
+            result=error_result(code,e)
             if actor=='ground-controller':
                 op_name=request.get('op') if isinstance(request,dict) and request.get('op') in OPS else 'unknown'
                 remember=getattr(a,'remote_rejected',None)
                 if remember: remember(origin,op_name,code)
             if isinstance(request,dict) and isinstance(request.get('id'),str) and len(request['id'])<=80:
-                self._send(request['id'],str(request.get('op','unknown')),'REJECTED',{'error':code},link=link)
-            return {'id':request.get('id') if isinstance(request,dict) else None,'stage':'REJECTED','result':{'error':code}}
+                self._send(request['id'],str(request.get('op','unknown')),'REJECTED',result,link=link)
+            return {'id':request.get('id') if isinstance(request,dict) else None,'stage':'REJECTED','result':result}
     @staticmethod
     def public(op):
         if not op: return None
@@ -190,11 +312,9 @@ class CommandManager:
             begin=getattr(a,'ppp_recovery_begin',None)
             if begin: begin(r['id'],origin,link)
         except Exception as e:
-            err=str(e) if isinstance(e,ValueError) and str(e).isupper() else type(e).__name__.upper()
-            if isinstance(e,TimeoutError) and str(e).isupper(): err=str(e)
-            stage='OUTCOME_UNKNOWN' if isinstance(e,(TimeoutError,OSError)) else 'FAILED'
+            stage,err=classify_failure(e); result=error_result(err,e)
             try:
-                self._stage(r,stage,{'error':err}); self._send(r['id'],r['op'],stage,{'error':err},link=link)
+                self._stage(r,stage,result); self._send(r['id'],r['op'],stage,result,link=link)
             except Exception: pass
             failed=getattr(a,'ppp_recovery_failed',None)
             if failed: failed(r['id'],origin,stage,err)
@@ -214,11 +334,10 @@ class CommandManager:
                 self._stage(r,stage,result)
                 self._send(r['id'],r['op'],stage,result,link=link)
             except Exception as e:
-                err=str(e) if isinstance(e,ValueError) and str(e).isupper() else type(e).__name__.upper()
                 # Helper timeout after side effect may mean unknown, not failed.
-                stage='OUTCOME_UNKNOWN' if isinstance(e,(TimeoutError,OSError)) else 'FAILED'
+                stage,err=classify_failure(e); result=error_result(err,e)
                 try:
-                    self._stage(r,stage,{'error':err}); self._send(r['id'],r['op'],stage,{'error':err},link=link)
+                    self._stage(r,stage,result); self._send(r['id'],r['op'],stage,result,link=link)
                 except Exception: pass
             finally:
                 with self.lock: self.busy=False; self.active_id=None

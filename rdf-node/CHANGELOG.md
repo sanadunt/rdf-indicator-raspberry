@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Readable command errors (planned release 1.5.0). Every `REJECTED`, `FAILED`, and
+  `OUTCOME_UNKNOWN` result now carries `message` (Indonesian operator text) and, when there is a
+  technical cause, `detail` (at most 200 characters) next to the unchanged `error` code. Raw
+  exception names are gone:
+  - Helper socket missing: was `OUTCOME_UNKNOWN OSERROR`, now `HELPER_UNAVAILABLE`, `FAILED`
+    (nothing was sent, so nothing ran). `HELPER_ACCESS_DENIED` covers a socket the agent may not
+    open.
+  - Timeout or socket loss after the request was sent: `HELPER_TIMEOUT` and
+    `HELPER_CONNECTION_LOST`, still `OUTCOME_UNKNOWN`.
+  - An unexpected exception inside the helper: `HELPER_INTERNAL_ERROR` with the cause in `detail`.
+  - In the agent: `INVALID_COMMAND_FIELD`, `JOURNAL_UNAVAILABLE`, or `INTERNAL_ERROR` instead of
+    `JOURNAL_OR_REQUEST_ERROR`.
+- Mutations that need the root helper (`config.patch`, `processing.set`, `service.restart`,
+  `ppp.restart`, reboot and shutdown) are rejected `HELPER_UNAVAILABLE` before they are journaled
+  when the helper does not answer a status probe. Before this, Ground learned this only after the
+  command was queued and failed.
+- The Edge panel labels the new codes and falls back to the Edge `message` for codes it does not
+  know. The Ground preview shows the `message` next to the code. Ground Console 3.0.0 drops
+  `message` and `detail` (its ACK allowlist) but already shows the clearer `error` code.
+
 - Labelled DoA (planned release 1.4.0). `telemetry/doa` is no longer withheld when a gate fails:
   every new DoA sample (new `q` with a parsed timestamp and angle) is published once with
   `ok: 0` when the source is stale, DAQ is not healthy, the clock is not verified, or a
