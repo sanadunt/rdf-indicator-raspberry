@@ -19,11 +19,13 @@ from .mqtt import Client
 from .mqtt_ws import validate_mqtt_host,validate_websocket_path
 from .codec import FLAG_PARSED, FLAG_FRESH, FLAG_DAQ, FLAG_CONVENTION, FLAG_CONFIG, FLAG_AUTHORITY
 UNVERIFIED_REASONS=frozenset(('SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'))
-# Cost-byte/s reserves based on current Control fixtures; invalid-source reserve omits normal DoA.
+# Cost-byte/s reserves based on current Control fixtures. The DoA reserve applies while the source still
+# makes new DoA samples (valid or labelled); the smaller one once it has gone stale.
 ANGULAR_CONTROL_BASELINE_VALID=800
 ANGULAR_CONTROL_BASELINE_INVALID=510
 # Bulk yields the shared PPP link while a Control PUBACK is this late or this many Bulk bytes are unACKed.
 BULK_YIELD_PENDING_MS=1000
+DIAGNOSTIC_ANGULAR_MIN_GAP_S=6
 BULK_YIELD_BACKLOG_BYTES=2048
 
 class Agent:
@@ -40,7 +42,7 @@ class Agent:
         self.settings_request_id=None; self.settings_request_payload=None
         self.stop_event=threading.Event(); self.events=queue.Queue(32)
         self.bulk_resume_after=time.monotonic()+cfg['telemetry']['resume_stable_seconds']
-        self.hq=0; self.last_doa_q=0; self.last_angular_q=0
+        self.hq=0; self.last_doa_q=0; self.last_angular_q=0; self.publish_errors={}
         self.diagnostic_q=0; self.diagnostic_angular_q=0
         self.angular_abort=0; self.bulk_reason='BOOTSTRAP'; self.helper_status={}
         self.clients={}; self._generation=-1; self.last_config_rev=None; self.last_sent_state=None
@@ -492,7 +494,8 @@ class Agent:
                       'ppp_service':{k:v for k,v in (host.get('ppp_service') or {}).items() if k!='since'} or None,
                       'ppp_recovery':self._ppp_recovery_view(),
                       'tx_kbit_s':host['tx_kbit_s'],'rx_kbit_s':host['rx_kbit_s'],
-                      'traffic_layer':'PPP_IP_COUNTERS','profile':self.profile,'bulk_pause':self.bulk_reason,'angular_aborted':self.angular_abort},
+                      'traffic_layer':'PPP_IP_COUNTERS','profile':self.profile,'bulk_pause':self.bulk_reason,'angular_aborted':self.angular_abort,
+                      'publish_errors':dict(self.publish_errors)},
               'config':self.config_view(),'capabilities':self.capabilities(),
               'last_operation':self.commands.public(latest[0]) if latest else None,
               'last_remote_operation':self.commands.public(remote[0]) if remote else None,
@@ -671,6 +674,25 @@ class Agent:
         return {'v':2,'sid':self.sid,'boot':self.boot,'instance':self.instance,'t':now_ms(),
                 'run':s.get('processing',{}).get('observed','UNKNOWN'),'daq':s.get('daq',{}).get('healthy',False),
                 'cfg':self.source.revision,'profile':self.profile,'clock':s.get('host',{}).get('clock_state','UNTRUSTED')}
+    def _publish_failed(self,topic,error):
+        # One topic failing (an unexpected value from the source, say) must not stop the others.
+        self.publish_errors[topic]=type(error).__name__.upper()
+    def _publish_ok(self,topic):
+        self.publish_errors.pop(topic,None)
+    def _doa_payload(self,d,h):
+        if d['source_timestamp_ms'] is None or d['raw_doa_deg'] is None: return None
+        payload={'v':2,'sid':self.sid,'q':d['q'],'t':d['source_timestamp_ms'],'f':d['frequency_hz'],
+                 'a':round(d['relative_doa_deg'] if d['valid'] else d['raw_doa_deg'],2),
+                 'c':round(d['confidence_native_db'],2),'p':round(d['power_native_db'],2),'rev':d['revision'],
+                 'ok':1 if d['valid'] else 0,'clk':1 if h['clock_trusted'] else 0,'age':d['source_age_ms'],
+                 'reason':list(d['reasons'])}
+        if not d['valid']:
+            payload.update(trust='UNVERIFIED',angle_reference='RAW')
+            # Receivers written for the earlier contract read the approval-only case from validation_reasons;
+            # every other case carries the list once, in reason (T900 budget).
+            if all(reason in UNVERIFIED_REASONS for reason in d['reasons']):
+                payload['validation_reasons']=list(d['reasons'])
+        return payload
     def _angular_flags(self,d,r,h,daq):
         flags=FLAG_PARSED
         if (h['clock_trusted'] and d['source_age_ms'] is not None and
@@ -737,70 +759,84 @@ class Agent:
                 d=s['detection']; h=s['host']; daq=s['daq']; run=s['processing']['observed']
                 unverified_only=(not d['valid'] and bool(d['reasons']) and
                                  all(reason in UNVERIFIED_REASONS for reason in d['reasons']))
-                if tick('health',1):
-                    self.hq+=1
-                    payload={'v':2,'sid':self.sid,'q':self.hq,'t':now_ms(),
-                             'run':{'STOPPED':0,'RUNNING':1,'STARTING':2,'STOPPING':3,'ERROR':4}.get(run,255),
-                             'daq':1 if daq['healthy'] else 2 if daq['state']=='UNKNOWN' else 0,
-                             'drop':daq['dropped_frames'],'age':d['source_age_ms'],'temp':h['temperature_c'],
-                             'clk':1 if h['clock_trusted'] else 0,'rev':self.source.revision}
-                    self._offer('health','telemetry/health',payload,expiry=5,priority=1,links=ready)
-                if tick('detail',10):
-                    self._offer('detail','telemetry/health/detail',{'v':2,'sid':self.sid,'t':now_ms(),
-                        'usb':h['usb_count'],'sync':list(daq['sync'].values()),'cpu':h['cpu_percent'],'mem':h['memory_percent'],
-                        'disk_free':h['disk_free_percent'],'throt':h['throttled'],'uv':h['undervoltage'],
-                        'tx':h['tx_kbit_s'],'rx':h['rx_kbit_s'],'adrop':self.angular_abort,'parse':self.source.parse_errors,
-                        'ppp':h.get('ppp'),'peer':h.get('ppp_probe'),
-                        'ppp_svc':(h.get('ppp_service') or {}).get('state'),'ppp_restarts':(h.get('ppp_service') or {}).get('restarts')},
-                        expiry=15,priority=4,links=ready)
-                state=self._state(s); state_changed=(state['run'],state['daq'],state['cfg'],state['profile'],state['clock'])
+                try:
+                    if tick('health',1):
+                        self.hq+=1
+                        payload={'v':2,'sid':self.sid,'q':self.hq,'t':now_ms(),
+                                 'run':{'STOPPED':0,'RUNNING':1,'STARTING':2,'STOPPING':3,'ERROR':4}.get(run,255),
+                                 'daq':1 if daq['healthy'] else 2 if daq['state']=='UNKNOWN' else 0,
+                                 'drop':daq['dropped_frames'],'age':d['source_age_ms'],'temp':h['temperature_c'],
+                                 'clk':1 if h['clock_trusted'] else 0,'rev':self.source.revision,
+                                 # Why DoA is not live (empty when it is): Ground can tell an empty DOA file
+                                 # (EMPTY_CSV) from one that stopped changing (DOA_FILE_NOT_UPDATING).
+                                 'why':list(d['reasons'])}
+                        self._offer('health','telemetry/health',payload,expiry=5,priority=1,links=ready)
+                except Exception as e: self._publish_failed('telemetry/health',e)
+                else: self._publish_ok('telemetry/health')
+                try:
+                    if tick('detail',10):
+                        self._offer('detail','telemetry/health/detail',{'v':2,'sid':self.sid,'t':now_ms(),
+                            'usb':h['usb_count'],'sync':list(daq['sync'].values()),'cpu':h['cpu_percent'],'mem':h['memory_percent'],
+                            'disk_free':h['disk_free_percent'],'throt':h['throttled'],'uv':h['undervoltage'],
+                            'tx':h['tx_kbit_s'],'rx':h['rx_kbit_s'],'adrop':self.angular_abort,'parse':self.source.parse_errors,
+                            'ppp':h.get('ppp'),'peer':h.get('ppp_probe'),
+                            'ppp_svc':(h.get('ppp_service') or {}).get('state'),'ppp_restarts':(h.get('ppp_service') or {}).get('restarts'),
+                            'perr':sorted(self.publish_errors)},
+                            expiry=15,priority=4,links=ready)
+                except Exception as e: self._publish_failed('telemetry/health/detail',e)
+                else: self._publish_ok('telemetry/health/detail')
                 state_sent=False
-                if (state_changed!=self.last_sent_state and now-due.get('state_event_last',-10)>1) or now>=due.get('state',0):
-                    if self._offer('state','state',state,1,True,priority=1,links=ready):
-                        due['state']=now+60; due['state_event_last']=now; self.last_sent_state=state_changed
-                        state_sent='backup' in ready
-                if backup_hello and not state_sent:
-                    self._offer('state','state',state,1,True,priority=1,links=('backup',))
-                with self.settings_request_lock:
-                    # A report for a session that dropped can never be delivered; free the shared slot so the
-                    # link that is still up can ask. (Primary-only deployments never reach this while down.)
-                    if self.settings_request_id and (self.settings_request_link or 'primary') not in ready:
-                        self.settings_request_id=None; self.settings_request_payload=None
-                    settings_id=self.settings_request_id; settings_payload=self.settings_request_payload
-                    settings_link=self.settings_request_link or 'primary'
-                # Raw settings only travel over TLS, and only back to the link that asked for them.
-                if settings_id and settings_payload is not None and settings_link in ready and self.settings_report_allowed(settings_link):
-                    if self._offer('settings:'+settings_id,'settings/reported',settings_payload,
-                                   1,False,expiry=30,priority=3,links=(settings_link,)):
-                        with self.settings_request_lock:
-                            if self.settings_request_id==settings_id:
-                                self.settings_request_id=None; self.settings_request_payload=None
-                if tick('doa',PROFILES[self.profile]['doa_s']) and d['q']!=self.last_doa_q:
-                    if d['valid']:
-                        payload={'v':2,'sid':self.sid,'q':d['q'],'t':d['source_timestamp_ms'],'f':d['frequency_hz'],
-                                 'a':round(d['relative_doa_deg'],2),'c':round(d['confidence_native_db'],2),
-                                 'p':round(d['power_native_db'],2),'rev':d['revision'],'ok':1}
-                    elif unverified_only:
-                        payload={'v':2,'sid':self.sid,'q':d['q'],'t':d['source_timestamp_ms'],'f':d['frequency_hz'],
-                                 'a':round(d['raw_doa_deg'],2),'c':round(d['confidence_native_db'],2),
-                                 'p':round(d['power_native_db'],2),'rev':d['revision'],'ok':0,
-                                 'trust':'UNVERIFIED','angle_reference':'RAW',
-                                 'validation_reasons':list(d['reasons'])}
-                    else:
-                        payload=None
-                    if payload is not None and self._offer('doa','telemetry/doa',payload,expiry=3,links=ready):
-                        self.last_doa_q=d['q']
-                diag=s['diagnostic_doa']
-                if diag['available'] and tick('diagnostic',3):
-                    self.diagnostic_q+=1
-                    if self.diagnostic_q>0xffffffff: raise RuntimeError('DIAGNOSTIC_SEQUENCE_EXHAUSTED_RESTART_AGENT')
-                    payload={'v':2,'sid':self.sid,'q':self.diagnostic_q,'source':'doa.xml',
-                             'source_timestamp_ms':diag['source_timestamp_ms'],
-                             'observed_timestamp_ms':diag['observed_timestamp_ms'],
-                             'raw_doa_deg':round(diag['raw_doa_deg'],2),
-                             'frequency_mhz':round(diag['frequency_mhz'],6),
-                             'trust':'UNVERIFIED','validation_reasons':diag['validation_reasons']}
-                    self._offer('diagnostic-doa','telemetry/diagnostic/doa',payload,expiry=3,priority=3,links=ready)
+                try:
+                    state=self._state(s); state_changed=(state['run'],state['daq'],state['cfg'],state['profile'],state['clock'])
+                    if (state_changed!=self.last_sent_state and now-due.get('state_event_last',-10)>1) or now>=due.get('state',0):
+                        if self._offer('state','state',state,1,True,priority=1,links=ready):
+                            due['state']=now+60; due['state_event_last']=now; self.last_sent_state=state_changed
+                            state_sent='backup' in ready
+                    if backup_hello and not state_sent:
+                        self._offer('state','state',state,1,True,priority=1,links=('backup',))
+                except Exception as e: self._publish_failed('state',e)
+                else: self._publish_ok('state')
+                try:
+                    with self.settings_request_lock:
+                        # A report for a session that dropped can never be delivered; free the shared slot so the
+                        # link that is still up can ask. (Primary-only deployments never reach this while down.)
+                        if self.settings_request_id and (self.settings_request_link or 'primary') not in ready:
+                            self.settings_request_id=None; self.settings_request_payload=None
+                        settings_id=self.settings_request_id; settings_payload=self.settings_request_payload
+                        settings_link=self.settings_request_link or 'primary'
+                    # Raw settings go only back to the link that asked, and only where that link allows them.
+                    if settings_id and settings_payload is not None and settings_link in ready and self.settings_report_allowed(settings_link):
+                        if self._offer('settings:'+settings_id,'settings/reported',settings_payload,
+                                       1,False,expiry=30,priority=3,links=(settings_link,)):
+                            with self.settings_request_lock:
+                                if self.settings_request_id==settings_id:
+                                    self.settings_request_id=None; self.settings_request_payload=None
+                except Exception as e: self._publish_failed('settings/reported',e)
+                else: self._publish_ok('settings/reported')
+                try:
+                    if tick('doa',PROFILES[self.profile]['doa_s']) and d['q'] and d['q']!=self.last_doa_q:
+                        # Every new sample goes out, labelled; the receiver decides how to show it. A sample is
+                        # not resent while the source has nothing new: health.why then says why.
+                        payload=self._doa_payload(d,h)
+                        if payload is not None and self._offer('doa','telemetry/doa',payload,expiry=3,links=ready):
+                            self.last_doa_q=d['q']
+                except Exception as e: self._publish_failed('telemetry/doa',e)
+                else: self._publish_ok('telemetry/doa')
+                try:
+                    diag=s['diagnostic_doa']
+                    if diag['available'] and tick('diagnostic',3):
+                        self.diagnostic_q+=1
+                        if self.diagnostic_q>0xffffffff: raise RuntimeError('DIAGNOSTIC_SEQUENCE_EXHAUSTED_RESTART_AGENT')
+                        payload={'v':2,'sid':self.sid,'q':self.diagnostic_q,'source':'doa.xml',
+                                 'source_timestamp_ms':diag['source_timestamp_ms'],
+                                 'observed_timestamp_ms':diag['observed_timestamp_ms'],
+                                 'raw_doa_deg':round(diag['raw_doa_deg'],2),
+                                 'frequency_mhz':round(diag['frequency_mhz'],6),
+                                 'trust':'UNVERIFIED','validation_reasons':diag['validation_reasons']}
+                        # Small and short-lived: it goes ahead of the ~3 KB diagnostic Angular frame (priority 3).
+                        self._offer('diagnostic-doa','telemetry/diagnostic/doa',payload,expiry=3,priority=2,links=ready)
+                except Exception as e: self._publish_failed('telemetry/diagnostic/doa',e)
+                else: self._publish_ok('telemetry/diagnostic/doa')
                 # Source-level reasons stop angular on every link; the rest are T900-link specific.
                 source_reason=None
                 if self.profile=='control': source_reason='PROFILE_CONTROL'
@@ -809,81 +845,103 @@ class Agent:
                 r=self.source.record
                 diagnostic_period=6 if not d['valid'] else 30
                 diagnostic_schedule='diagnostic-angular-invalid' if not d['valid'] else 'diagnostic-angular-blocked'
-                if p_ready:
-                    reason=source_reason
-                    if reason is None and (not bulk or not bulk.ready): reason='BULK_NOT_READY'
-                    elif reason is None and (getattr(ctrl,'queue_age_ms',0)>3000 or ctrl.pending_age_ms>2500):
-                        reason='CONTROL_BACKLOG'
-                    diagnostic_needed=reason is not None or now<self.bulk_resume_after
-                    if (self.profile!='control' and diagnostic_needed and r and r['q']==d['q'] and
-                            tick(diagnostic_schedule,diagnostic_period)):
-                        data=self._diagnostic_angular(d,r,h,daq)
-                        control_baseline=(ANGULAR_CONTROL_BASELINE_VALID
-                            if d['valid'] or unverified_only else ANGULAR_CONTROL_BASELINE_INVALID)
-                        control_available=max(1,self.cfg['telemetry']['control_budget_bytes_s']-control_baseline)
-                        period=max(diagnostic_period,
-                            (len(data)+len(self.prefix+'/telemetry/diagnostic/angular')+160)/
-                            control_available)
-                        due[diagnostic_schedule]=now+period
-                        self._offer('diagnostic-angular','telemetry/diagnostic/angular',data,
-                                    expiry=3,priority=3,links=('primary',))
-                    if self.profile=='control' or not diagnostic_needed:
-                        ctrl.outbox.discard('diagnostic-angular','DIAGNOSTIC_NOT_NEEDED')
-                    if reason:
-                        if bulk: bulk.outbox.clear('BULK_PAUSED_'+reason)
-                        self.bulk_reason=reason
-                        self.bulk_resume_after=now+self.cfg['telemetry']['resume_stable_seconds']
-                    elif now<self.bulk_resume_after:
-                        self.bulk_reason='WAIT_STABLE'
-                    else:
-                        self.bulk_reason=None
-                        interval=PROFILES[self.profile]['angular_s']
-                        # Control goes first on the shared link: hold the next frame while a Control PUBACK
-                        # is late or the previous Bulk frame is still unACKed in the kernel (no 20 s pause).
-                        backlog=getattr(bulk,'socket_backlog',None)
-                        yield_link=(ctrl.pending_age_ms>BULK_YIELD_PENDING_MS or
-                                    (backlog is not None and backlog>BULK_YIELD_BACKLOG_BYTES))
-                        if not yield_link and now>=due.get('angular',0) and d['q']!=self.last_angular_q:
+                try:
+                    if p_ready:
+                        reason=source_reason
+                        if reason is None and (not bulk or not bulk.ready): reason='BULK_NOT_READY'
+                        elif reason is None and (getattr(ctrl,'queue_age_ms',0)>3000 or ctrl.pending_age_ms>2500):
+                            reason='CONTROL_BACKLOG'
+                        diagnostic_needed=reason is not None or now<self.bulk_resume_after
+                        # A source that just became valid while Bulk still waits must not put a second ~3 KB
+                        # frame right behind the invalid one on the T900 Control link. A source that just
+                        # became invalid (SDR stopped, say) is shown at once.
+                        spaced=(diagnostic_schedule!='diagnostic-angular-blocked' or
+                                now-due.get('diagnostic-angular-sent',-1e9)>=DIAGNOSTIC_ANGULAR_MIN_GAP_S)
+                        # A frame that expired in the outbox never used the link: offer a current one next
+                        # instead of waiting a whole budget period (startup burst, a busy Control queue).
+                        delivery=self.mqtt_topic_delivery.get('telemetry/diagnostic/angular',{})
+                        if (delivery.get('error')=='OUTBOX_EXPIRED' and
+                                delivery.get('updated_ms')!=due.get('diagnostic-angular-expired')):
+                            due['diagnostic-angular-expired']=delivery.get('updated_ms')
+                            due[diagnostic_schedule]=0
+                        if (self.profile!='control' and diagnostic_needed and r and r['q']==d['q'] and spaced and
+                                tick(diagnostic_schedule,diagnostic_period)):
+                            due['diagnostic-angular-sent']=now
+                            data=self._diagnostic_angular(d,r,h,daq)
+                            # Labelled DoA only costs Control budget while the source still makes new samples.
+                            doa_flowing=(d['q'] and d['source_age_ms'] is not None and
+                                         d['source_age_ms']<=self.cfg['freshness']['doa_ms'])
+                            control_baseline=(ANGULAR_CONTROL_BASELINE_VALID if doa_flowing
+                                else ANGULAR_CONTROL_BASELINE_INVALID)
+                            control_available=max(1,self.cfg['telemetry']['control_budget_bytes_s']-control_baseline)
+                            period=max(diagnostic_period,
+                                (len(data)+len(self.prefix+'/telemetry/diagnostic/angular')+160)/
+                                control_available)
+                            due[diagnostic_schedule]=now+period
+                            self._offer('diagnostic-angular','telemetry/diagnostic/angular',data,
+                                        expiry=3,priority=3,links=('primary',))
+                        if self.profile=='control' or not diagnostic_needed:
+                            ctrl.outbox.discard('diagnostic-angular','DIAGNOSTIC_NOT_NEEDED')
+                        if reason:
+                            if bulk: bulk.outbox.clear('BULK_PAUSED_'+reason)
+                            self.bulk_reason=reason
+                            self.bulk_resume_after=now+self.cfg['telemetry']['resume_stable_seconds']
+                        elif now<self.bulk_resume_after:
+                            self.bulk_reason='WAIT_STABLE'
+                        else:
+                            self.bulk_reason=None
+                            interval=PROFILES[self.profile]['angular_s']
+                            # Control goes first on the shared link: hold the next frame while a Control PUBACK
+                            # is late or the previous Bulk frame is still unACKed in the kernel (no 20 s pause).
+                            backlog=getattr(bulk,'socket_backlog',None)
+                            yield_link=(ctrl.pending_age_ms>BULK_YIELD_PENDING_MS or
+                                        (backlog is not None and backlog>BULK_YIELD_BACKLOG_BYTES))
+                            if not yield_link and now>=due.get('angular',0) and d['q']!=self.last_angular_q:
+                                r=self.source.record
+                                if r and r['q']==d['q']:
+                                    data=self._live_angular(d,r,h,daq)
+                                    period=max(interval,
+                                        (len(data)+len(self.prefix+'/telemetry/angular')+160)/
+                                        self.cfg['telemetry']['bulk_budget_bytes_s'])
+                                    if self._offer('angular','telemetry/angular',data,expiry=3,
+                                                   priority=3,bulk=True,links=('primary',)):
+                                        self.last_angular_q=r['q']
+                                    else:
+                                        self.angular_abort+=1
+                                    due['angular']=now+period
+                except Exception as e: self._publish_failed('telemetry/angular:primary',e)
+                else: self._publish_ok('telemetry/angular:primary')
+                try:
+                    if b_ready:
+                        budget=self.cfg['mqtt']['backup']['budget_bytes_s']
+                        b_schedule=diagnostic_schedule+':backup'
+                        if (self.profile!='control' and source_reason is not None and r and r['q']==d['q'] and
+                                tick(b_schedule,diagnostic_period)):
+                            data=self._diagnostic_angular(d,r,h,daq)
+                            due[b_schedule]=now+max(diagnostic_period,
+                                (len(data)+len(self.prefix+'/telemetry/diagnostic/angular')+160)/budget)
+                            self._offer('diagnostic-angular','telemetry/diagnostic/angular',data,
+                                        expiry=3,priority=3,links=('backup',))
+                        if self.profile=='control' or source_reason is None:
+                            bk.outbox.discard('diagnostic-angular','DIAGNOSTIC_NOT_NEEDED')
+                        if source_reason:
+                            bk.outbox.discard('angular','BULK_PAUSED_'+source_reason)
+                            self.backup_bulk_reason=source_reason
+                        else:
+                            self.backup_bulk_reason=None
                             r=self.source.record
-                            if r and r['q']==d['q']:
+                            if now>=due.get('angular:backup',0) and r and r['q']==d['q'] and r['q']!=self.backup_last_angular_q:
                                 data=self._live_angular(d,r,h,daq)
-                                period=max(interval,
-                                    (len(data)+len(self.prefix+'/telemetry/angular')+160)/
-                                    self.cfg['telemetry']['bulk_budget_bytes_s'])
-                                if self._offer('angular','telemetry/angular',data,expiry=3,
-                                               priority=3,bulk=True,links=('primary',)):
-                                    self.last_angular_q=r['q']
+                                period=max(PROFILES[self.profile]['angular_s'],
+                                    (len(data)+len(self.prefix+'/telemetry/angular')+160)/budget)
+                                if self._offer('angular','telemetry/angular',data,expiry=3,priority=3,
+                                               bulk=True,links=('backup',)):
+                                    self.backup_last_angular_q=r['q']
                                 else:
-                                    self.angular_abort+=1
-                                due['angular']=now+period
-                if b_ready:
-                    budget=self.cfg['mqtt']['backup']['budget_bytes_s']
-                    b_schedule=diagnostic_schedule+':backup'
-                    if (self.profile!='control' and source_reason is not None and r and r['q']==d['q'] and
-                            tick(b_schedule,diagnostic_period)):
-                        data=self._diagnostic_angular(d,r,h,daq)
-                        due[b_schedule]=now+max(diagnostic_period,
-                            (len(data)+len(self.prefix+'/telemetry/diagnostic/angular')+160)/budget)
-                        self._offer('diagnostic-angular','telemetry/diagnostic/angular',data,
-                                    expiry=3,priority=3,links=('backup',))
-                    if self.profile=='control' or source_reason is None:
-                        bk.outbox.discard('diagnostic-angular','DIAGNOSTIC_NOT_NEEDED')
-                    if source_reason:
-                        bk.outbox.discard('angular','BULK_PAUSED_'+source_reason)
-                        self.backup_bulk_reason=source_reason
-                    else:
-                        self.backup_bulk_reason=None
-                        r=self.source.record
-                        if now>=due.get('angular:backup',0) and r and r['q']==d['q'] and r['q']!=self.backup_last_angular_q:
-                            data=self._live_angular(d,r,h,daq)
-                            period=max(PROFILES[self.profile]['angular_s'],
-                                (len(data)+len(self.prefix+'/telemetry/angular')+160)/budget)
-                            if self._offer('angular','telemetry/angular',data,expiry=3,priority=3,
-                                           bulk=True,links=('backup',)):
-                                self.backup_last_angular_q=r['q']
-                            else:
-                                self.backup_angular_abort+=1
-                            due['angular:backup']=now+period
+                                    self.backup_angular_abort+=1
+                                due['angular:backup']=now+period
+                except Exception as e: self._publish_failed('telemetry/angular:backup',e)
+                else: self._publish_ok('telemetry/angular:backup')
             except Exception as e:
                 self.bulk_reason='SCHEDULER_'+type(e).__name__.upper()
             self.stop_event.wait(.05)

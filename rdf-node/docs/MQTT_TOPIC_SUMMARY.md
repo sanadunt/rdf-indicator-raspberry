@@ -70,10 +70,10 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 
 | Topic suffix | Arah | Kanal | QoS | Retained | Interval / expiry | Isi |
 |---|---|---|---:|---|---|---|
-| `telemetry/doa` | Edge -> Ground | Control | 0 | Tidak | Maks. 1/s; valid atau UNVERIFIED bila hanya approval lokal yang absen; expiry 3 s | DoA, frekuensi, confidence, power, revision; `ok=0` menandai sudut raw dan alasan. |
+| `telemetry/doa` | Edge -> Ground | Control | 0 | Tidak | Maks. 1/s; setiap sampel baru, valid (`ok=1`) atau berlabel (`ok=0`); expiry 3 s | DoA, frekuensi, confidence, power, revision, `clk`, `age`, dan `reason`; `ok=0` menandai sudut raw. |
 | `telemetry/diagnostic/doa` | Edge -> Ground | Control | 0 | Tidak | Setiap 3 s selama `doa.xml` tersedia; expiry 3 s | Sudut raw `doa.xml`, timestamp sumber/observasi, frekuensi MHz, status `UNVERIFIED` dan validation reasons. Diulang meski sampel tidak berubah, terlepas dari gate DoA normal. |
 | `telemetry/diagnostic/angular` | Edge -> Ground | Control | 0 | Tidak | Minimum 6 s saat gate integritas source gagal; minimum 30 s jika source eligible tetapi Bulk terblokir/menunggu stabilisasi; ukuran JSON dan headroom Control dapat memperpanjang interval; tidak diduplikasi ketika Angular normal mengalir; profile `control` menahan array. Expiry 3 s | Satu object JSON dengan 360 values dan source timestamp; Ground menyimpan terpisah sebagai `UNVERIFIED`, tanpa mengubah telemetry normal. |
-| `telemetry/health` | Edge -> Ground | Control | 0 | Tidak | Tiap 1 s; expiry 5 s | Status run, DAQ, clock, umur sumber, temperatur, dropped frames. |
+| `telemetry/health` | Edge -> Ground | Control | 0 | Tidak | Tiap 1 s; expiry 5 s | Status run, DAQ, clock, umur sumber, temperatur, dropped frames, dan `why` (alasan DoA belum LIVE). |
 | `telemetry/health/detail` | Edge -> Ground | Control | 0 | Tidak | Tiap 10 s; expiry 15 s | Detail host, USB, sync DAQ, trafik, parse dan abort counter, serta status link PPP (interface, ping peer, unit `t900-ppp.service`, restart count). |
 | `telemetry/angular` | Edge -> Ground | Bulk | 0 | Tidak | Profile-dependent; expiry 3 s | Frame 360 sampel; flags `63` untuk LIVE atau trust-only partial untuk UNVERIFIED. |
 | `state` | Edge -> Ground | Control | 1 | Ya | Saat state berubah dan paling lambat tiap 60 s | Status run/DAQ, profile, clock dan identitas boot. Jangan dipakai sebagai heartbeat. |
@@ -98,10 +98,10 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 
 | Topic | Yang dilakukan Ground |
 |---|---|
-| `telemetry/doa` | `ok=1`: validasi session, sequence, timestamp, nilai sampel dan health fresh sebelum detection; `rev` tetap metadata, bukan equality gate. `ok=0`: pertahankan gate raw diagnostic UNVERIFIED. |
+| `telemetry/doa` | `ok=1`: validasi session, sequence, timestamp, nilai sampel dan health fresh sebelum detection; `rev` tetap metadata, bukan equality gate. `ok=0`: tampilkan sebagai data berlabel (UNVERIFIED/basi/jam tidak sinkron) menurut `reason`, `clk`, dan `age`; jangan dibuang dan jangan dijadikan detection LIVE. |
 | `telemetry/diagnostic/doa` | Tampilkan XML terpisah sebagai diagnostik UNVERIFIED dengan timestamp dan reasons; jangan gabungkan ke detection atau keputusan kontrol. |
 | `telemetry/diagnostic/angular` | Simpan frame lengkap terbaru terpisah sebagai UNVERIFIED; expose lewat `GET /api/v2/angular/diagnostic/latest`; jangan gabungkan ke `telemetry/angular`, DoA, detection atau keputusan kontrol. |
-| `telemetry/health` | Gunakan sebagai sumber utama freshness dan status DAQ; pisahkan MQTT tersambung dari `daq=1`. |
+| `telemetry/health` | Gunakan sebagai sumber utama freshness dan status DAQ; pisahkan MQTT tersambung dari `daq=1`. Tampilkan `why` saat DoA tidak LIVE atau tidak datang. |
 | `telemetry/health/detail` | Pakai untuk diagnosis host, USB, sync, trafik, error, dan link PPP; jangan jadikan pengganti gate health. Di broker cadangan, field PPP menunjukkan keadaan link utama saat Ground utama tidak terjangkau. |
 | `telemetry/angular` | Parse satu object JSON per message, lalu pastikan ada tepat 360 values. `flags=63` memenuhi gate bukti LIVE; `revision` tetap metadata dan tidak dibandingkan dengan `state.cfg`. |
 | `state` | Bootstrap identitas boot/sesi dan profile; saat `sid` berubah, buang cache telemetry sesi lama. Retained state bukan heartbeat. |
@@ -166,14 +166,14 @@ Ukuran fixture bukan ukuran maksimum; digit metadata dan nilai source dapat meng
 
 | Topic / profile | Interval saat syarat lolos | Payload contoh | MQTT PUBLISH |
 |---|---|---:|---:|
-| `telemetry/doa` | Maks. 1/s; verified atau UNVERIFIED untuk trust-only blockers | 109 B verified | 147 B verified |
+| `telemetry/doa` | Maks. 1/s, setiap sampel baru (valid atau berlabel) | 139 B verified; 201 B berlabel (1 alasan); 283 B approval-only | 177 B verified; 239 B; 321 B |
 | `telemetry/diagnostic/doa` | Setiap 3 s selama XML tersedia; heartbeat mengulang sampel yang sama | 303 B | 352 B |
-| `telemetry/health` | 1/s | 113 B | 154 B |
-| `telemetry/health/detail` | 1/10 s | 241 B | 289 B |
+| `telemetry/health` | 1/s | 122 B (`why` kosong) | 163 B |
+| `telemetry/health/detail` | 1/10 s | 251 B | 299 B |
 | `telemetry/angular` (`balanced`) | Minimum 4 s; contoh JSON dipace sekitar 8.96 s pada Bulk 350 B/s | 2,946 B | 2,988 B |
 | `telemetry/angular` (`graph_u8`) | Minimum 2 s; format JSON dan pace sama dengan `balanced` | 2,946 B | 2,988 B |
 | `telemetry/angular` (`control`) | Tidak dipublish | — | — |
-| `telemetry/diagnostic/angular` (`balanced`, `graph_u8`) | Minimum 6 s saat source invalid, 30 s saat valid-source Bulk blocked; contoh dipace sekitar 9.26 s atau 62.96 s pada Control 850 B/s | 2,946 B | 2,999 B |
+| `telemetry/diagnostic/angular` (`balanced`, `graph_u8`) | Minimum 6 s saat source invalid, 30 s saat valid-source Bulk blocked, dan tidak pernah dua frame berjarak < 6 s saat source baru menjadi valid; contoh dipace sekitar 9.26 s setelah source basi, atau 62.96 s selama source masih menghasilkan sampel DoA baru (valid atau berlabel), pada Control 850 B/s | 2,946 B | 2,999 B |
 | `telemetry/diagnostic/angular` (`control`) | Tidak dipublish | — | — |
 
 Frame Angular JSON dikirim utuh dalam satu PUBLISH. Interval normal memakai
@@ -234,13 +234,23 @@ State periodik tiap 60 s sudah masuk tabel. Pada `balanced` dan `graph_u8`, Bulk
 sekitar 349.2 cost-B/s dari budget 350 B/s. Control steady-state menggunakan sekitar 801.5
 cost-B/s dari budget 850 B/s; field PPP pada `telemetry/health/detail` menambah sekitar 6 B/s.
 Diagnostic Angular tidak berjalan saat normal Bulk mengirim.
-Saat source valid tetapi Bulk terblokir, scheduler menyisihkan sekitar 800 B/s untuk telemetri
-Control lain dan memace fixture diagnostic sekitar 62.96 s (49.9 cost-B/s). Saat source invalid,
-DoA normal berhenti; reserve 510 B/s menyisakan sekitar 340 B/s dan fixture diagnostic dipace
-sekitar 9.26 s (339.2 cost-B/s). Angka ini estimasi aplikasi, bukan hard cap link.
+Selama source masih menghasilkan sampel DoA baru (umur source ≤ `freshness.doa_ms`), valid maupun
+berlabel `ok=0`, scheduler menyisihkan sekitar 800 B/s untuk telemetri Control lain dan memace
+fixture diagnostic sekitar 62.96 s (49.9 cost-B/s). Setelah source basi (file kosong, berhenti
+berubah, atau belum ada), reserve 510 B/s menyisakan sekitar 340 B/s dan fixture diagnostic dipace
+sekitar 9.26 s (339.2 cost-B/s). Frame diagnostic yang kedaluwarsa di outbox sebelum terkirim
+(misalnya di belakang burst saat connect) tidak memakai link, jadi Edge menawarkan frame terbaru
+pada tick berikutnya, bukan menunggu satu periode budget; jarak minimum 6 s pada jadwal blocked
+tetap berlaku. Sampel
+berlabel memakai airtime yang dulu dipakai diagnostic Angular saat source invalid: DoA per detik
+lebih berguna daripada kurva tiap 9 s. `telemetry/diagnostic/doa` berprioritas sama dengan
+`telemetry/doa` (2), di depan frame diagnostic Angular (3), supaya pesan kecil ber-expiry 3 s tidak
+kedaluwarsa di belakang frame ~3 KB. Field baru `telemetry/doa` (`clk`, `age`, `reason`) dan
+`health.why` menambah sekitar 40–170 B/s cost Control tergantung keadaan; angka profile di atas
+diukur sebelum field itu ada. Angka ini estimasi aplikasi, bukan hard cap link.
 
-Health dan DoA normal dijadwalkan 1/s; DoA dapat memakai `ok=0` bila hanya trust approval belum
-ada. Detail 10 s, state 60 s, diagnostic DoA 3 s, capabilities saat koneksi berubah,
+Health dan DoA normal dijadwalkan 1/s; setiap sampel DoA baru dikirim satu kali, dengan `ok=0` dan
+`reason` bila ada gate yang gagal. Detail 10 s, state 60 s, diagnostic DoA 3 s, capabilities saat koneksi berubah,
 `settings/reported` hanya setelah `config.get`, command/ACK saat diminta atau ada progress.
 Angular normal tetap mengikuti eligibility source, client, backlog, token budget, dan stabilisasi;
 keberadaan Ground bukan gate publish. Bila hanya authority/angle approval yang hilang, Angular
@@ -254,16 +264,20 @@ Edge mengirim kandidat diagnostik dengan interval minimum 6 s (source invalid) a
 ### `telemetry/doa`
 
 ```json
-{"v":2,"sid":"7a8b9c0d","q":1245,"t":1790668800123,"f":433920000,"a":137.4,"c":8.27,"p":-54.2,"rev":7,"ok":1}
+{"v":2,"sid":"7a8b9c0d","q":1245,"t":1790668800123,"f":433920000,"a":137.4,"c":8.27,"p":-54.2,"rev":7,"ok":1,"clk":1,"age":280,"reason":[]}
 ```
 
-Varian unverified pada topic yang sama:
+Sampel berlabel pada topic yang sama (contoh: jam Edge belum tersinkron):
 
 ```json
-{"v":2,"sid":"7a8b9c0d","q":1246,"t":1790668800123,"f":433920000,"a":10.0,"c":8.27,"p":-54.2,"rev":7,"ok":0,"trust":"UNVERIFIED","angle_reference":"RAW","validation_reasons":["SOURCE_UNVERIFIED","ANGLE_UNVERIFIED"]}
+{"v":2,"sid":"7a8b9c0d","q":1246,"t":1790668800123,"f":433920000,"a":10.0,"c":8.27,"p":-54.2,"rev":7,"ok":0,"clk":0,"age":1840,"reason":["CLOCK_UNTRUSTED"],"trust":"UNVERIFIED","angle_reference":"RAW"}
 ```
 
-Hanya dikirim bila parsing, freshness/clock, DAQ, dan atribusi config lulus, sementara satu-satunya gate yang gagal adalah authority dan/atau verifikasi sudut. Untuk `ok=0`, `a` adalah raw source degree, bukan sudut relatif.
+Edge mengirim setiap sampel baru dari `DOA_value.html`, valid atau tidak. Sampel yang sama tidak
+dikirim ulang; bila source tidak punya sampel baru, alasannya ada di `health.why`. Untuk `ok=0`, `a`
+adalah raw source degree, bukan sudut relatif. Bila alasannya hanya `SOURCE_UNVERIFIED` dan/atau
+`ANGLE_UNVERIFIED`, payload juga membawa `validation_reasons` (nama lama, isi sama) untuk penerima
+lama. Kode alasan dan cara membacanya: [PROTOCOL.md](PROTOCOL.md#kode-alasan-doa-reason-healthwhy).
 
 | Field | Makna |
 |---|---|
@@ -273,11 +287,15 @@ Hanya dikirim bila parsing, freshness/clock, DAQ, dan atribusi config lulus, sem
 | `a` | `ok=1`: sudut relatif menurut konfigurasi angle, bukan otomatis true north. `ok=0`: raw source degree; tafsirkan RAW hanya dengan `angle_reference="RAW"`. |
 | `c` | Confidence/PAPR native dB, bukan probabilitas atau persen. |
 | `p` | Power native bertanda, bukan level absolut terkalibrasi. |
-| `rev` | Revision konfigurasi aman saat sampel dibaca. |
-| `ok` | `1` menandakan DoA lolos gate source Edge; `0` menandakan varian `trust=UNVERIFIED`. |
-| `trust`, `angle_reference`, `validation_reasons` | Wajib pada varian `ok=0`; metadata trust-only; reasons hanya `SOURCE_UNVERIFIED` dan/atau `ANGLE_UNVERIFIED`. |
+| `rev` | Revision konfigurasi aman saat sampel dibaca; `null` bila sampel belum teratribusi ke settings. |
+| `ok` | `1` menandakan DoA lolos semua gate source Edge; `0` menandakan sampel berlabel. |
+| `clk` | `1` jam Edge tersinkron, `0` tidak. |
+| `age` | Umur sampel di source (ms) saat dikirim. |
+| `reason` | Kode alasan sampel belum LIVE; kosong bila `ok=1`. |
+| `trust`, `angle_reference` | Ada pada `ok=0`: `UNVERIFIED` dan `RAW`. |
+| `validation_reasons` | Hanya pada `ok=0` yang alasannya authority/sudut saja; sama dengan `reason`. |
 
-Ground menerima `ok=1` sebagai detection hanya setelah session, sequence, timestamp, sample fields, dan health DAQ fresh lolos; `rev` tetap metadata dan tidak harus sama dengan `state.cfg`. `ok=0` dirutekan ke diagnostic DoA view dengan `trust=UNVERIFIED`; Ground tetap memeriksa revision, timestamp, health dan reasons yang diizinkan.
+Ground menerima `ok=1` sebagai detection hanya setelah session, sequence, timestamp, sample fields, dan health DAQ fresh lolos; `rev` tetap metadata dan tidak harus sama dengan `state.cfg`. `ok=0` ditampilkan dengan labelnya dan tidak pernah mengisi detection LIVE. Receiver `rdf-ground` bawaan paket ini masih hanya menerima `ok=0` dengan alasan authority/sudut; sampel berlabel lain dihitung `rejected` di sana.
 
 ### `telemetry/diagnostic/doa`
 
@@ -290,7 +308,7 @@ Ground menerima `ok=1` sebagai detection hanya setelah session, sequence, timest
 ### `telemetry/health`
 
 ```json
-{"v":2,"sid":"7a8b9c0d","q":86,"t":1790668800123,"run":1,"daq":1,"drop":12,"age":280,"temp":61.4,"clk":1,"rev":7}
+{"v":2,"sid":"7a8b9c0d","q":86,"t":1790668800123,"run":1,"daq":1,"drop":12,"age":280,"temp":61.4,"clk":1,"rev":7,"why":[]}
 ```
 
 | Field | Makna |
@@ -299,17 +317,18 @@ Ground menerima `ok=1` sebagai detection hanya setelah session, sequence, timest
 | `run` | `0` stopped, `1` running, `2` starting, `3` stopping, `4` error, `255` unknown. |
 | `daq` | `0` degraded, `1` healthy, `2` unknown. |
 | `drop` | Dropped-frame count dari status DAQ; dapat `null` bila tidak tersedia. |
-| `age` | Umur DoA pada source dalam ms, bukan end-to-end latency; dapat `null`. |
+| `age` | Umur sampel DoA terakhir yang berhasil dibaca dari source dalam ms, bukan end-to-end latency; dapat `null`. Selama `DOA_value.html` kosong atau rusak, sampel terakhir tetap dipakai sehingga `age` terus naik. |
 | `temp` | Temperatur host dalam derajat C; dapat `null`. |
 | `clk` | `0` clock tidak dipercaya, `1` tersinkronisasi. |
 | `rev` | Revision konfigurasi aman; dapat `null`. |
+| `why` | Kode alasan DoA belum LIVE (kosong bila LIVE), mis. `EMPTY_CSV` (file kosong tetapi masih ditulis) atau `DOA_FILE_NOT_UPDATING` (file berhenti ditulis). Daftar: [PROTOCOL.md](PROTOCOL.md#kode-alasan-doa-reason-healthwhy). |
 
 Ground memperlakukan health fresh sampai 8 s dan memerlukan `q` yang maju. Health tetap dipublish saat SDR berhenti; service aktif atau MQTT tersambung bukan bukti `daq=1`.
 
 ### `telemetry/health/detail`
 
 ```json
-{"v":2,"sid":"7a8b9c0d","t":1790668800000,"usb":2,"sync":[true,true,true],"cpu":22.1,"mem":41.7,"disk_free":83.2,"throt":false,"uv":false,"tx":12.34,"rx":8.21,"adrop":0,"parse":0,"ppp":"UP","peer":"REPLY","ppp_svc":"ACTIVE","ppp_restarts":0}
+{"v":2,"sid":"7a8b9c0d","t":1790668800000,"usb":2,"sync":[true,true,true],"cpu":22.1,"mem":41.7,"disk_free":83.2,"throt":false,"uv":false,"tx":12.34,"rx":8.21,"adrop":0,"parse":0,"ppp":"UP","peer":"REPLY","ppp_svc":"ACTIVE","ppp_restarts":0,"perr":[]}
 ```
 
 - `usb`: jumlah device USB yang terhitung, dapat `null`.
@@ -327,6 +346,8 @@ Ground memperlakukan health fresh sampai 8 s dan memerlukan `q` yang maju. Healt
   `ACTIVATING`, `DEACTIVATING`, `FAILED`, `INACTIVE`, ...), `NOT_LOADED`, atau `UNKNOWN`.
 - `ppp_restarts`: `NRestarts` systemd untuk unit itu (restart otomatis oleh `Restart=`), dapat
   `null` bila tidak terbaca.
+- `perr`: topic yang gagal disusun pada putaran publish terakhir, mis. `["telemetry/doa"]`; kosong
+  bila semua berhasil. Satu topic yang gagal tidak menghentikan topic lain.
 
 Empat field PPP bersifat aditif; Edge versi lama tidak mengirimnya, jadi consumer harus menerima
 field yang tidak ada. Detail juga dikirim ke broker cadangan, sehingga consumer di sana tetap dapat

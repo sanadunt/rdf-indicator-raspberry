@@ -126,6 +126,9 @@ class Source:
         self.parse_errors=0; self.frame_reset=False; self.drop_delta=None; self.last_drop=None
         self.diagnostic_record=None; self.diagnostic_signature=None; self.diagnostic_seen=None
         self.diagnostic_observed_ms=None; self.diagnostic_error=None
+        # When KrakenSDR last wrote DOA_value.html, whatever it wrote: an empty file that keeps being
+        # rewritten is a different state from a file that stopped changing.
+        self.record_file_mtime_ms=None
         self.source_tick=0; self.next_settings=0; self.next_status=0; self.settings_stat=None
     def poll(self, force=False):
         self.source_tick+=1
@@ -174,6 +177,8 @@ class Source:
                 self.status=st; self.status_error=None
             except (OSError,ValueError,TypeError,KeyError,RecursionError) as e:
                 self.status_error=type(e).__name__+':STATUS_UNAVAILABLE'
+        try: self.record_file_mtime_ms=(self.path/'DOA_value.html').stat().st_mtime_ns//1000000
+        except OSError: self.record_file_mtime_ms=None
         try:
             raw=stable_read(self.path/'DOA_value.html',limit)
             rec=parse_csv(raw,self.settings or None,self.cfg['source']['output_vfo'])
@@ -226,6 +231,9 @@ class Source:
         if not health: reasons.append('DAQ_NOT_HEALTHY')
         if not clock_trusted: reasons.append('CLOCK_UNTRUSTED')
         if rec and (a>self.cfg['freshness']['doa_ms'] or rec['timestamp_ms']>utc+1000): reasons.append('NO_FRESH_DOA')
+        mtime=self.record_file_mtime_ms
+        if self.path and mtime is not None and utc-mtime>self.cfg['freshness']['doa_ms']:
+            reasons.append('DOA_FILE_NOT_UPDATING')
         if not self.cfg['source']['authority_verified']: reasons.append('SOURCE_UNVERIFIED')
         if not self.cfg['source']['angle_verified']: reasons.append('ANGLE_UNVERIFIED')
         if self.config_error or not self.settings or self.safe_digest is None: reasons.append('CONFIG_UNAVAILABLE')
