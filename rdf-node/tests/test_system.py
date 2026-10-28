@@ -812,6 +812,35 @@ class GroundCommandTests(unittest.TestCase):
         self.ground.receive(self.ground.prefix+'/telemetry/health',compact(health))
         self.assertEqual(self.ground.journal.lookup(old['id'])['stage'],'OUTCOME_UNKNOWN')
 
+class LaptopTests(unittest.TestCase):
+    """Testing without a Pi: the demo source and the explicit TEST clock."""
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.path=Path(os.path.realpath(self.tmp.name))
+    def test_demo_source_writes_what_the_edge_and_ground_console_read(self):
+        from rdf_node.cli import generate_demo
+        from rdf_node.source import parse_status,parse_doa_xml
+        stop=threading.Event();source=self.path/'source'
+        thread=threading.Thread(target=generate_demo,args=(source,stop),daemon=True);thread.start()
+        self.assertTrue(wait(lambda:(source/'doa.xml').exists(),3));stop.set();thread.join(3)
+        status=json.loads((source/'status.json').read_bytes())
+        self.assertIs(status['daq_status']['adc_overdrive'],False)
+        self.assertIs(parse_status((source/'status.json').read_bytes())['adc_overdrive'],False)
+        xml=parse_doa_xml((source/'doa.xml').read_bytes())
+        self.assertEqual((xml['frequency_mhz'],xml['source_timestamp_ms']),(433.92,status['timestamp_ms']))
+    def test_test_clock_lets_data_through_but_never_claims_sync(self):
+        a=make_agent(self.path);self.addCleanup(a.journal.close)
+        a.monitor.data.update(clock_trusted=False,clock_state='TEST')
+        a.source.poll(force=True);a._snapshot();snap=a.snapshot()
+        self.assertTrue(snap['detection']['valid'],snap['detection']['reasons'])
+        self.assertEqual(a._state(snap)['clock'],'TEST')
+        self.assertEqual(a._doa_payload(snap['detection'],snap['host'])['clk'],0)
+        request=lambda op,**x:dict(v=2,id='lap-'+uuid.uuid4().hex,sid=a.sid,boot=a.boot,issued_ms=now_ms(),
+                                    expires_ms=now_ms()+15000,base_rev=a.source.revision,op=op,**x)
+        self.assertEqual(a.commands.submit(request('stream.set',profile='balanced'),'ground-controller')['stage'],'ACCEPTED')
+        a.helper_status={'allow_lifecycle':False}
+        rejected=a.commands.submit(request('processing.set',desired='STOPPED'),'ground-controller')
+        self.assertEqual(rejected['result']['error'],'CLOCK_UNTRUSTED')
+
 class CommandTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)

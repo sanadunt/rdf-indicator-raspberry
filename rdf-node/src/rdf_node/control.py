@@ -240,7 +240,10 @@ class CommandManager:
             # A Pi without RTC gets NTP over the PPP link, so the clock is untrusted exactly when a local
             # PPP restart is needed; its deadline uses the same host clock. It also never touches settings.
             local_ppp=op=='ppp.restart' and actor=='local-admin'
-            if not local_ppp and not a.monitor.snapshot()['clock_trusted']: raise ValueError('CLOCK_UNTRUSTED')
+            clock=a.monitor.snapshot()
+            # A TEST clock (laptop testing) may time a stream.set; anything the helper runs needs a verified clock.
+            test_clock=clock.get('clock_state')=='TEST' and op not in HELPER_OPS
+            if not local_ppp and not clock['clock_trusted'] and not test_clock: raise ValueError('CLOCK_UNTRUSTED')
             # Revision must be explicit; never replace the caller's stale revision.
             if not local_ppp and request.get('base_rev')!=a.source.revision: raise ValueError('CONFIG_REVISION_CONFLICT')
             if op=='stream.set':

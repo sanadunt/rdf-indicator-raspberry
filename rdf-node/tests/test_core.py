@@ -79,6 +79,20 @@ class PppProbeTests(unittest.TestCase):
         peer.assert_called_once()
 
 class ConfigTests(unittest.TestCase):
+    def test_test_clock_is_read_only_and_explicit(self):
+        c=load_config();self.assertIsNone(c['testing']['clock'])
+        c['testing']['clock']='system';validate_config(c)
+        c['runtime_mode']='controlled'
+        with self.assertRaisesRegex(ValueError,'TEST_CLOCK_REQUIRES_READ_ONLY'):validate_config(c)
+        c=load_config();c['testing']['clock']='ntp'
+        with self.assertRaisesRegex(ValueError,'INVALID_TEST_CLOCK'):validate_config(c)
+    def test_test_clock_is_labelled_and_never_synced(self):
+        c=load_config();c['state_dir']=tempfile.mkdtemp();self.addCleanup(shutil.rmtree,c['state_dir'],True)
+        c['testing']['clock']='system';calls=[]
+        with mock.patch('rdf_node.monitor.run',side_effect=lambda cmd,*a,**k:calls.append(cmd[0]) and None):
+            m=monitor.Monitor(c);m.probe(0)
+        self.assertEqual((m.snapshot()['clock_state'],m.snapshot()['clock_trusted']),('TEST',False))
+        self.assertNotIn('timedatectl',calls)
     def test_default_config(self):
         c=load_config()
         self.assertEqual(c['api']['port'],8790)

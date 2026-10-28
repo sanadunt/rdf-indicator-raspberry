@@ -17,6 +17,18 @@ below were numbered afterwards; their packages still reported `version: "1.0.0"`
   only) checks a payload or a `mosquitto_sub` stream against it. `tests/test_contract.py` validates
   the payloads the Edge actually builds (each DoA state, diagnostic, angular, settings report, ACKs,
   Last Will). The schemas allow extra fields, as consumers must.
+- Testable without hardware:
+  - `python3 run.py demo-source DIR` writes the synthetic KrakenSDR files (`settings.json`,
+    `status.json`, `DOA_value.html`, `doa.xml`) without demo mode, so a real `run.py edge` can read
+    them. The demo `status.json` now writes `adc_overdrive` as a boolean, and the demo also writes
+    `doa.xml` (TIME in ms, FREQUENCY in MHz, raw DOA).
+  - New `testing.clock: system` (default `null`): the OS clock times the data gates, so DoA can be
+    `ok: 1` on a laptop or macOS without `timedatectl`. It is labelled: `state.clock` is `TEST`,
+    `clk` in health and DoA stays 0, and helper-backed commands are still `CLOCK_UNTRUSTED` (only
+    `stream.set` is timed by it). It is rejected with `runtime_mode: controlled`
+    (`TEST_CLOCK_REQUIRES_READ_ONLY`).
+  - New guide `docs/UJI_TANPA_ALAT.md`: Edge, a loopback Mosquitto, and the demo source on a
+    laptop, to test Ground Console.
 - Lenient reading.
   - Commands: fields this Edge does not know are dropped and listed in `result.ignored` on the
     first ACK instead of rejecting the whole command `UNKNOWN_COMMAND_FIELD`. Session, deadline,

@@ -111,7 +111,9 @@ ACL, dan routing di [MQTT_GROUND.md](MQTT_GROUND.md#broker-cadangan-mirror-lanon
 `a`: bila `ok=1`, sudut menurut konvensi config; bila `ok=0`, nilai raw source dan hanya
 berarti RAW dengan `angle_reference="RAW"`. `c`: PAPR/native dB, bukan probabilitas;
 `p`: power native signed; `f`: VFO Hz; `rev`: safe config revision-at-sample, atau `null` bila
-sampel belum teratribusi ke settings. `clk`: 1 bila jam Edge tersinkron, 0 bila tidak. `age`: umur
+sampel belum teratribusi ke settings. `clk`: 1 bila jam Edge tersinkron, 0 bila tidak. `ok=1` dengan
+`clk=0` hanya terjadi dengan `testing.clock: system` (uji tanpa alat, `state.clock="TEST"`; lihat
+[UJI_TANPA_ALAT.md](UJI_TANPA_ALAT.md)). `age`: umur
 sampel di source (ms) saat dikirim. `reason`: daftar kode alasan sampel belum LIVE; kosong bila
 `ok=1`.
 

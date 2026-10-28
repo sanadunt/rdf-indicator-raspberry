@@ -466,6 +466,10 @@ Jangan menjalankan demo pada port yang sudah dipakai service. Gunakan `--port 18
 untuk preview tambahan. Demo membuat fixture pada temp/state dir, tidak menyentuh engine asli,
 MQTT OFF, dan watermark DEMO tidak disembunyikan.
 
+Untuk menguji Ground Console di laptop (Edge asli, broker Mosquitto loopback, sumber KrakenSDR
+sintetis lewat `python3 run.py demo-source DIR`, dan opsi jam `testing.clock: system`), ikuti
+[docs/UJI_TANPA_ALAT.md](docs/UJI_TANPA_ALAT.md).
+
 Tes lokal:
 
 ```bash

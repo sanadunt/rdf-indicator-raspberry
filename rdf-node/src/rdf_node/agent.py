@@ -464,7 +464,9 @@ class Agent:
     def _snapshot(self):
         host=self.monitor.snapshot()
         if self.demo: host['clock_trusted']=True; host['clock_state']='DEMO'
-        view=self.source.view(host['clock_trusted'],self.commands.busy)
+        # The data gates may use a TEST clock (testing.clock: system); clk fields still say unverified.
+        host['clock_usable']=host['clock_trusted'] or host['clock_state']=='TEST'
+        view=self.source.view(host['clock_usable'],self.commands.busy)
         diagnostic=self.source.diagnostic_view(view['reasons'])
         processing='UNKNOWN'
         if host['service_state']=='ACTIVE': processing='RUNNING'
@@ -711,7 +713,7 @@ class Agent:
         return payload
     def _angular_flags(self,d,r,h,daq):
         flags=FLAG_PARSED
-        if (h['clock_trusted'] and d['source_age_ms'] is not None and
+        if (h.get('clock_usable',h['clock_trusted']) and d['source_age_ms'] is not None and
                 d['source_age_ms']<=self.cfg['freshness']['doa_ms'] and
                 r['timestamp_ms']<=now_ms()+1000):
             flags|=FLAG_FRESH

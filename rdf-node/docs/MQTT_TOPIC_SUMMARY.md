@@ -290,7 +290,7 @@ lama. Kode alasan dan cara membacanya: [PROTOCOL.md](PROTOCOL.md#kode-alasan-doa
 | `p` | Power native bertanda, bukan level absolut terkalibrasi. |
 | `rev` | Revision konfigurasi aman saat sampel dibaca; `null` bila sampel belum teratribusi ke settings. |
 | `ok` | `1` menandakan DoA lolos semua gate source Edge; `0` menandakan sampel berlabel. |
-| `clk` | `1` jam Edge tersinkron, `0` tidak. |
+| `clk` | `1` jam Edge tersinkron, `0` tidak. `ok=1` dengan `clk=0` hanya terjadi dengan jam uji (`state.clock="TEST"`). |
 | `age` | Umur sampel di source (ms) saat dikirim. |
 | `reason` | Kode alasan sampel belum LIVE; kosong bila `ok=1`. |
 | `trust`, `angle_reference` | Ada pada `ok=0`: `UNVERIFIED` dan `RAW`. |
@@ -364,7 +364,7 @@ Detail tidak menggantikan gate health utama. Ground saat ini menyimpan detail te
 {"v":2,"sid":"7a8b9c0d","contract":"1.5","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","t":1790668800123,"run":"RUNNING","daq":true,"cfg":7,"profile":"balanced","clock":"SYNCED"}
 ```
 
-`contract` adalah revisi kontrak MQTT (`major.minor`, sejak 1.5; lihat [contract/README.md](../contract/README.md)). `run` adalah state processing berupa string; `daq` adalah boolean ringkas; `cfg` revision konfigurasi; `profile` profile saat ini; `clock` state clock. `state.daq=false` tidak membedakan degraded dan unknown. Gunakan `telemetry/health.daq` untuk enum health dan freshness. Ground memakai `sid` bersama `boot` dan `instance` untuk memeriksa identitas sesi.
+`contract` adalah revisi kontrak MQTT (`major.minor`, sejak 1.5; lihat [contract/README.md](../contract/README.md)). `run` adalah state processing berupa string; `daq` adalah boolean ringkas; `cfg` revision konfigurasi; `profile` profile saat ini; `clock` state clock: `SYNCED`, `UNTRUSTED`, `DEMO`, atau `TEST` (jam OS untuk uji tanpa alat, `testing.clock: system`; tidak pernah berarti tersinkron). `state.daq=false` tidak membedakan degraded dan unknown. Gunakan `telemetry/health.daq` untuk enum health dan freshness. Ground memakai `sid` bersama `boot` dan `instance` untuk memeriksa identitas sesi.
 
 ### `capabilities`
 

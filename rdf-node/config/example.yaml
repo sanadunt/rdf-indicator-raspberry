@@ -70,6 +70,11 @@ api:
   admin_hash_file: /etc/rdf-node/admin-hash.json
   session_seconds: 600
   max_clients: 16
+testing:
+  # Laptop/macOS testing only. `system` uses the OS clock as the data clock instead of timedatectl;
+  # it is labelled TEST (state.clock), clk stays 0, and helper-backed commands stay CLOCK_UNTRUSTED.
+  # Rejected with runtime_mode: controlled.
+  clock: null
 display:
   theme: dark
   accent: teal
