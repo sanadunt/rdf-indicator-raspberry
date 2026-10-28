@@ -527,6 +527,10 @@ Jangan membagikan full settings, credential bundle, file hash/password atau log 
 - [T900/PPP: restart, pra-terbang, dan pencegahan](docs/T900_PPP.md)
 - [Pengujian dan keterbatasan verifikasi](docs/TEST_REPORT.md)
 - [Sumber teknis dan lisensi](docs/SOURCES.md)
+- [Kontrak MQTT dan skema per topik](contract/README.md)
+- [Upgrade ke 1.5.0, menyamakan rdf-ground, dan membersihkan retained](docs/UPGRADE_1.5.md)
+- [Uji sinyal 437.425 MHz](docs/UJI_SINYAL_437.md)
+- [Uji tanpa alat di laptop](docs/UJI_TANPA_ALAT.md)
 - [Screenshot panel](evidence/overview-480x320.png)
 
 Lisensi source baru: MIT. Parser YAML yang disertakan memiliki lisensi MIT terpisah.

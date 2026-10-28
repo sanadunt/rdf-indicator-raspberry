@@ -29,6 +29,13 @@ below were numbered afterwards; their packages still reported `version: "1.0.0"`
     (`TEST_CLOCK_REQUIRES_READ_ONLY`).
   - New guide `docs/UJI_TANPA_ALAT.md`: Edge, a loopback Mosquitto, and the demo source on a
     laptop, to test Ground Console.
+- Operations write-ups (steps only; nothing runs automatically):
+  - `docs/UPGRADE_1.5.md`: bring the groundstation `rdf-ground` (1.1.0) and the Edge (1.2.0) to
+    1.5.0, groundstation first, with backups and rollback. It also clears retained topics no
+    longer used (`config/reported` from 1.1.0, any retained `cmd/...`) through a temporary broker
+    account.
+  - `docs/UJI_SINYAL_437.md`: tell approval-only `ok: 0`, "no signal above squelch", and a stuck
+    pipeline apart at 437.425 MHz, with a test transmitter or a temporarily lowered squelch.
 - Lenient reading.
   - Commands: fields this Edge does not know are dropped and listed in `result.ignored` on the
     first ACK instead of rejecting the whole command `UNKNOWN_COMMAND_FIELD`. Session, deadline,
