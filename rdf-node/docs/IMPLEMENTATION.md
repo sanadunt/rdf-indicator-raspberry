@@ -1,4 +1,4 @@
-# Implementasi RDF Node 1.0.0
+# Implementasi RDF Node 1.5.0
 
 ## Arsitektur yang benar-benar dibuat
 

@@ -191,10 +191,10 @@ Ukuran event memakai contoh JSON yang dicantumkan di bawah. State dapat dipublis
 
 | Topic / fixture | Kapan dikirim | Payload contoh | MQTT PUBLISH |
 |---|---|---:|---:|
-| `state` | Perubahan / maks. 60 s | 211 B | 238 B |
-| `capabilities` | Generation koneksi Control berubah | 434 B | 468 B |
-| `availability` online | Control siap | 56 B | 89 B |
-| Last Will `availability` offline | Broker saat koneksi hilang; payload disertakan di CONNECT | 66 B | Bukan PUBLISH Edge |
+| `state` | Perubahan / maks. 60 s | 228 B | 255 B |
+| `capabilities` | Generation koneksi Control berubah | 451 B | 485 B |
+| `availability` online | Control siap | 73 B | 106 B |
+| Last Will `availability` offline | Broker saat koneksi hilang; payload disertakan di CONNECT | 83 B | Bukan PUBLISH Edge |
 | `ack/config` | Progress/hasil `config.*` | 226 B* | 263 B* |
 | `ack/operation` | Progress/hasil operation lain | 226 B* | 266 B* |
 
@@ -361,16 +361,19 @@ Detail tidak menggantikan gate health utama. Ground saat ini menyimpan detail te
 ### `state`
 
 ```json
-{"v":2,"sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","t":1790668800123,"run":"RUNNING","daq":true,"cfg":7,"profile":"balanced","clock":"SYNCED"}
+{"v":2,"sid":"7a8b9c0d","contract":"1.5","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","t":1790668800123,"run":"RUNNING","daq":true,"cfg":7,"profile":"balanced","clock":"SYNCED"}
 ```
 
-`run` adalah state processing berupa string; `daq` adalah boolean ringkas; `cfg` revision konfigurasi; `profile` profile saat ini; `clock` state clock. `state.daq=false` tidak membedakan degraded dan unknown. Gunakan `telemetry/health.daq` untuk enum health dan freshness. Ground memakai `sid` bersama `boot` dan `instance` untuk memeriksa identitas sesi.
+`contract` adalah revisi kontrak MQTT (`major.minor`, sejak 1.5; lihat [contract/README.md](../contract/README.md)). `run` adalah state processing berupa string; `daq` adalah boolean ringkas; `cfg` revision konfigurasi; `profile` profile saat ini; `clock` state clock. `state.daq=false` tidak membedakan degraded dan unknown. Gunakan `telemetry/health.daq` untuk enum health dan freshness. Ground memakai `sid` bersama `boot` dan `instance` untuk memeriksa identitas sesi.
 
 ### `capabilities`
 
 ```json
-{"v":2,"sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","t":1790668800123,"version":"1.0.0","mode":"read_only","codecs":["json"],"angle":"theta_mirror","native_axis":1,"count":360,"profiles":["control","balanced","graph_u8"],"scope":"SDR_STACK","helper_available":true,"remote_commands":true,"config_patch":false,"processing":false,"restart":false,"reboot":false,"shutdown":false,"ppp_restart":false,"remote_config_patch":false,"remote_processing":false,"remote_restart":false,"remote_reboot":true,"remote_shutdown":true,"remote_ppp_restart":true}
+{"v":2,"sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","t":1790668800123,"version":"1.5.0","contract":"1.5","mode":"read_only","codecs":["json"],"angle":"theta_mirror","native_axis":1,"count":360,"profiles":["control","balanced","graph_u8"],"scope":"SDR_STACK","helper_available":true,"remote_commands":true,"config_patch":false,"processing":false,"restart":false,"reboot":false,"shutdown":false,"ppp_restart":false,"remote_config_patch":false,"remote_processing":false,"remote_restart":false,"remote_reboot":true,"remote_shutdown":true,"remote_ppp_restart":true}
 ```
+
+`version` adalah nomor rilis paket dan `contract` revisi kontrak MQTT; consumer membandingkan
+`contract`, bukan `version`. Edge sebelum 1.5.0 tidak mengirim `contract`.
 
 Boolean tanpa prefix (`config_patch`, `processing`, `restart`, `reboot`, `shutdown`,
 `ppp_restart`) melaporkan gate panel Edge lokal. `remote_*` melaporkan jalur/target Ground:
@@ -427,13 +430,13 @@ mutation tetap memakai subset safe yang diizinkan.
 Saat Control siap, retained publish:
 
 ```json
-{"v":2,"sid":"7a8b9c0d","online":true,"t":1790668800123}
+{"v":2,"sid":"7a8b9c0d","contract":"1.5","online":true,"t":1790668800123}
 ```
 
 Last Will saat koneksi MQTT hilang:
 
 ```json
-{"v":2,"sid":"7a8b9c0d","online":false,"reason":"CONNECTION_LOST"}
+{"v":2,"sid":"7a8b9c0d","contract":"1.5","online":false,"reason":"CONNECTION_LOST"}
 ```
 
 Availability adalah nilai terakhir, bukan heartbeat dan bukan bukti DAQ sehat. Cek `state`,

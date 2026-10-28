@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sanadunt/rdf-indicator-raspberry/rdf-node/contract/schema/availability.json",
+  "title": "availability",
+  "description": "Online (retained) atau Last Will/farewell offline. Field tambahan boleh ada dan harus diabaikan consumer.",
+  "x-topic": "availability",
+  "type": "object",
+  "properties": {
+    "v": {
+      "const": 2
+    },
+    "sid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}$",
+      "description": "Session id; berubah setiap agent start."
+    },
+    "contract": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "Revisi kontrak MQTT (major.minor). Ada sejak 1.5."
+    },
+    "online": {
+      "type": "boolean"
+    },
+    "t": {
+      "type": "integer",
+      "minimum": 1000000000000,
+      "maximum": 9999999999999,
+      "description": "Unix epoch milidetik."
+    },
+    "reason": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "Hanya saat offline: CONNECTION_LOST, BACKUP_RECONFIGURED, BACKUP_DISABLED."
+    }
+  },
+  "required": [
+    "v",
+    "sid",
+    "contract",
+    "online"
+  ],
+  "additionalProperties": true,
+  "anyOf": [
+    {
+      "properties": {
+        "online": {
+          "const": false
+        }
+      }
+    },
+    {
+      "required": [
+        "t"
+      ]
+    }
+  ]
+}

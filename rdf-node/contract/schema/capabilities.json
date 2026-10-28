@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sanadunt/rdf-indicator-raspberry/rdf-node/contract/schema/capabilities.json",
+  "title": "capabilities",
+  "description": "Kemampuan Edge (retained). Flag `remote_*` adalah kesiapan target untuk Ground, bukan otorisasi publisher. Field tambahan boleh ada dan harus diabaikan consumer.",
+  "x-topic": "capabilities",
+  "type": "object",
+  "properties": {
+    "v": {
+      "const": 2
+    },
+    "sid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}$",
+      "description": "Session id; berubah setiap agent start."
+    },
+    "boot": {
+      "type": "string",
+      "pattern": "^[0-9A-Za-z-]{8,64}$"
+    },
+    "instance": {
+      "type": "string",
+      "pattern": "^[0-9A-Za-z-]{8,64}$"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.-]+)?$"
+    },
+    "contract": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "Revisi kontrak MQTT (major.minor). Ada sejak 1.5."
+    },
+    "mode": {
+      "enum": [
+        "read_only",
+        "controlled",
+        "DEMO"
+      ]
+    },
+    "codecs": {
+      "type": "array",
+      "items": {
+        "const": "json"
+      },
+      "minItems": 1
+    },
+    "angle": {
+      "enum": [
+        "theta_mirror",
+        "csv_native"
+      ]
+    },
+    "native_axis": {
+      "const": 1
+    },
+    "count": {
+      "const": 360
+    },
+    "profiles": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "control",
+          "balanced",
+          "graph_u8"
+        ]
+      },
+      "minItems": 1
+    },
+    "scope": {
+      "const": "SDR_STACK"
+    },
+    "helper_available": {
+      "type": "boolean"
+    },
+    "remote_commands": {
+      "type": "boolean"
+    },
+    "remote_config_patch": {
+      "type": "boolean"
+    },
+    "remote_processing": {
+      "type": "boolean"
+    },
+    "remote_restart": {
+      "type": "boolean"
+    },
+    "remote_reboot": {
+      "type": "boolean"
+    },
+    "remote_shutdown": {
+      "type": "boolean"
+    },
+    "remote_ppp_restart": {
+      "type": "boolean"
+    },
+    "config_patch": {
+      "type": "boolean"
+    },
+    "processing": {
+      "type": "boolean"
+    },
+    "restart": {
+      "type": "boolean"
+    },
+    "reboot": {
+      "type": "boolean"
+    },
+    "shutdown": {
+      "type": "boolean"
+    },
+    "ppp_restart": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "v",
+    "sid",
+    "boot",
+    "instance",
+    "version",
+    "contract",
+    "mode",
+    "codecs",
+    "angle",
+    "native_axis",
+    "count",
+    "profiles",
+    "scope",
+    "helper_available",
+    "remote_commands",
+    "remote_config_patch",
+    "remote_processing",
+    "remote_restart",
+    "remote_reboot",
+    "remote_shutdown",
+    "remote_ppp_restart",
+    "config_patch",
+    "processing",
+    "restart",
+    "reboot",
+    "shutdown",
+    "ppp_restart"
+  ],
+  "additionalProperties": true
+}

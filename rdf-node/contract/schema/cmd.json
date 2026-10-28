@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sanadunt/rdf-indicator-raspberry/rdf-node/contract/schema/cmd.json",
+  "title": "cmd/# (Ground -> Edge)",
+  "description": "Envelope command Ground. Field yang tidak dikenal diabaikan Edge dan disebut di result.ignored. Field tambahan boleh ada dan harus diabaikan consumer.",
+  "x-topic": "cmd",
+  "type": "object",
+  "properties": {
+    "v": {
+      "const": 2
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{1,80}$"
+    },
+    "sid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}$",
+      "description": "Session id; berubah setiap agent start."
+    },
+    "boot": {
+      "type": "string",
+      "pattern": "^[0-9A-Za-z-]{8,64}$"
+    },
+    "issued_ms": {
+      "type": "integer",
+      "minimum": 1000000000000,
+      "maximum": 9999999999999,
+      "description": "Unix epoch milidetik."
+    },
+    "expires_ms": {
+      "type": "integer",
+      "minimum": 1000000000000,
+      "maximum": 9999999999999,
+      "description": "Unix epoch milidetik."
+    },
+    "base_rev": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "op": {
+      "enum": [
+        "config.get",
+        "config.patch",
+        "processing.set",
+        "service.restart",
+        "ppp.restart",
+        "system.reboot.prepare",
+        "system.reboot.execute",
+        "system.shutdown.prepare",
+        "system.shutdown.execute",
+        "operation.get",
+        "stream.set"
+      ]
+    },
+    "changes": {
+      "type": "object"
+    },
+    "desired": {
+      "enum": [
+        "RUNNING",
+        "STOPPED"
+      ]
+    },
+    "profile": {
+      "enum": [
+        "control",
+        "balanced",
+        "graph_u8"
+      ]
+    },
+    "target_id": {
+      "type": "string",
+      "maxLength": 80
+    },
+    "prepare_id": {
+      "type": "string",
+      "maxLength": 80
+    },
+    "challenge": {
+      "type": "string",
+      "maxLength": 128
+    }
+  },
+  "required": [
+    "v",
+    "id",
+    "sid",
+    "boot",
+    "issued_ms",
+    "expires_ms",
+    "op"
+  ],
+  "additionalProperties": true
+}

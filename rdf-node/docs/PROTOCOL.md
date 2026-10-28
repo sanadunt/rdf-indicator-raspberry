@@ -23,6 +23,16 @@ Demo CLI tidak membuka koneksi MQTT. Prefix demo tersedia hanya bagi integration
 | ack/config, ack/operation | UAV -> Ground | 1 | tidak |
 
 
+### Versi kontrak
+
+`availability` (online, Last Will, dan farewell), `capabilities`, dan `state` membawa
+`contract`: revisi kontrak MQTT `major.minor`, mulai `"1.5"`. `capabilities.version` adalah nomor
+rilis paket (`1.5.0`). Revisi kontrak adalah nomor rilis terakhir yang mengubah topik atau field;
+rilis patch tidak mengubahnya. Minor baru hanya menambah field atau nilai, sedangkan major baru
+boleh menghapus atau mengubah arti field. Edge sebelum 1.5.0 tidak mengirim `contract` dan selalu
+melaporkan `version: "1.0.0"`. Skema JSON per topik yang bisa dibaca mesin ada di
+[`contract/schema/`](../contract/README.md), lengkap dengan validator `contract/validate.py`.
+
 Session expiry nol, clean start selalu. State/capabilities mengaitkan alias sid 8 hex dengan
 boot UUID dan instance UUID. Alias yang belum dikenal atau bentrok tidak menjadi authority.
 Jangan memperlakukan retained state sebagai heartbeat. Freshness menggunakan health/sumber.

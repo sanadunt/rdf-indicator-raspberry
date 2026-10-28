@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sanadunt/rdf-indicator-raspberry/rdf-node/contract/schema/ack.config.json",
+  "title": "ack/config",
+  "description": "Progress dan hasil command config.*. Field tambahan boleh ada dan harus diabaikan consumer.",
+  "x-topic": "ack/config",
+  "type": "object",
+  "properties": {
+    "v": {
+      "const": 2
+    },
+    "sid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}$",
+      "description": "Session id; berubah setiap agent start."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{1,80}$"
+    },
+    "status": {
+      "enum": [
+        "ACCEPTED",
+        "APPLYING",
+        "VERIFYING",
+        "APPLIED",
+        "PERSISTED_UNVERIFIED",
+        "FAILED",
+        "REJECTED",
+        "EXPIRED",
+        "CONFLICT",
+        "OUTCOME_UNKNOWN",
+        "CANCELLED",
+        "REBOOT_SCHEDULED",
+        "SHUTDOWN_SCHEDULED",
+        "PPP_RESTART_REQUESTED"
+      ]
+    },
+    "t": {
+      "type": "integer",
+      "minimum": 1000000000000,
+      "maximum": 9999999999999,
+      "description": "Unix epoch milidetik."
+    },
+    "rev": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "string",
+          "pattern": "^[A-Z0-9_:]{1,64}$",
+          "description": "Kode stabil untuk mesin."
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 512,
+          "description": "Teks Indonesia untuk operator; ada bersama error sejak 1.5."
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Penyebab teknis, opsional."
+        },
+        "ignored": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "maxItems": 16,
+          "description": "Field command yang tidak dikenal dan diabaikan (sejak 1.5)."
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "v",
+    "sid",
+    "id",
+    "status",
+    "t",
+    "rev",
+    "result"
+  ],
+  "additionalProperties": true
+}

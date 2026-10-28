@@ -7,7 +7,7 @@ import time
 import uuid
 from collections import deque
 from pathlib import Path
-from . import __version__
+from . import __version__, CONTRACT
 from .util import now_ms, compact, strict_json, read_boot_id, atomic_write, stable_read
 from .config import PROFILES
 from .journal import Journal
@@ -155,7 +155,8 @@ class Agent:
     def _command_subscriptions(self):
         return [(self.prefix+'/'+suffix,1,True) for suffix in OPS.values()]
     def _will(self):
-        return (self.prefix+'/availability',compact({'v':2,'sid':self.sid,'online':False,'reason':'CONNECTION_LOST'}))
+        return (self.prefix+'/availability',compact({'v':2,'sid':self.sid,'contract':CONTRACT,'online':False,
+                                                      'reason':'CONNECTION_LOST'}))
     def mqtt_settings_view(self):
         with self.mqtt_config_lock:
             settings=dict(self.mqtt_desired); m=self.cfg['mqtt'];tls=settings['tls']
@@ -365,7 +366,7 @@ class Agent:
             self.backup_active=settings
             self.backup_client=self._new_backup_client(settings)
             # Tell consumers on the old backup broker that this node left it (a clean DISCONNECT drops the Will).
-            farewell={'v':2,'sid':self.sid,'online':False,'t':now_ms(),
+            farewell={'v':2,'sid':self.sid,'contract':CONTRACT,'online':False,'t':now_ms(),
                       'reason':'BACKUP_RECONFIGURED' if self.backup_client else 'BACKUP_DISABLED'}
             self._retire([old],[self.backup_client],farewell=farewell if old and old.ready else None)
             with self.settings_request_lock:
@@ -497,7 +498,7 @@ class Agent:
         if not view['valid'] and view['reasons']: alerts.append({'severity':'warning','code':view['reasons'][0],'text':view['reasons'][0]})
         if self.source.error: alerts.append({'severity':'warning','code':'SOURCE_READ','text':self.source.error})
         self.snapshot_seq+=1
-        snap={'schema_version':2,'version':__version__,'mode':'DEMO' if self.demo else 'LIVE',
+        snap={'schema_version':2,'version':__version__,'contract':CONTRACT,'mode':'DEMO' if self.demo else 'LIVE',
               'node_id':self.cfg['node_id'],'sid':self.sid,'boot_id':self.boot,'agent_instance_id':self.instance,
               'snapshot_seq':self.snapshot_seq,'snapshot_ms':now_ms(),
               'processing':{'observed':processing,'desired':self.helper_status.get('desired'),'scope':'SDR_STACK'},
@@ -531,7 +532,7 @@ class Agent:
         helper_available=bool(self.helper_status)
         settings_target=self.helper_status.get('settings_target_available') is True
         lifecycle_target=self.helper_status.get('lifecycle_target_available') is True
-        return {'v':2,'sid':self.sid,'boot':self.boot,'instance':self.instance,'version':__version__,
+        return {'v':2,'sid':self.sid,'boot':self.boot,'instance':self.instance,'version':__version__,'contract':CONTRACT,
                 'mode':'DEMO' if self.demo else self.cfg['runtime_mode'],'codecs':['json'],
                 'angle':self.cfg['source']['angle_mode'],'native_axis':1,'count':360,
                 'profiles':list(PROFILES),'scope':'SDR_STACK','helper_available':helper_available,
@@ -686,7 +687,7 @@ class Agent:
             return bool(self.backup_client and (active['tls'] or active['settings_report_plaintext']))
         return True
     def _state(self,s):
-        return {'v':2,'sid':self.sid,'boot':self.boot,'instance':self.instance,'t':now_ms(),
+        return {'v':2,'sid':self.sid,'contract':CONTRACT,'boot':self.boot,'instance':self.instance,'t':now_ms(),
                 'run':s.get('processing',{}).get('observed','UNKNOWN'),'daq':s.get('daq',{}).get('healthy',False),
                 'cfg':self.source.revision,'profile':self.profile,'clock':s.get('host',{}).get('clock_state','UNTRUSTED')}
     def _publish_failed(self,topic,error):
@@ -756,7 +757,7 @@ class Agent:
                 if p_ready and ctrl.generation!=self._generation:
                     self._generation=ctrl.generation
                     self.bulk_resume_after=now+self.cfg['telemetry']['resume_stable_seconds']
-                    self._offer('available','availability',{'v':2,'sid':self.sid,'online':True,'t':now_ms()},1,True,priority=0,
+                    self._offer('available','availability',{'v':2,'sid':self.sid,'contract':CONTRACT,'online':True,'t':now_ms()},1,True,priority=0,
                                 links=('primary',))
                     self._offer('caps','capabilities',self.capabilities(),1,True,priority=3,links=('primary',))
                     due['state']=0; due['diagnostic-angular-invalid']=0; due['diagnostic-angular-blocked']=0
@@ -764,7 +765,7 @@ class Agent:
                 if b_ready and bk.generation!=self._backup_generation:
                     # Backup reconnect republishes its own retained topics without touching the T900 schedule.
                     self._backup_generation=bk.generation; backup_hello=True
-                    self._offer('available','availability',{'v':2,'sid':self.sid,'online':True,'t':now_ms()},1,True,priority=0,
+                    self._offer('available','availability',{'v':2,'sid':self.sid,'contract':CONTRACT,'online':True,'t':now_ms()},1,True,priority=0,
                                 links=('backup',))
                     self._offer('caps','capabilities',self.capabilities(),1,True,priority=3,links=('backup',))
                     due['diagnostic-angular-invalid:backup']=0; due['diagnostic-angular-blocked:backup']=0

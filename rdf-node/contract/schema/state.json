@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sanadunt/rdf-indicator-raspberry/rdf-node/contract/schema/state.json",
+  "title": "state",
+  "description": "State node (retained, periodik 60 s dan saat berubah). Field tambahan boleh ada dan harus diabaikan consumer.",
+  "x-topic": "state",
+  "type": "object",
+  "properties": {
+    "v": {
+      "const": 2
+    },
+    "sid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}$",
+      "description": "Session id; berubah setiap agent start."
+    },
+    "contract": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "Revisi kontrak MQTT (major.minor). Ada sejak 1.5."
+    },
+    "boot": {
+      "type": "string",
+      "pattern": "^[0-9A-Za-z-]{8,64}$"
+    },
+    "instance": {
+      "type": "string",
+      "pattern": "^[0-9A-Za-z-]{8,64}$"
+    },
+    "t": {
+      "type": "integer",
+      "minimum": 1000000000000,
+      "maximum": 9999999999999,
+      "description": "Unix epoch milidetik."
+    },
+    "run": {
+      "type": "string",
+      "pattern": "^[A-Z_]{1,32}$",
+      "description": "Status SDR teramati: RUNNING, STOPPED, STARTING, STOPPING, ERROR, UNKNOWN."
+    },
+    "daq": {
+      "type": "boolean"
+    },
+    "cfg": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "profile": {
+      "enum": [
+        "control",
+        "balanced",
+        "graph_u8"
+      ]
+    },
+    "clock": {
+      "type": "string",
+      "pattern": "^[A-Z_]{1,32}$",
+      "description": "SYNCED, UNTRUSTED, DEMO, atau TEST."
+    }
+  },
+  "required": [
+    "v",
+    "sid",
+    "contract",
+    "boot",
+    "instance",
+    "t",
+    "run",
+    "daq",
+    "cfg",
+    "profile",
+    "clock"
+  ],
+  "additionalProperties": true
+}

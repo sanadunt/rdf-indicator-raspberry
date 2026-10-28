@@ -1,8 +1,23 @@
 # Changelog
 
-## Unreleased
+## 1.5.0 - Unreleased
 
-- Lenient reading (planned release 1.6.0).
+Contract `1.5`. This is the first release that reports its own number: `capabilities.version` is
+`1.5.0` and `availability`, `capabilities`, and `state` carry `contract: "1.5"`. Releases 1.1.0 to 1.4.0
+below were numbered afterwards; their packages still reported `version: "1.0.0"` (the 1.1.0 and
+1.2.0 packages are the builds stamped `1.0.0-20261006185856` and `1.0.0-20261013194717`).
+
+- Visible contract version. `rdf_node.CONTRACT` (`1.5`) is published as `contract` in
+  `availability` (online, Last Will, and farewell), `capabilities`, and `state`, and shown in the
+  panel snapshot. `capabilities.version` follows the release number. The contract revision is the
+  major.minor of the release that last changed a topic or field, so a consumer compares `contract`
+  and can ignore patch releases.
+- Machine-readable contract: `contract/schema/<topic>.json` holds a JSON Schema (2020-12 subset) for
+  every topic the Edge publishes plus the `cmd/#` envelope. `contract/validate.py` (standard library
+  only) checks a payload or a `mosquitto_sub` stream against it. `tests/test_contract.py` validates
+  the payloads the Edge actually builds (each DoA state, diagnostic, angular, settings report, ACKs,
+  Last Will). The schemas allow extra fields, as consumers must.
+- Lenient reading.
   - Commands: fields this Edge does not know are dropped and listed in `result.ignored` on the
     first ACK instead of rejecting the whole command `UNKNOWN_COMMAND_FIELD`. Session, deadline,
     `base_rev`, each operation's own fields, and value limits are still required.
@@ -23,7 +38,7 @@
   - `settings.json`: one malformed safe field is left out of the safe subset and its digest and
     listed in `config.invalid_settings`, instead of making all settings `CONFIG_UNAVAILABLE` and
     blocking DoA.
-- Readable command errors (planned release 1.5.0). Every `REJECTED`, `FAILED`, and
+- Readable command errors. Every `REJECTED`, `FAILED`, and
   `OUTCOME_UNKNOWN` result now carries `message` (Indonesian operator text) and, when there is a
   technical cause, `detail` (at most 200 characters) next to the unchanged `error` code. Raw
   exception names are gone:
@@ -43,7 +58,9 @@
   know. The Ground preview shows the `message` next to the code. Ground Console 3.0.0 drops
   `message` and `detail` (its ACK allowlist) but already shows the clearer `error` code.
 
-- Labelled DoA (planned release 1.4.0). `telemetry/doa` is no longer withheld when a gate fails:
+## 1.4.0 - 2026-10-28
+
+- Labelled DoA. `telemetry/doa` is no longer withheld when a gate fails:
   every new DoA sample (new `q` with a parsed timestamp and angle) is published once with
   `ok: 0` when the source is stale, DAQ is not healthy, the clock is not verified, or a
   verification flag is missing. New fields on every DoA: `clk` (clock verified, 0/1), `age`
@@ -72,6 +89,9 @@
   the bundled `rdf-ground` receiver still treat `ok: 0` DoA with reasons other than
   `SOURCE_UNVERIFIED`/`ANGLE_UNVERIFIED` as invalid and drop it; they keep working on health and
   verified DoA until they are updated to read the new labels.
+
+
+## 1.3.0 - 2026-10-27
 
 - `cmd/config/get` on the primary broker is now answered with `settings/reported` whether or not
   the primary uses TLS. `mqtt.tls: false` is the operator's choice of a trusted link (for example
@@ -179,6 +199,9 @@
   `PPP_SERVICE_NOT_ACTIVE`; the docs recommend `Type=simple` + `nodetach`. Operators are told to
   check the Link tab before pressing `Coba lagi`.
 
+
+## 1.2.0 - 2026-10-13
+
 - Add an optional backup MQTT broker on the Edge (`mqtt.backup`, panel `Data > Cadangan`). A third
   client, `<client_id>-backup`, mirrors every Edge publish to a LAN or online broker under the same
   `sdr/v2/{node_id}` topics, independent of the PPP/T900 primary, and keeps publishing while the
@@ -279,13 +302,16 @@
 
 - Default lifecycle setup to `rdfsdr.service` when registered and require an audited fixed target for Ground SDR controls; Ground reboot/shutdown retain explicit UI confirmation and durable challenges.
 
-- Publish diagnostic `doa.xml` every 3 s when available, independent of normal DoA validity.
-  Ground keeps it `UNVERIFIED`, separate from live DoA and commands.
-
 - Replace RDF2/Q16/U8 Angular chunk transport with one JSON PUBLISH containing all 360 source
   values on normal and diagnostic topics. Ground validates session, freshness, health, and flags
   before marking LIVE; the reported revision is metadata, not a LIVE equality gate. Edge and
   Ground must be upgraded together; byte-budget pacing can extend profile and diagnostic intervals.
+
+
+## 1.1.0 - 2026-10-06
+
+- Publish diagnostic `doa.xml` every 3 s when available, independent of normal DoA validity.
+  Ground keeps it `UNVERIFIED`, separate from live DoA and commands.
 
 - Distinguish local API outage from stale cached data in both panels; add immediate manual retry while regular polling continues, without automatic service or SDR recovery.
 - Prevent duplicate shutdown scheduling per boot, retain unresolved outcomes across all journal pages/sessions, and add root-only systemd-evidence-checked local reconciliation.
@@ -307,7 +333,6 @@
 - Keep CTRL/BULK credentials separate and reconfigure clients live after admin save. Plaintext exposes credentials and payloads; use only on a trusted link.
 - Retain verified TCP/TLS and WSS, including MQTT binary frames and the `mqtt` WebSocket subprotocol.
 - Use OS CA roots by default or a configured CA bundle for private/self-signed certificates; migrate MQTT UI settings schemas 1 and 2 to schema 3.
-
 
 ## 1.0.0 - 2026-09-29
 

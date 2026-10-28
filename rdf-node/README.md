@@ -1,4 +1,4 @@
-# RDF Node 1.0.0
+# RDF Node 1.5.0
 
 **Bridge SDR-DoA/KrakenSDR + panel Raspberry 480x320 + receiver Ground pendamping.**
 
@@ -111,7 +111,7 @@ pada desktop; argumen kiosk tidak memasang driver HDMI/DSI/SPI atau mengkalibras
 Salin ZIP ke Raspberry, kemudian:
 
 ```bash
-unzip rdf-node-1.0.0.zip
+unzip rdf-node-1.5.0.zip
 cd rdf-node
 sudo bash install.sh --kiosk=rdf
 ```
@@ -206,7 +206,7 @@ menyediakan **broker TLS terpisah + Ground receiver/preview**. Langkah di bawah 
 **di Ubuntu**, bukan di Raspberry:
 
 ```bash
-unzip rdf-node-1.0.0.zip
+unzip rdf-node-1.5.0.zip
 cd rdf-node
 sudo apt update
 sudo apt install -y python3 mosquitto mosquitto-clients openssl
