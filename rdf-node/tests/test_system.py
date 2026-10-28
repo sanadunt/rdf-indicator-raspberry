@@ -352,6 +352,8 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual((doa['ok'],doa['trust'],doa['angle_reference'],doa['a']),
                          (0,'UNVERIFIED','RAW',10.0))
         self.assertEqual(doa['validation_reasons'],['SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'])
+        self.assertEqual((doa['reason'],doa['clk'],doa['age']),
+                         (['SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'],1,snapshot['detection']['source_age_ms']))
         angular=json.loads(next(payload for key,topic,payload in offers if key=='angular'))
         self.assertEqual((angular['encoding'],angular['flags'],len(angular['values'])),('json',23,360))
         self.assertEqual(angular['values'],agent.source.record['values'])
@@ -359,8 +361,89 @@ class ApplicationTests(unittest.TestCase):
         blocked=copy.deepcopy(snapshot);blocked['detection']['reasons'].append('NO_FRESH_DOA')
         blocked_offers=self._run_agent_scheduler_once(agent,blocked)
         blocked_keys=[key for key,topic,payload in blocked_offers]
-        self.assertNotIn('doa',blocked_keys)
+        # A blocked sample still goes out, labelled; only the Bulk Angular frame waits for an eligible source.
+        doa=next(payload for key,topic,payload in blocked_offers if key=='doa')
+        self.assertEqual((doa['ok'],doa['trust'],doa['angle_reference']),(0,'UNVERIFIED','RAW'))
+        self.assertEqual(doa['reason'],['SOURCE_UNVERIFIED','ANGLE_UNVERIFIED','NO_FRESH_DOA'])
+        self.assertNotIn('validation_reasons',doa)
         self.assertNotIn('angular',blocked_keys)
+    def test_blocked_doa_is_published_with_clock_age_and_reasons(self):
+        agent=self.a;agent.profile='balanced';snapshot=agent.snapshot()
+        self.assertTrue(snapshot['detection']['valid'])
+        valid=next(p for k,t,p in self._run_agent_scheduler_once(agent,snapshot) if k=='doa')
+        self.assertEqual((valid['ok'],valid['clk'],valid['reason']),(1,1,[]))
+        self.assertNotIn('trust',valid);self.assertNotIn('validation_reasons',valid)
+        untrusted=copy.deepcopy(snapshot);untrusted['host']['clock_trusted']=False
+        untrusted['detection'].update(valid=False,relative_doa_deg=None,reasons=['CLOCK_UNTRUSTED'])
+        agent.last_doa_q=0
+        doa=next(p for k,t,p in self._run_agent_scheduler_once(agent,untrusted) if k=='doa')
+        self.assertEqual((doa['ok'],doa['clk'],doa['reason'],doa['a']),
+                         (0,0,['CLOCK_UNTRUSTED'],round(snapshot['detection']['raw_doa_deg'],2)))
+        self.assertEqual(doa['age'],snapshot['detection']['source_age_ms'])
+        self.assertNotIn('validation_reasons',doa)
+
+    def test_doa_is_not_resent_without_a_new_sample_and_health_says_why(self):
+        agent=self.a;agent.profile='balanced';snapshot=agent.snapshot()
+        self.assertIn('doa',[k for k,t,p in self._run_agent_scheduler_once(agent,snapshot)])
+        stale=copy.deepcopy(snapshot)
+        stale['detection'].update(valid=False,relative_doa_deg=None,reasons=['EMPTY_CSV','NO_FRESH_DOA'])
+        offers=self._run_agent_scheduler_once(agent,stale)
+        self.assertNotIn('doa',[k for k,t,p in offers])
+        health=next(p for k,t,p in offers if k=='health')
+        self.assertEqual(health['why'],['EMPTY_CSV','NO_FRESH_DOA'])
+        self.assertEqual(next(p for k,t,p in self._run_agent_scheduler_once(agent,snapshot) if k=='health')['why'],[])
+
+    def test_one_failing_topic_does_not_stop_the_others(self):
+        agent=self.a;agent.profile='balanced';snapshot=agent.snapshot()
+        def broken(d,h): raise RuntimeError('unexpected source value')
+        agent._doa_payload=broken
+        keys=[k for k,t,p in self._run_agent_scheduler_once(agent,snapshot)]
+        self.assertTrue({'health','state','diagnostic-angular'}<=set(keys) or {'health','state','angular'}<=set(keys),keys)
+        self.assertNotIn('doa',keys)
+        self.assertEqual(agent.publish_errors,{'telemetry/doa':'RUNTIMEERROR'})
+        detail=next(p for k,t,p in self._run_agent_scheduler_once(agent,snapshot) if k=='detail')
+        self.assertEqual(detail['perr'],['telemetry/doa'])
+        agent._snapshot();self.assertEqual(agent.snapshot_data['link']['publish_errors'],{'telemetry/doa':'RUNTIMEERROR'})
+        del agent._doa_payload;agent.last_doa_q=0
+        self.assertIn('doa',[k for k,t,p in self._run_agent_scheduler_once(agent,snapshot)])
+        self.assertEqual(agent.publish_errors,{})
+
+    def test_diagnostic_angular_frames_are_never_back_to_back(self):
+        # A state flip right after (re)connect used to send one frame per schedule within half a second.
+        agent=self.a;agent.profile='balanced';valid=agent.snapshot()
+        invalid=copy.deepcopy(valid);invalid['detection'].update(valid=False,relative_doa_deg=None,reasons=['DAQ_NOT_HEALTHY'])
+        control=Client(cfg={},client_id='spacing-control');bulk=Client(cfg={},client_id='spacing-bulk')
+        control.ready=bulk.ready=True;agent.clients={'control':control,'bulk':bulk};agent._generation=0
+        agent.bulk_resume_after=time.monotonic()+60;offers=[];snaps=[invalid,valid,valid]
+        agent._offer=lambda *a,**k:offers.append(a[0]) or True
+        def next_snapshot():
+            snap=snaps.pop(0)
+            if not snaps:agent.stop_event.set()
+            return snap
+        agent.snapshot=next_snapshot;agent.stop_event.clear();agent._schedule()
+        self.assertEqual(offers.count('diagnostic-angular'),1,offers)
+
+    def test_diagnostic_angular_that_expired_unsent_is_offered_again(self):
+        # An expired frame never used the link, so the next one must not wait a whole budget period.
+        agent=self.a;agent.profile='balanced';invalid=agent.snapshot()
+        invalid['detection'].update(valid=False,relative_doa_deg=None,reasons=['DAQ_NOT_HEALTHY'])
+        control=Client(cfg={},client_id='expiry-control');bulk=Client(cfg={},client_id='expiry-bulk')
+        control.ready=bulk.ready=True;agent.clients={'control':control,'bulk':bulk};agent._generation=0
+        agent.bulk_resume_after=time.monotonic()+60;offers=[];snaps=[invalid]*3
+        def offer(key,*a,**k):
+            offers.append(key)
+            if key=='diagnostic-angular' and offers.count(key)==1:
+                agent.mqtt_topic_delivery['telemetry/diagnostic/angular']={
+                    'state':'ERROR','updated_ms':now_ms(),'error':'OUTBOX_EXPIRED'}
+            return True
+        agent._offer=offer
+        def next_snapshot():
+            snap=snaps.pop(0)
+            if not snaps:agent.stop_event.set()
+            return snap
+        agent.snapshot=next_snapshot;agent.stop_event.clear();agent._schedule()
+        self.assertEqual(offers.count('diagnostic-angular'),2,offers)
+
     def test_ground_keeps_diagnostic_angular_unverified_and_out_of_live_detection(self):
         cfg=load_config();cfg['state_dir']=str(self.path/'ground-diagnostic-angular')
         ground=Ground(cfg);self.addCleanup(ground.journal.close)
@@ -1776,6 +1859,16 @@ class BackupLinkTests(unittest.TestCase):
                 self.assertIsNone(a.bulk_reason)
                 self.assertEqual(a.bulk_resume_after,0)
                 self.assertEqual('telemetry/angular' in self.suffixes(bulk),sent)
+
+    def test_diagnostic_doa_goes_ahead_of_diagnostic_angular(self):
+        a=self.a
+        atomic_write(a.source.path/'doa.xml',f'<DATA><TIME>{now_ms()}</TIME><FREQUENCY>433.92</FREQUENCY><DOA>200.0</DOA></DATA>'.encode())
+        a.source.poll(force=True);a._snapshot()
+        control,bulk,backup=self.links(backup=False)
+        self.run_once()
+        options={t.split(a.prefix+'/',1)[1]:o for _,t,_,o in control.sent}
+        self.assertEqual(options['telemetry/diagnostic/doa']['priority'],2)
+        self.assertLess(options['telemetry/diagnostic/doa']['priority'],3)
 
     def test_source_level_reasons_pause_angular_on_both_links(self):
         a=self.a;live=a.snapshot()

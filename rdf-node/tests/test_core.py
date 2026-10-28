@@ -285,6 +285,16 @@ class SourceTests(unittest.TestCase):
         self.src=Source(self.cfg,self.j)
     def write(self,idx):
         t=now_ms();(self.path/'status.json').write_bytes(compact(status(t,idx)));(self.path/'DOA_value.html').write_bytes(csv_bytes(record(t)))
+    def test_empty_doa_file_is_told_apart_from_one_that_stopped_changing(self):
+        self.src.poll(force=True)
+        (self.path/'DOA_value.html').write_bytes(b'')
+        self.src.poll(force=True);reasons=self.src.view(True)['reasons']
+        self.assertIn('EMPTY_CSV',reasons);self.assertNotIn('DOA_FILE_NOT_UPDATING',reasons)
+        old=time.time()-60;os.utime(self.path/'DOA_value.html',(old,old))
+        self.src.poll(force=True);reasons=self.src.view(True)['reasons']
+        self.assertIn('DOA_FILE_NOT_UPDATING',reasons)
+        self.write(2);self.src.poll(force=True)
+        self.assertNotIn('DOA_FILE_NOT_UPDATING',self.src.view(True)['reasons'])
     def test_raw_settings_preserve_exact_successful_file_bytes(self):
         raw=b' \n'+compact(settings())+b'\n'
         (self.path/'settings.json').write_bytes(raw)

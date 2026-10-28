@@ -94,37 +94,85 @@ ACL, dan routing di [MQTT_GROUND.md](MQTT_GROUND.md#broker-cadangan-mirror-lanon
 ## DoA compact
 
 ```json
-{"v":2,"sid":"7a8b9c0d","q":1245,"t":1790668800123,"f":433920000,"a":137.4,"c":8.27,"p":-54.2,"rev":7,"ok":1}
+{"v":2,"sid":"7a8b9c0d","q":1245,"t":1790668800123,"f":433920000,"a":137.4,"c":8.27,"p":-54.2,"rev":7,"ok":1,"clk":1,"age":280,"reason":[]}
 ```
 
 `t`: timestamp native ms; `q`: sequence sampel adapter, bukan frame DAQ.
 `a`: bila `ok=1`, sudut menurut konvensi config; bila `ok=0`, nilai raw source dan hanya
 berarti RAW dengan `angle_reference="RAW"`. `c`: PAPR/native dB, bukan probabilitas;
-`p`: power native signed; `f`: VFO Hz; `rev`: safe config revision-at-sample.
-`ok=1` berarti kandidat LIVE terverifikasi. Varian unverified pada topic yang sama:
+`p`: power native signed; `f`: VFO Hz; `rev`: safe config revision-at-sample, atau `null` bila
+sampel belum teratribusi ke settings. `clk`: 1 bila jam Edge tersinkron, 0 bila tidak. `age`: umur
+sampel di source (ms) saat dikirim. `reason`: daftar kode alasan sampel belum LIVE; kosong bila
+`ok=1`.
+
+Edge mengirim **setiap sampel baru** dari `DOA_value.html`, valid atau tidak, dengan label. Penerima
+yang menentukan cara menampilkannya; label tidak boleh dipakai untuk membuang data diam-diam.
+`ok=1` berarti kandidat LIVE terverifikasi. Sampel lain dikirim dengan `ok=0`:
 
 ```json
-{"v":2,"sid":"7a8b9c0d","q":1246,"t":1790668800123,"f":433920000,"a":10.0,"c":8.27,"p":-54.2,"rev":7,"ok":0,"trust":"UNVERIFIED","angle_reference":"RAW","validation_reasons":["SOURCE_UNVERIFIED","ANGLE_UNVERIFIED"]}
+{"v":2,"sid":"7a8b9c0d","q":1246,"t":1790668800123,"f":433920000,"a":10.0,"c":8.27,"p":-54.2,"rev":7,"ok":0,"clk":0,"age":1840,"reason":["CLOCK_UNTRUSTED"],"trust":"UNVERIFIED","angle_reference":"RAW"}
 ```
 
-Edge hanya mengirim varian ini bila parsing, freshness/clock, DAQ, dan atribusi config lulus
-serta satu-satunya gate yang gagal adalah authority dan/atau verifikasi konvensi sudut.
-Ground menampilkannya di jalur diagnostic; tidak mengisi detection atau menjadi dasar kontrol.
-Nilai contoh sintetis. Radio tidak menambahkan SNR yang belum terbukti sumbernya.
+Bila satu-satunya alasan adalah authority dan/atau konvensi sudut yang belum disetujui
+(`SOURCE_UNVERIFIED`, `ANGLE_UNVERIFIED`), payload juga membawa `validation_reasons` dengan isi yang
+sama. Itu nama field lama untuk kasus ini, dipertahankan supaya penerima yang ditulis sebelum
+`reason` ada tetap bisa membacanya:
+
+```json
+{"v":2,"sid":"7a8b9c0d","q":1247,"t":1790668800123,"f":433920000,"a":10.0,"c":8.27,"p":-54.2,"rev":7,"ok":0,"clk":1,"age":280,"reason":["SOURCE_UNVERIFIED","ANGLE_UNVERIFIED"],"trust":"UNVERIFIED","angle_reference":"RAW","validation_reasons":["SOURCE_UNVERIFIED","ANGLE_UNVERIFIED"]}
+```
+
+Sampel yang sama tidak dikirim ulang: bila source tidak punya sampel baru (file kosong, basi, atau
+tidak berubah), `telemetry/doa` diam dan alasannya ada di `health.why`. Nilai contoh sintetis. Radio
+tidak menambahkan SNR yang belum terbukti sumbernya.
+
+### Kode alasan DoA (`reason`, `health.why`)
+
+| Kode | Arti |
+|---|---|
+| `SETUP_REQUIRED` | Folder `_share` KrakenSDR belum dipilih. |
+| `EMPTY_CSV` | `DOA_value.html` terbaca tetapi tidak berisi baris VFO. |
+| `DOA_FILE_NOT_UPDATING` | `DOA_value.html` tidak ditulis ulang lebih lama dari `freshness.doa_ms` (default 2,5 s), apa pun isinya. |
+| `NO_RECORD` | Belum pernah ada sampel DoA yang terbaca sejak Edge start. |
+| `NO_FRESH_DOA` | Sampel terakhir lebih tua dari `freshness.doa_ms`, atau timestamp-nya di masa depan. |
+| `STATUS_STALE_OR_UNAVAILABLE` | `status.json` tidak berubah dalam `freshness.source_status_ms` atau tidak terbaca. |
+| `DAQ_NOT_HEALTHY` | DAQ tidak sehat (`daq_ok`, salah satu sync, atau frame tidak maju). |
+| `CLOCK_UNTRUSTED` | Jam Edge tidak tersinkron NTP. |
+| `SOURCE_UNVERIFIED`, `ANGLE_UNVERIFIED` | Authority source dan/atau konvensi sudut belum disetujui (`sudo rdf-node setup --verify-source`). |
+| `CONFIG_UNAVAILABLE` | `settings.json` tidak terbaca atau tidak valid. |
+| `CONFIG_ATTRIBUTION_UNVERIFIED` | Sampel tidak bisa dipastikan dibuat dengan settings yang sekarang (mis. sesaat setelah settings berubah). |
+| `CONTROL_IN_PROGRESS` | Sebuah perintah SDR sedang berjalan. |
+| kode parse lain | Kesalahan baca `DOA_value.html`, mis. `CSV_FIELD_COUNT`, `OUTPUT_VFO_MISMATCH`, `VFO_RECORD_AMBIGUOUS_OR_MISSING`, `FILE_TOO_LARGE_OR_NOT_REGULAR`, `FileNotFoundError:DOA_UNAVAILABLE`. |
+
+Membedakan "tidak ada sinyal" dari "pengolahan macet" (status DAQ segar, tanpa
+`STATUS_STALE_OR_UNAVAILABLE`):
+
+| `health.why` berisi | Arti yang paling mungkin |
+|---|---|
+| `EMPTY_CSV` tanpa `DOA_FILE_NOT_UPDATING` | KrakenSDR masih menulis file, tetapi tidak ada VFO yang menghasilkan DoA, biasanya karena tidak ada sinyal di atas squelch. Pastikan dengan uji sinyal di frekuensi VFO. |
+| `DOA_FILE_NOT_UPDATING` | DAQ berjalan, tetapi file hasil DoA berhenti ditulis: pengolahan DoA KrakenSDR macet atau dimatikan (`en_doa`). |
+| `STATUS_STALE_OR_UNAVAILABLE` | KrakenSDR (DAQ) sendiri tidak berjalan atau tidak menulis status. |
+
+Edge hanya melaporkan bukti; ia tidak menyimpulkan "tidak ada sinyal". Penerima menampilkan kode
+dan arti di atas.
 
 ## Health
 
 ```json
-{"v":2,"sid":"7a8b9c0d","q":86,"t":1790668800123,"run":1,"daq":1,"drop":12,"age":280,"temp":61.4,"clk":1,"rev":7}
+{"v":2,"sid":"7a8b9c0d","q":86,"t":1790668800123,"run":1,"daq":1,"drop":12,"age":280,"temp":61.4,"clk":1,"rev":7,"why":[]}
 ```
 
 Run: 0 stopped, 1 running, 2 starting, 3 stopping, 4 error, 255 unknown.
-DAQ: 0 degraded, 1 healthy, 2 unknown. `age` ialah umur DoA pada source, bukan latency E2E.
+DAQ: 0 degraded, 1 healthy, 2 unknown. `age` ialah umur sampel DoA terakhir yang berhasil dibaca dari
+source, bukan latency E2E. Selama `DOA_value.html` kosong atau rusak, sampel terakhir tetap dipakai,
+jadi `age` terus naik. `why` menjelaskan sebabnya (kode di tabel atas; kosong bila DoA LIVE).
 Clock: 0 untrusted, 1 synced. Field unavailable dapat null. Health q tetap maju saat SDR stop.
 
 `telemetry/health/detail` (tiap 10 s) menambah field aditif status link PPP: `ppp` (`UP`/`DOWN`),
 `peer` (hasil ping peer), `ppp_svc` (`ActiveState` unit `t900-ppp.service`), dan `ppp_restarts`
-(`NRestarts` systemd). Consumer harus menerima field yang tidak ada dari Edge lama. Lihat
+(`NRestarts` systemd), serta `perr`: daftar topic yang gagal disusun pada putaran publish terakhir
+(kosong bila semua berhasil; satu topic yang gagal tidak menghentikan topic lain). Consumer harus
+menerima field yang tidak ada dari Edge lama. Lihat
 [MQTT_TOPIC_SUMMARY.md](MQTT_TOPIC_SUMMARY.md#telemetryhealthdetail).
 
 ## Grafik lengkap 360 titik

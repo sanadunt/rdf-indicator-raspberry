@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+- Labelled DoA (planned release 1.4.0). `telemetry/doa` is no longer withheld when a gate fails:
+  every new DoA sample (new `q` with a parsed timestamp and angle) is published once with
+  `ok: 0` when the source is stale, DAQ is not healthy, the clock is not verified, or a
+  verification flag is missing. New fields on every DoA: `clk` (clock verified, 0/1), `age`
+  (source age in ms at publish time), and `reason` (the gate codes, `[]` when `ok: 1`). The angle
+  `a` is the reference-corrected angle when `ok: 1` and the raw native angle when `ok: 0`
+  (`angle_reference: "RAW"`, `trust: "UNVERIFIED"`). The old `validation_reasons` field is still
+  sent, but only when the sample is blocked by `SOURCE_UNVERIFIED`/`ANGLE_UNVERIFIED` alone, so
+  existing strict consumers keep accepting that case. A sample is never sent twice; when there is
+  no new sample there is no DoA, and `telemetry/health` carries the why.
+- `telemetry/health` adds `why` (the current DoA gate codes) so Ground can tell "no signal above
+  squelch" (`NO_FRESH_DOA` while `DOA_value.html` keeps being rewritten) from "processing stuck"
+  (`DOA_FILE_NOT_UPDATING`, new: the file itself has not changed within `freshness.doa_ms`). The
+  code table is in `docs/PROTOCOL.md`.
+- `telemetry/detail` adds `perr`: the topics whose last publish attempt raised an error. Each
+  scheduled topic is now published inside its own error boundary, so one failing topic no longer
+  stops health, DoA, or angular from going out in the same tick.
+- Diagnostic angular frames on the blocked schedule are spaced at least 6 s apart and
+  `diagnostic/doa` now goes ahead of them in the Control outbox (priority 2), so the larger
+  angular frames cannot starve the small DoA diagnostic. While the source still produces new DoA
+  samples (valid or labelled), the Control budget reserves room for them, so diagnostic angular is
+  sent less often (about every 60 s instead of about every 9 s on an 850 B/s budget); once the
+  source is stale the smaller reserve applies again. A diagnostic angular frame that expired in the
+  outbox before it was sent (for example behind the burst at connect) is replaced by a current one
+  on the next tick instead of waiting a whole budget period.
+- Compatibility: consumers that only read `ok: 1` DoA are unaffected. Ground Console 3.0.0 and
+  the bundled `rdf-ground` receiver still treat `ok: 0` DoA with reasons other than
+  `SOURCE_UNVERIFIED`/`ANGLE_UNVERIFIED` as invalid and drop it; they keep working on health and
+  verified DoA until they are updated to read the new labels.
+
 - `cmd/config/get` on the primary broker is now answered with `settings/reported` whether or not
   the primary uses TLS. `mqtt.tls: false` is the operator's choice of a trusted link (for example
   the private PPP/T900 point-to-point link) that already carries telemetry and `config.patch` in
