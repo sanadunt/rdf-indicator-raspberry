@@ -1,4 +1,4 @@
-# RDF Node 1.0.0
+# RDF Node 1.5.0
 
 **Bridge SDR-DoA/KrakenSDR + panel Raspberry 480x320 + receiver Ground pendamping.**
 
@@ -111,7 +111,7 @@ pada desktop; argumen kiosk tidak memasang driver HDMI/DSI/SPI atau mengkalibras
 Salin ZIP ke Raspberry, kemudian:
 
 ```bash
-unzip rdf-node-1.0.0.zip
+unzip rdf-node-1.5.0.zip
 cd rdf-node
 sudo bash install.sh --kiosk=rdf
 ```
@@ -206,7 +206,7 @@ menyediakan **broker TLS terpisah + Ground receiver/preview**. Langkah di bawah 
 **di Ubuntu**, bukan di Raspberry:
 
 ```bash
-unzip rdf-node-1.0.0.zip
+unzip rdf-node-1.5.0.zip
 cd rdf-node
 sudo apt update
 sudo apt install -y python3 mosquitto mosquitto-clients openssl
@@ -466,6 +466,10 @@ Jangan menjalankan demo pada port yang sudah dipakai service. Gunakan `--port 18
 untuk preview tambahan. Demo membuat fixture pada temp/state dir, tidak menyentuh engine asli,
 MQTT OFF, dan watermark DEMO tidak disembunyikan.
 
+Untuk menguji Ground Console di laptop (Edge asli, broker Mosquitto loopback, sumber KrakenSDR
+sintetis lewat `python3 run.py demo-source DIR`, dan opsi jam `testing.clock: system`), ikuti
+[docs/UJI_TANPA_ALAT.md](docs/UJI_TANPA_ALAT.md).
+
 Tes lokal:
 
 ```bash
@@ -523,6 +527,10 @@ Jangan membagikan full settings, credential bundle, file hash/password atau log 
 - [T900/PPP: restart, pra-terbang, dan pencegahan](docs/T900_PPP.md)
 - [Pengujian dan keterbatasan verifikasi](docs/TEST_REPORT.md)
 - [Sumber teknis dan lisensi](docs/SOURCES.md)
+- [Kontrak MQTT dan skema per topik](contract/README.md)
+- [Upgrade ke 1.5.0, menyamakan rdf-ground, dan membersihkan retained](docs/UPGRADE_1.5.md)
+- [Uji sinyal 437.425 MHz](docs/UJI_SINYAL_437.md)
+- [Uji tanpa alat di laptop](docs/UJI_TANPA_ALAT.md)
 - [Screenshot panel](evidence/overview-480x320.png)
 
 Lisensi source baru: MIT. Parser YAML yang disertakan memiliki lisensi MIT terpisah.

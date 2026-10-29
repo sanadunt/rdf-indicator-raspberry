@@ -23,6 +23,16 @@ Demo CLI tidak membuka koneksi MQTT. Prefix demo tersedia hanya bagi integration
 | ack/config, ack/operation | UAV -> Ground | 1 | tidak |
 
 
+### Versi kontrak
+
+`availability` (online, Last Will, dan farewell), `capabilities`, dan `state` membawa
+`contract`: revisi kontrak MQTT `major.minor`, mulai `"1.5"`. `capabilities.version` adalah nomor
+rilis paket (`1.5.0`). Revisi kontrak adalah nomor rilis terakhir yang mengubah topik atau field;
+rilis patch tidak mengubahnya. Minor baru hanya menambah field atau nilai, sedangkan major baru
+boleh menghapus atau mengubah arti field. Edge sebelum 1.5.0 tidak mengirim `contract` dan selalu
+melaporkan `version: "1.0.0"`. Skema JSON per topik yang bisa dibaca mesin ada di
+[`contract/schema/`](../contract/README.md), lengkap dengan validator `contract/validate.py`.
+
 Session expiry nol, clean start selalu. State/capabilities mengaitkan alias sid 8 hex dengan
 boot UUID dan instance UUID. Alias yang belum dikenal atau bentrok tidak menjadi authority.
 Jangan memperlakukan retained state sebagai heartbeat. Freshness menggunakan health/sumber.
@@ -101,7 +111,9 @@ ACL, dan routing di [MQTT_GROUND.md](MQTT_GROUND.md#broker-cadangan-mirror-lanon
 `a`: bila `ok=1`, sudut menurut konvensi config; bila `ok=0`, nilai raw source dan hanya
 berarti RAW dengan `angle_reference="RAW"`. `c`: PAPR/native dB, bukan probabilitas;
 `p`: power native signed; `f`: VFO Hz; `rev`: safe config revision-at-sample, atau `null` bila
-sampel belum teratribusi ke settings. `clk`: 1 bila jam Edge tersinkron, 0 bila tidak. `age`: umur
+sampel belum teratribusi ke settings. `clk`: 1 bila jam Edge tersinkron, 0 bila tidak. `ok=1` dengan
+`clk=0` hanya terjadi dengan `testing.clock: system` (uji tanpa alat, `state.clock="TEST"`; lihat
+[UJI_TANPA_ALAT.md](UJI_TANPA_ALAT.md)). `age`: umur
 sampel di source (ms) saat dikirim. `reason`: daftar kode alasan sampel belum LIVE; kosong bila
 `ok=1`.
 
@@ -139,7 +151,7 @@ tidak menambahkan SNR yang belum terbukti sumbernya.
 | `DAQ_NOT_HEALTHY` | DAQ tidak sehat (`daq_ok`, salah satu sync, atau frame tidak maju). |
 | `CLOCK_UNTRUSTED` | Jam Edge tidak tersinkron NTP. |
 | `SOURCE_UNVERIFIED`, `ANGLE_UNVERIFIED` | Authority source dan/atau konvensi sudut belum disetujui (`sudo rdf-node setup --verify-source`). |
-| `CONFIG_UNAVAILABLE` | `settings.json` tidak terbaca atau tidak valid. |
+| `CONFIG_UNAVAILABLE` | `settings.json` tidak terbaca, bukan JSON object, atau tidak ada satu pun field aman. Satu field aman yang rusak tidak lagi memicu kode ini: field itu dikeluarkan dari subset aman dan namanya muncul di `config.invalid_settings` snapshot. |
 | `CONFIG_ATTRIBUTION_UNVERIFIED` | Sampel tidak bisa dipastikan dibuat dengan settings yang sekarang (mis. sesaat setelah settings berubah). |
 | `CONTROL_IN_PROGRESS` | Sebuah perintah SDR sedang berjalan. |
 | kode parse lain | Kesalahan baca `DOA_value.html`, mis. `CSV_FIELD_COUNT`, `OUTPUT_VFO_MISMATCH`, `VFO_RECORD_AMBIGUOUS_OR_MISSING`, `FILE_TOO_LARGE_OR_NOT_REGULAR`, `FileNotFoundError:DOA_UNAVAILABLE`. |
@@ -171,7 +183,8 @@ Clock: 0 untrusted, 1 synced. Field unavailable dapat null. Health q tetap maju 
 `telemetry/health/detail` (tiap 10 s) menambah field aditif status link PPP: `ppp` (`UP`/`DOWN`),
 `peer` (hasil ping peer), `ppp_svc` (`ActiveState` unit `t900-ppp.service`), dan `ppp_restarts`
 (`NRestarts` systemd), serta `perr`: daftar topic yang gagal disusun pada putaran publish terakhir
-(kosong bila semua berhasil; satu topic yang gagal tidak menghentikan topic lain). Consumer harus
+(kosong bila semua berhasil; satu topic yang gagal tidak menghentikan topic lain) dan `crej`: jumlah
+command masuk yang dibuang sebelum diproses (lihat [Command envelope](#command-envelope)). Consumer harus
 menerima field yang tidak ada dari Edge lama. Lihat
 [MQTT_TOPIC_SUMMARY.md](MQTT_TOPIC_SUMMARY.md#telemetryhealthdetail).
 
@@ -251,6 +264,40 @@ dan timestamp fresh. Ground mem-parse teks sebagai JSON object, menyimpan teks m
 menurunkan subset safe untuk form mutation. Safe settings hanya diberikan bila report `rev`
 cocok dengan `state.cfg`; teks mentah tetap dapat ditampilkan.
 
+### Error di ACK
+
+ACK `REJECTED`, `FAILED`, dan `OUTCOME_UNKNOWN` karena error membawa tiga field di `result`:
+
+```json
+{"v":2,"sid":"7a8b9c0d","id":"g01-00001235","status":"REJECTED","t":1790668800456,"rev":7,
+ "result":{"error":"HELPER_UNAVAILABLE",
+           "message":"Helper kontrol (rdf-control-helper) tidak berjalan atau socket-nya tidak ada; perintah tidak dijalankan.",
+           "detail":"FileNotFoundError (No such file or directory): /run/rdf-node-control/control.sock"}}
+```
+
+| Field | Isi |
+|---|---|
+| `error` | Kode stabil `[A-Z][A-Z0-9_]*` untuk mesin. Field ini sudah ada sejak 1.0.0. |
+| `message` | Penjelasan bahasa Indonesia untuk operator. Selalu ada bersama `error`; kode yang belum punya teks khusus mendapat teks umum dengan kodenya. |
+| `detail` | Opsional, maks. 200 karakter: penyebab teknis (jenis exception dan pesannya, misalnya path socket). Tidak pernah memuat isi credential. |
+
+Edge tidak lagi mengirim nama tipe exception mentah (`OSERROR`, `TIMEOUTERROR`,
+`JOURNAL_OR_REQUEST_ERROR`). Penggantinya:
+
+| Dulu | Sekarang | Stage | Arti |
+|---|---|---|---|
+| `OSERROR` saat socket helper tidak ada | `HELPER_UNAVAILABLE` | `REJECTED` sebelum jurnal, atau `FAILED` bila helper hilang setelah perintah diterima | Socket tidak bisa dibuka; tidak ada yang dikirim, jadi tidak ada yang dijalankan. |
+| `PERMISSIONERROR` | `HELPER_ACCESS_DENIED` | `REJECTED` atau `FAILED` | Socket ada, tetapi user agent tidak boleh membukanya. |
+| `TIMEOUTERROR` | `HELPER_TIMEOUT` | `OUTCOME_UNKNOWN` | Request sudah terkirim, jawaban tidak datang. |
+| `OSERROR` setelah request terkirim | `HELPER_CONNECTION_LOST` | `OUTCOME_UNKNOWN` | Socket putus setelah request terkirim. |
+| `OSERROR`, `PERMISSIONERROR`, dan sejenisnya dari dalam helper | `HELPER_INTERNAL_ERROR` | `FAILED` | Error tak terduga di helper; `detail` memuat penyebabnya. |
+| `JOURNAL_OR_REQUEST_ERROR` | `INVALID_COMMAND_FIELD`, `JOURNAL_UNAVAILABLE`, atau `INTERNAL_ERROR` | `REJECTED` | Tipe/nilai field salah, journal SQLite gagal, atau error lain di agent. |
+
+Mutation yang butuh helper (`config.patch`, `processing.set`, `service.restart`, `ppp.restart`,
+`system.reboot.*`, `system.shutdown.*`) ditolak `REJECTED HELPER_UNAVAILABLE` sebelum masuk jurnal
+bila helper tidak menjawab status. `stream.set`, `config.get`, dan `operation.get` tidak butuh
+helper. Teks lengkap per kode ada di `docs/CONTROL.md#pesan-error-di-ack`.
+
 ## Telemetry delivery and evidence
 
 Ground tidak mengirim konfirmasi aplikasi untuk telemetry. QoS 1 PUBACK hanya berarti broker
@@ -329,9 +376,24 @@ PPP restart uses the ordinary v2 envelope on `cmd/service/ppp/restart`:
 ```
 
 Semua nilai contoh adalah fixture, jangan dikirim mentah. Ground membuat envelope dari identity
-terkini dan `state.cfg` untuk `base_rev`. TTL default 15 s, maksimum 30 s. Unknown fields ditolak.
-ID sama+payload sama mengembalikan hasil/progress tersimpan, bukan eksekusi ulang.
-ID sama+payload berbeda ditolak. Topic harus sesuai `op` dan command tidak retained.
+terkini dan `state.cfg` untuk `base_rev`. TTL default 15 s, maksimum 30 s.
+
+Field yang tidak dikenal Edge diabaikan: tidak disimpan di jurnal, tidak berpengaruh apa pun, dan
+namanya (maks. 16, masing-masing maks. 64 karakter) dikembalikan di `result.ignored` pada ACK
+pertama (`ACCEPTED`, `APPLIED` untuk read op, atau `REJECTED`). Sebelumnya command seperti itu ditolak
+`UNKNOWN_COMMAND_FIELD`. Pengaman tidak ikut longgar: `sid`/`boot`, `issued_ms`/`expires_ms`,
+`base_rev` untuk mutation, field wajib tiap op, dan batas nilai tetap wajib, jadi field wajib yang
+salah eja tetap membuat command ditolak (misalnya `base_revision` diabaikan, lalu `base_rev` yang
+hilang ditolak `CONFIG_REVISION_CONFLICT`). ID sama dengan payload sama, setelah field asing dibuang,
+mengembalikan hasil atau progress yang tersimpan, bukan eksekusi ulang. ID sama dengan payload
+berbeda ditolak. Topic harus sesuai `op`, dan command tidak boleh retained.
+
+Command di atas 4.096 byte ditolak `COMMAND_TOO_LARGE`. Sampai 64 KiB, Edge masih mem-parse-nya
+untuk membaca `id`, lalu mengirim ACK `REJECTED`; di atas itu, atau bila payload bukan JSON
+(`COMMAND_NOT_JSON`), ID tidak terbaca sehingga tidak ada ACK. Antrean inbound yang penuh membuang
+command dengan `COMMAND_QUEUE_FULL`. Semua penolakan tanpa ACK tetap terlihat: masuk `remote_rejects`
+di snapshot panel, dihitung di `link.command_drops`, dan jumlahnya ada di `telemetry/health/detail`
+sebagai `crej`.
 
 ACK berisi `v,sid,id,status,t,rev,result`. APPLIED memerlukan bukti sesuai aksi.
 PERSISTED_UNVERIFIED dan OUTCOME_UNKNOWN bukan sinonim gagal atau berhasil.

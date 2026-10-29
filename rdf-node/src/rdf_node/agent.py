@@ -7,7 +7,7 @@ import time
 import uuid
 from collections import deque
 from pathlib import Path
-from . import __version__
+from . import __version__, CONTRACT
 from .util import now_ms, compact, strict_json, read_boot_id, atomic_write, stable_read
 from .config import PROFILES
 from .journal import Journal
@@ -26,6 +26,8 @@ ANGULAR_CONTROL_BASELINE_INVALID=510
 # Bulk yields the shared PPP link while a Control PUBACK is this late or this many Bulk bytes are unACKed.
 BULK_YIELD_PENDING_MS=1000
 DIAGNOSTIC_ANGULAR_MIN_GAP_S=6
+# Commands above COMMAND_MAX_BYTES are refused; up to COMMAND_READ_MAX_BYTES they are parsed to ACK the id.
+COMMAND_MAX_BYTES=4096; COMMAND_READ_MAX_BYTES=65536
 BULK_YIELD_BACKLOG_BYTES=2048
 
 class Agent:
@@ -42,7 +44,7 @@ class Agent:
         self.settings_request_id=None; self.settings_request_payload=None
         self.stop_event=threading.Event(); self.events=queue.Queue(32)
         self.bulk_resume_after=time.monotonic()+cfg['telemetry']['resume_stable_seconds']
-        self.hq=0; self.last_doa_q=0; self.last_angular_q=0; self.publish_errors={}
+        self.hq=0; self.last_doa_q=0; self.last_angular_q=0; self.publish_errors={}; self.inbound_rejects={}
         self.diagnostic_q=0; self.diagnostic_angular_q=0
         self.angular_abort=0; self.bulk_reason='BOOTSTRAP'; self.helper_status={}
         self.clients={}; self._generation=-1; self.last_config_rev=None; self.last_sent_state=None
@@ -153,7 +155,8 @@ class Agent:
     def _command_subscriptions(self):
         return [(self.prefix+'/'+suffix,1,True) for suffix in OPS.values()]
     def _will(self):
-        return (self.prefix+'/availability',compact({'v':2,'sid':self.sid,'online':False,'reason':'CONNECTION_LOST'}))
+        return (self.prefix+'/availability',compact({'v':2,'sid':self.sid,'contract':CONTRACT,'online':False,
+                                                      'reason':'CONNECTION_LOST'}))
     def mqtt_settings_view(self):
         with self.mqtt_config_lock:
             settings=dict(self.mqtt_desired); m=self.cfg['mqtt'];tls=settings['tls']
@@ -363,7 +366,7 @@ class Agent:
             self.backup_active=settings
             self.backup_client=self._new_backup_client(settings)
             # Tell consumers on the old backup broker that this node left it (a clean DISCONNECT drops the Will).
-            farewell={'v':2,'sid':self.sid,'online':False,'t':now_ms(),
+            farewell={'v':2,'sid':self.sid,'contract':CONTRACT,'online':False,'t':now_ms(),
                       'reason':'BACKUP_RECONFIGURED' if self.backup_client else 'BACKUP_DISABLED'}
             self._retire([old],[self.backup_client],farewell=farewell if old and old.ready else None)
             with self.settings_request_lock:
@@ -415,19 +418,32 @@ class Agent:
         for t in self.threads: t.join(3)
         # A long lifecycle worker may still be reconciling; daemon exits without replay.
         if not self.commands.thread.is_alive(): self.journal.close()
+    def _command_dropped(self,topic,link,code):
+        # A command that never reaches CommandManager still shows up in the panel and in health/detail.
+        with self.lock: self.inbound_rejects[code]=self.inbound_rejects.get(code,0)+1
+        suffix=topic[len(self.prefix)+1:] if isinstance(topic,str) and topic.startswith(self.prefix+'/') else ''
+        op=next((name for name,path in OPS.items() if path==suffix),'unknown')
+        self.remote_rejected(CommandManager.origin('ground-controller',link),op,code)
     def _incoming(self,topic,payload,retained,link='primary',epoch=None):
-        if len(payload)>4096: return
+        # Larger payloads are still read far enough to answer them; only absurd ones go unanswered.
+        if len(payload)>COMMAND_READ_MAX_BYTES: return self._command_dropped(topic,link,'COMMAND_TOO_LARGE')
         # Keep half of the queue for the primary (Ground) link.
-        if link=='backup' and self.events.qsize()>=self.events.maxsize//2: return
+        if link=='backup' and self.events.qsize()>=self.events.maxsize//2:
+            return self._command_dropped(topic,link,'COMMAND_QUEUE_FULL')
         try: self.events.put_nowait((link,epoch,topic,payload,retained))
-        except queue.Full: pass
+        except queue.Full: self._command_dropped(topic,link,'COMMAND_QUEUE_FULL')
     def _events(self):
         while not self.stop_event.is_set():
             try: link,epoch,topic,data,retained=self.events.get(timeout=.2)
             except queue.Empty: continue
             try:
                 if epoch is not None and epoch!=self.link_epoch.get(link): continue
-                j=strict_json(data)
+                try: j=strict_json(data)
+                except (ValueError,RecursionError):
+                    self._command_dropped(topic,link,'COMMAND_NOT_JSON'); continue
+                if len(data)>COMMAND_MAX_BYTES:
+                    with self.lock: self.inbound_rejects['COMMAND_TOO_LARGE']=self.inbound_rejects.get('COMMAND_TOO_LARGE',0)+1
+                    self.commands.reject(j,'ground-controller',link,'COMMAND_TOO_LARGE'); continue
                 self.commands.submit(j,'ground-controller',retained=retained,topic=topic,link=link)
             except (ValueError,TypeError,KeyError,RecursionError): pass
             finally: self.events.task_done()
@@ -448,7 +464,9 @@ class Agent:
     def _snapshot(self):
         host=self.monitor.snapshot()
         if self.demo: host['clock_trusted']=True; host['clock_state']='DEMO'
-        view=self.source.view(host['clock_trusted'],self.commands.busy)
+        # The data gates may use a TEST clock (testing.clock: system); clk fields still say unverified.
+        host['clock_usable']=host['clock_trusted'] or host['clock_state']=='TEST'
+        view=self.source.view(host['clock_usable'],self.commands.busy)
         diagnostic=self.source.diagnostic_view(view['reasons'])
         processing='UNKNOWN'
         if host['service_state']=='ACTIVE': processing='RUNNING'
@@ -482,7 +500,7 @@ class Agent:
         if not view['valid'] and view['reasons']: alerts.append({'severity':'warning','code':view['reasons'][0],'text':view['reasons'][0]})
         if self.source.error: alerts.append({'severity':'warning','code':'SOURCE_READ','text':self.source.error})
         self.snapshot_seq+=1
-        snap={'schema_version':2,'version':__version__,'mode':'DEMO' if self.demo else 'LIVE',
+        snap={'schema_version':2,'version':__version__,'contract':CONTRACT,'mode':'DEMO' if self.demo else 'LIVE',
               'node_id':self.cfg['node_id'],'sid':self.sid,'boot_id':self.boot,'agent_instance_id':self.instance,
               'snapshot_seq':self.snapshot_seq,'snapshot_ms':now_ms(),
               'processing':{'observed':processing,'desired':self.helper_status.get('desired'),'scope':'SDR_STACK'},
@@ -495,7 +513,7 @@ class Agent:
                       'ppp_recovery':self._ppp_recovery_view(),
                       'tx_kbit_s':host['tx_kbit_s'],'rx_kbit_s':host['rx_kbit_s'],
                       'traffic_layer':'PPP_IP_COUNTERS','profile':self.profile,'bulk_pause':self.bulk_reason,'angular_aborted':self.angular_abort,
-                      'publish_errors':dict(self.publish_errors)},
+                      'publish_errors':dict(self.publish_errors),'command_drops':dict(self.inbound_rejects)},
               'config':self.config_view(),'capabilities':self.capabilities(),
               'last_operation':self.commands.public(latest[0]) if latest else None,
               'last_remote_operation':self.commands.public(remote[0]) if remote else None,
@@ -505,7 +523,7 @@ class Agent:
         with self.lock: return copy.deepcopy(self.snapshot_data)
     def config_view(self):
         return {'sdr_revision':self.source.revision,'digest':self.source.safe_digest,'proof':self.config_proof,
-                'safe_settings':dict(self.source.safe),
+                'safe_settings':dict(self.source.safe),'invalid_settings':list(self.source.settings_invalid),
                 'profile':self.profile,'source_configured':self.source.path is not None,
                 'authority_verified':self.cfg['source']['authority_verified'],'angle_verified':self.cfg['source']['angle_verified'],
                 'mqtt_configured':self.cfg['mqtt']['enabled'],
@@ -516,7 +534,7 @@ class Agent:
         helper_available=bool(self.helper_status)
         settings_target=self.helper_status.get('settings_target_available') is True
         lifecycle_target=self.helper_status.get('lifecycle_target_available') is True
-        return {'v':2,'sid':self.sid,'boot':self.boot,'instance':self.instance,'version':__version__,
+        return {'v':2,'sid':self.sid,'boot':self.boot,'instance':self.instance,'version':__version__,'contract':CONTRACT,
                 'mode':'DEMO' if self.demo else self.cfg['runtime_mode'],'codecs':['json'],
                 'angle':self.cfg['source']['angle_mode'],'native_axis':1,'count':360,
                 'profiles':list(PROFILES),'scope':'SDR_STACK','helper_available':helper_available,
@@ -671,7 +689,7 @@ class Agent:
             return bool(self.backup_client and (active['tls'] or active['settings_report_plaintext']))
         return True
     def _state(self,s):
-        return {'v':2,'sid':self.sid,'boot':self.boot,'instance':self.instance,'t':now_ms(),
+        return {'v':2,'sid':self.sid,'contract':CONTRACT,'boot':self.boot,'instance':self.instance,'t':now_ms(),
                 'run':s.get('processing',{}).get('observed','UNKNOWN'),'daq':s.get('daq',{}).get('healthy',False),
                 'cfg':self.source.revision,'profile':self.profile,'clock':s.get('host',{}).get('clock_state','UNTRUSTED')}
     def _publish_failed(self,topic,error):
@@ -695,7 +713,7 @@ class Agent:
         return payload
     def _angular_flags(self,d,r,h,daq):
         flags=FLAG_PARSED
-        if (h['clock_trusted'] and d['source_age_ms'] is not None and
+        if (h.get('clock_usable',h['clock_trusted']) and d['source_age_ms'] is not None and
                 d['source_age_ms']<=self.cfg['freshness']['doa_ms'] and
                 r['timestamp_ms']<=now_ms()+1000):
             flags|=FLAG_FRESH
@@ -741,7 +759,7 @@ class Agent:
                 if p_ready and ctrl.generation!=self._generation:
                     self._generation=ctrl.generation
                     self.bulk_resume_after=now+self.cfg['telemetry']['resume_stable_seconds']
-                    self._offer('available','availability',{'v':2,'sid':self.sid,'online':True,'t':now_ms()},1,True,priority=0,
+                    self._offer('available','availability',{'v':2,'sid':self.sid,'contract':CONTRACT,'online':True,'t':now_ms()},1,True,priority=0,
                                 links=('primary',))
                     self._offer('caps','capabilities',self.capabilities(),1,True,priority=3,links=('primary',))
                     due['state']=0; due['diagnostic-angular-invalid']=0; due['diagnostic-angular-blocked']=0
@@ -749,7 +767,7 @@ class Agent:
                 if b_ready and bk.generation!=self._backup_generation:
                     # Backup reconnect republishes its own retained topics without touching the T900 schedule.
                     self._backup_generation=bk.generation; backup_hello=True
-                    self._offer('available','availability',{'v':2,'sid':self.sid,'online':True,'t':now_ms()},1,True,priority=0,
+                    self._offer('available','availability',{'v':2,'sid':self.sid,'contract':CONTRACT,'online':True,'t':now_ms()},1,True,priority=0,
                                 links=('backup',))
                     self._offer('caps','capabilities',self.capabilities(),1,True,priority=3,links=('backup',))
                     due['diagnostic-angular-invalid:backup']=0; due['diagnostic-angular-blocked:backup']=0
@@ -781,7 +799,7 @@ class Agent:
                             'tx':h['tx_kbit_s'],'rx':h['rx_kbit_s'],'adrop':self.angular_abort,'parse':self.source.parse_errors,
                             'ppp':h.get('ppp'),'peer':h.get('ppp_probe'),
                             'ppp_svc':(h.get('ppp_service') or {}).get('state'),'ppp_restarts':(h.get('ppp_service') or {}).get('restarts'),
-                            'perr':sorted(self.publish_errors)},
+                            'perr':sorted(self.publish_errors),'crej':sum(self.inbound_rejects.values())},
                             expiry=15,priority=4,links=ready)
                 except Exception as e: self._publish_failed('telemetry/health/detail',e)
                 else: self._publish_ok('telemetry/health/detail')

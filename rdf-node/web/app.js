@@ -288,13 +288,18 @@ const REASONS={
  AGENT_RESTARTED_RECONCILE_NO_REPLAY:'agent restart; hasil tidak diketahui',SYSTEMD_ACTION_FAILED:'aksi systemd gagal',
  SYSTEMD_ACTION_OUTCOME_UNKNOWN:'hasil systemd tidak diketahui',RPC_TIMEOUT:'helper tidak menjawab (timeout)',TIMEOUTERROR:'helper tidak menjawab (timeout)',HELPER_CLOSED:'koneksi helper terputus',LIFECYCLE_VERIFICATION_TIMEOUT:'verifikasi SDR timeout',
  CONFIG_CHANGED_BEFORE_WRITE:'config berubah sebelum ditulis',NATIVE_RUNTIME_EVIDENCE_INCOMPLETE:'bukti runtime belum lengkap',
- DEMO_NO_HARDWARE_CONTROL:'mode demo, tanpa kontrol hardware',REQUEST_RATE_LIMIT:'permintaan terlalu cepat'
+ DEMO_NO_HARDWARE_CONTROL:'mode demo, tanpa kontrol hardware',REQUEST_RATE_LIMIT:'permintaan terlalu cepat',
+ HELPER_UNAVAILABLE:'helper kontrol tidak berjalan; tidak dijalankan',HELPER_ACCESS_DENIED:'tidak ada izin ke socket helper',
+ HELPER_TIMEOUT:'helper tidak menjawab (timeout)',HELPER_CONNECTION_LOST:'koneksi helper terputus',HELPER_INTERNAL_ERROR:'error di helper kontrol',
+ INTERNAL_ERROR:'error internal Edge',INVALID_COMMAND_FIELD:'field perintah tidak valid',JOURNAL_UNAVAILABLE:'journal perintah tidak bisa ditulis',
+ COMMAND_TOO_LARGE:'perintah terlalu besar (>4 KB)',COMMAND_NOT_JSON:'perintah bukan JSON',COMMAND_QUEUE_FULL:'antrean perintah penuh'
 };
 const REASON_STAGES=new Set(['FAILED','REJECTED','OUTCOME_UNKNOWN','EXPIRED','CONFLICT','CANCELLED']);
 const STAGE_TEXT={ACCEPTED:'diproses…',APPLYING:'diproses…',VERIFYING:'diproses…',PPP_RESTART_REQUESTED:'restart diminta, memantau link…',
  APPLIED:'diterapkan',PERSISTED_UNVERIFIED:'tersimpan, belum terbukti',FAILED:'gagal',REJECTED:'ditolak',OUTCOME_UNKNOWN:'hasil belum pasti',
  EXPIRED:'kedaluwarsa',CONFLICT:'konflik',CANCELLED:'dibatalkan',REBOOT_SCHEDULED:'reboot dijadwalkan',SHUTDOWN_SCHEDULED:'shutdown dijadwalkan'};
-function reasonLabel(code){return REASONS[code]||String(code||'');}
+// An Edge's own `message` explains codes this panel does not know yet.
+function reasonLabel(code,op){const message=op?.result?.message;return REASONS[code]||(typeof message==='string'&&message)||String(code||'');}
 function opReason(op){const reason=op?.reason??op?.result?.error??op?.result?.reason;return typeof reason==='string'?reason:'';}
 function opChanges(op){const changes=op?.summary?.changes;return changes&&typeof changes==='object'&&!Array.isArray(changes)?changes:{};}
 function decimalId(value,divisor,decimals){return typeof value==='number'&&Number.isFinite(value)?(value/divisor).toFixed(decimals).replace('.',','):value==null?null:String(value);}
@@ -380,7 +385,7 @@ function renderOperation(op,s){
  if(remoteFieldsSupported(s)&&(op.origin==='ground'||op.origin==='backup'))return;
  // The T900 recovery card already shows this restart's result.
  if(op.op==='ppp.restart'&&recoveryCardShows(s,op.id))return;
- showToast(`${opLabel(op)}: ${op.stage}${reason?` · ${reasonLabel(reason)}`:''}`,stageTone(op.stage));
+ showToast(`${opLabel(op)}: ${op.stage}${reason?` · ${reasonLabel(reason,op)}`:''}`,stageTone(op.stage));
 }
 // ---- Remote-command banner: Ground or the backup broker changed something on this Edge. ----
 // The host is created if a stale index.html lacks it, so a mismatched page never stops loading.
@@ -413,7 +418,7 @@ function showRemoteBanner(op){
  b.time.textContent=clockText(op.updated_ms);
  const summary=opSummary(op);
  b.summary.textContent=summary;b.summary.title=summary;
- b.stage.textContent=`${stageText(op)}${reason?`: ${reasonLabel(reason)}`:''}`;b.stage.className=`notice-stage ${tone}`;
+ b.stage.textContent=`${stageText(op)}${reason?`: ${reasonLabel(reason,op)}`:''}`;b.stage.className=`notice-stage ${tone}`;
  b.stage.title=reason;
  b.root.hidden=false;
  if(remoteTimer){clearTimeout(remoteTimer);remoteTimer=null;}
@@ -685,7 +690,7 @@ function render(s){
  const syncCode=syncFlags.every(flag=>flag===true)?'SYNCED':syncFlags.includes(false)?'DEGRADED':'UNKNOWN';
  if(!hostPage) rows('sysrows',[["Engine / desired",`${p.observed||'--'} / ${p.desired||'BELUM DIAMBIL'}`,p.observed==='RUNNING'?'HEALTHY':p.observed,'cpu'],["Frame / Delay / IQ",`${syn.frame??'?'} / ${syn.sample_delay??'?'} / ${syn.iq??'?'}`,syncCode,'sync'],["Frame / progress",`${q.frame_index??'--'} / ${q.frame_progressing?'MAJU':'BELUM'}`,q.frame_progressing?'HEALTHY':'UNKNOWN','film'],["Drop total / delta",`${q.dropped_frames??'--'} / ${q.drop_delta??'--'}`,'','xcircle'],["DAQ umur / USB SDR",`${age(q.source_age_ms)} / ${h.usb_count??'--'} terdeteksi`,'','clock']]);
  else rows('sysrows',[["CPU / RAM",`${fmt(h.cpu_percent)}% / ${fmt(h.memory_percent)}%`,'','gauge'],["Suhu / disk kosong",`${fmt(h.temperature_c)} C / ${fmt(h.disk_free_percent)}%`,'','thermo'],["Throttle / under-voltage",`${h.throttled??'unknown'} / ${h.undervoltage??'unknown'}`,'','bolt'],["Uptime",h.uptime_s==null?'--':`${Math.floor(h.uptime_s/60)} menit`,'','power'],["Jam sistem",h.clock_state,h.clock_state,'clock']]);
- rows('configrows',[["Node / profil",`${s.node_id||'--'} / ${c.profile||'--'}`,'','pin'],["Source / MQTT",`${c.source_configured?'OK':'SETUP'} / ${c.mqtt_configured?'CONFIGURED':'OFF'}`,'','folder'],["RF revision / proof",`${c.sdr_revision??'--'} / ${c.proof||'--'}`,'','hash'],["Akses / helper",`${authenticated?'ADMIN':'READ ONLY'} / ${s.capabilities?.helper_available?'SIAP':'OFF'}`,'','shield']]);
+ rows('configrows',[["Node / profil",`${s.node_id||'--'} / ${c.profile||'--'}`,'','pin'],["Source / MQTT",`${c.source_configured?'OK':'SETUP'} / ${c.mqtt_configured?'CONFIGURED':'OFF'}`,'','folder'],["RF revision / proof",`${c.sdr_revision??'--'} / ${c.proof||'--'}`,'','hash'],["Akses / helper",`${authenticated?'ADMIN':'READ ONLY'} / ${s.capabilities?.helper_available?'SIAP':'OFF'}`,'','shield'],["Versi / kontrak",`${s.version||'--'} / ${s.contract||'--'}`,'','hash']]);
  setButtonLabel($('admin'),authenticated?'Logout':'Login',authenticated?'unlock':'lock');$('adminchip').hidden=!authenticated;
  const prefs={theme:'dark',accent:'teal',font:'system',...(c.preferences||{})};
  document.body.classList.toggle('light',prefs.theme==='light');document.body.classList.toggle('night',prefs.theme==='night');

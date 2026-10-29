@@ -251,7 +251,8 @@ Routing ACK:
   meminta, tidak di-mirror.
 
 Command cadangan memakai paling banyak separuh antrean inbound (16 dari 32 slot); kelebihannya dibuang
-tanpa ACK agar command Ground tetap mendapat tempat. Batas `config.get`/`operation.get` satu per
+tanpa ACK agar command Ground tetap mendapat tempat, dan tercatat sebagai `COMMAND_QUEUE_FULL` di
+`remote_rejects` dan `link.command_drops`. Batas `config.get`/`operation.get` satu per
 detik dihitung per broker. Command yang masih antre dari sesi cadangan lama dibuang saat pengaturan
 cadangan disimpan ulang.
 

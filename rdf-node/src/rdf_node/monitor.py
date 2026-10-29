@@ -82,8 +82,12 @@ class Monitor:
             try:
                 disk=shutil.disk_usage(self.cfg['state_dir']); d['disk_free_percent']=round(100*disk.free/disk.total,1)
             except OSError: pass
-            clock=run(['timedatectl','show','-p','NTPSynchronized','--value'])
-            d['clock_trusted']=clock=='yes'; d['clock_state']='SYNCED' if clock=='yes' else 'UNTRUSTED'
+            if self.cfg.get('testing',{}).get('clock')=='system':
+                # Explicit test clock: usable for data gates, never reported as synchronized.
+                d['clock_trusted']=False; d['clock_state']='TEST'
+            else:
+                clock=run(['timedatectl','show','-p','NTPSynchronized','--value'])
+                d['clock_trusted']=clock=='yes'; d['clock_state']='SYNCED' if clock=='yes' else 'UNTRUSTED'
         if n%2==0 or fast:
             d['ppp_service']=ppp_service_state()
         if n%2==0:

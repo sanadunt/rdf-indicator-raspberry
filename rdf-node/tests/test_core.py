@@ -79,6 +79,20 @@ class PppProbeTests(unittest.TestCase):
         peer.assert_called_once()
 
 class ConfigTests(unittest.TestCase):
+    def test_test_clock_is_read_only_and_explicit(self):
+        c=load_config();self.assertIsNone(c['testing']['clock'])
+        c['testing']['clock']='system';validate_config(c)
+        c['runtime_mode']='controlled'
+        with self.assertRaisesRegex(ValueError,'TEST_CLOCK_REQUIRES_READ_ONLY'):validate_config(c)
+        c=load_config();c['testing']['clock']='ntp'
+        with self.assertRaisesRegex(ValueError,'INVALID_TEST_CLOCK'):validate_config(c)
+    def test_test_clock_is_labelled_and_never_synced(self):
+        c=load_config();c['state_dir']=tempfile.mkdtemp();self.addCleanup(shutil.rmtree,c['state_dir'],True)
+        c['testing']['clock']='system';calls=[]
+        with mock.patch('rdf_node.monitor.run',side_effect=lambda cmd,*a,**k:calls.append(cmd[0]) and None):
+            m=monitor.Monitor(c);m.probe(0)
+        self.assertEqual((m.snapshot()['clock_state'],m.snapshot()['clock_trusted']),('TEST',False))
+        self.assertNotIn('timedatectl',calls)
     def test_default_config(self):
         c=load_config()
         self.assertEqual(c['api']['port'],8790)
@@ -264,6 +278,27 @@ class ParserTests(unittest.TestCase):
                 with self.assertRaises(ValueError):parse_doa_xml(document)
 
 
+    def test_missing_gps_and_heading_become_null_not_a_lost_record(self):
+        r=record();r[6]='';r[8]='nan';r[9]='';r[10]='NaN';r[11]='x'
+        rec=parse_csv(csv_bytes(r),settings())
+        self.assertEqual((rec['raw_doa_deg'],len(rec['values'])),(10,360))
+        self.assertEqual([rec[k] for k in ('acquisition_latency_ms','latitude','longitude','gps_heading_deg','compass_heading_deg')],
+                         [None]*5)
+        self.assertEqual(rec['null_fields'],['acquisition_latency_ms','latitude','longitude','gps_heading_deg','compass_heading_deg'])
+        self.assertEqual(parse_csv(csv_bytes(record()),settings())['null_fields'],[])
+    def test_status_counters_and_overdrive_are_read_leniently(self):
+        s=status();s['daq_num_dropped_frames']='many';s['daq_status']['data_frame_index']=-1;s['daq_status']['adc_overdrive']=0
+        st=parse_status(compact(s))
+        self.assertEqual((st['dropped_frames'],st['frame_index'],st['adc_overdrive']),(None,None,False))
+        self.assertEqual(st['null_fields'],['dropped_frames','frame_index'])
+        s=status();s['daq_status']['adc_overdrive']=True;self.assertIs(parse_status(compact(s))['adc_overdrive'],True)
+        s=status();del s['timestamp_ms']
+        with self.assertRaises((ValueError,TypeError)):parse_status(compact(s))
+    def test_one_broken_setting_leaves_the_others_usable(self):
+        s=settings();s['uniform_gain']='auto';invalid=[]
+        safe=safe_settings(s,invalid)
+        self.assertNotIn('gain_db',safe);self.assertEqual(safe['center_frequency_hz'],433920000)
+        self.assertEqual(invalid,['gain_db'])
     def test_settings_redaction(self):
         s=settings();s.update(api_key='do-not-export',password='secret',remote_url='secret')
         result=safe_settings(s);self.assertNotIn('secret',str(result));self.assertNotIn('api_key',result)
@@ -295,6 +330,22 @@ class SourceTests(unittest.TestCase):
         self.assertIn('DOA_FILE_NOT_UPDATING',reasons)
         self.write(2);self.src.poll(force=True)
         self.assertNotIn('DOA_FILE_NOT_UPDATING',self.src.view(True)['reasons'])
+    def test_one_broken_setting_does_not_block_doa(self):
+        s=settings();s['vfo_squelch_0']='off';(self.path/'settings.json').write_bytes(compact(s))
+        time.sleep(.01);self.write(2);self.src.poll(force=True);self.write(3);self.src.poll(force=True)
+        view=self.src.view(True)
+        self.assertNotIn('CONFIG_UNAVAILABLE',view['reasons'])
+        self.assertEqual(self.src.settings_invalid,['vfo0_squelch_db'])
+        self.assertEqual(self.src.safe['gain_db'],15.7)
+    def test_doa_file_with_many_vfos_is_read_past_the_single_row_limit(self):
+        s=settings();s['active_vfos']=8;(self.path/'settings.json').write_bytes(compact(s))
+        t=now_ms();rows=[]
+        for vfo in range(8):
+            r=record(t);r[4]=433920000+vfo*25000;rows.append(csv_bytes(r))
+        data=b''.join(rows);self.assertGreater(len(data),self.cfg['source']['max_record_bytes'])
+        time.sleep(.01);(self.path/'DOA_value.html').write_bytes(data)
+        self.src.poll(force=True)
+        self.assertIsNone(self.src.error);self.assertEqual(self.src.record['frequency_hz'],433920000)
     def test_raw_settings_preserve_exact_successful_file_bytes(self):
         raw=b' \n'+compact(settings())+b'\n'
         (self.path/'settings.json').write_bytes(raw)
@@ -748,6 +799,27 @@ class HelperTests(unittest.TestCase):
         connection.__enter__.return_value.recv.return_value=compact({'ok':False,'error':'SYSTEMD_ACTION_OUTCOME_UNKNOWN'})+b'\n'
         with mock.patch('rdf_node.helper.socket.socket',return_value=connection):
             with self.assertRaises(TimeoutError):call_helper('/tmp/control.sock',{'op':'status'})
+    def test_helper_socket_failures_name_what_happened(self):
+        import socket,socketserver,threading
+        from rdf_node.helper import call_helper,HelperUnavailable,Handler
+        # Nothing listening: nothing was sent, so nothing ran.
+        missing=str(self.path/'missing.sock')
+        with self.assertRaises(HelperUnavailable) as caught:call_helper(missing,{'op':'status'})
+        self.assertEqual(str(caught.exception),'HELPER_UNAVAILABLE')
+        self.assertIn('FileNotFoundError',caught.exception.detail);self.assertIn(missing,caught.exception.detail)
+        # Listening but never answering: the request may have arrived, so the outcome is unknown.
+        silent=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);self.addCleanup(silent.close)
+        silent.bind(str(self.path/'silent.sock'));silent.listen(1)
+        with self.assertRaisesRegex(TimeoutError,'^HELPER_TIMEOUT$'):
+            call_helper(str(self.path/'silent.sock'),{'op':'status'},timeout=0.2)
+        # An unexpected error inside the helper comes back as a code plus its technical cause.
+        server=socketserver.UnixStreamServer(str(self.path/'helper.sock'),Handler)
+        server.controller=mock.Mock();server.controller.dispatch.side_effect=OSError(28,'No space left on device')
+        threading.Thread(target=server.serve_forever,daemon=True).start()
+        self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
+        with self.assertRaises(HelperError) as caught:call_helper(str(self.path/'helper.sock'),{'op':'status'})
+        self.assertEqual(str(caught.exception),'HELPER_INTERNAL_ERROR')
+        self.assertIn('No space left on device',caught.exception.detail)
     def test_patch_digest_compare_swap(self):
         file=self.path/'settings.json';file.write_bytes(compact(settings()))
         with self.assertRaises(ValueError):patch_file(file,{'gain_db':15.7},'wrong',self.p)

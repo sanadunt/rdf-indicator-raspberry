@@ -156,6 +156,7 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(result['result']['error'],'CAPABILITY_DISABLED')
     def test_local_reboot_accepts_explicit_edge_capability(self):
         self.a.cfg['runtime_mode']='controlled';self.a.cfg['control']['reboot_enabled']=True
+        self.a.helper_status={'allow_reboot':True}
         result=self.a.commands.submit(self.request('system.reboot.prepare'),'local-admin')
         self.assertEqual(result['stage'],'ACCEPTED',result)
     def test_ground_reboot_bypasses_remote_and_capability_approval_flags(self):
@@ -211,8 +212,65 @@ class ApplicationTests(unittest.TestCase):
         ground.receive(ground.prefix+'/telemetry/diagnostic/doa',compact(newer))
         self.assertEqual(ground.snapshot()['diagnostic_doa']['q'],2)
         older=dict(newer,q=3,source_timestamp_ms=timestamp+500)
-        with self.assertRaises(ValueError):
-            ground.receive(ground.prefix+'/telemetry/diagnostic/doa',compact(older))
+        ground.receive(ground.prefix+'/telemetry/diagnostic/doa',compact(older))
+        self.assertEqual(ground.snapshot()['diagnostic_doa']['q'],2)
+        unlabelled={k:v for k,v in dict(sample,q=4,source_timestamp_ms=timestamp+2000).items() if k!='validation_reasons'}
+        ground.receive(ground.prefix+'/telemetry/diagnostic/doa',compact(unlabelled))
+        self.assertEqual(ground.snapshot()['diagnostic_doa']['validation_reasons'],['DIAGNOSTIC_UNVERIFIED'])
+
+    def test_ground_shows_labelled_doa_instead_of_dropping_it(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-labelled')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd';t=now_ms()
+        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test','cfg':7}))
+        ground.receive(ground.prefix+'/telemetry/health',compact(
+            {'v':2,'sid':sid,'q':1,'t':t,'run':1,'daq':0,'drop':0,'age':9000,'temp':None,'clk':0,'rev':7,
+             'why':['DAQ_NOT_HEALTHY','CLOCK_UNTRUSTED']}))
+        # Edge 1.4+: a stale, clock-untrusted sample is labelled ok=0 with its reasons.
+        labelled={'v':2,'sid':sid,'q':1,'t':t-60000,'f':437425000,'a':123.4,'c':3.1,'p':-80.0,'rev':7,'ok':0,
+                  'clk':0,'age':60000,'reason':['DAQ_NOT_HEALTHY','CLOCK_UNTRUSTED','NO_FRESH_DOA'],
+                  'trust':'UNVERIFIED','angle_reference':'RAW'}
+        ground.receive(ground.prefix+'/telemetry/doa',compact(labelled))
+        shown=ground.snapshot()['diagnostic_doa']
+        self.assertEqual((shown['raw_doa_deg'],shown['trust'],shown['clk'],shown['source_age_ms']),(123.4,'UNVERIFIED',0,60000))
+        self.assertEqual(shown['validation_reasons'],['DAQ_NOT_HEALTHY','CLOCK_UNTRUSTED','NO_FRESH_DOA','SOURCE_STALE'])
+        self.assertTrue(shown['stale']);self.assertFalse(ground.snapshot()['detection']['valid'])
+        # ok=1 that Ground cannot confirm (DAQ not healthy here) is shown with its relative angle, not LIVE.
+        ground.receive(ground.prefix+'/telemetry/doa',compact(dict(labelled,q=2,t=now_ms(),ok=1,reason=[])))
+        shown=ground.snapshot()['diagnostic_doa']
+        self.assertEqual((shown['relative_doa_deg'],shown['raw_doa_deg'],shown['angle_reference']),(123.4,None,'RELATIVE'))
+        self.assertEqual(shown['validation_reasons'],['DAQ_NOT_HEALTHY'])
+        self.assertEqual(ground.doa,{});self.assertEqual(ground.rejected,0)
+        # What cannot be read at all is still counted, with its reason.
+        ground._incoming(ground.prefix+'/telemetry/doa',b'not json',False)
+        worker=threading.Thread(target=ground._loop,daemon=True);worker.start()
+        ground.events.join();ground.stop_event.set();worker.join(2)
+        self.assertEqual(ground.rejected,1)
+        self.assertEqual(ground.snapshot()['link']['reject_reasons'],{'JSONDECODEERROR':1})
+
+    def test_ground_keeps_health_with_a_wrong_clock_but_never_trusts_it(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-skewed')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        ground.client=mock.Mock(ready=True);ground.client.offer.return_value=True
+        sid='12ab34cd'
+        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':'boot-test','instance':'test','cfg':7}))
+        ground.receive(ground.prefix+'/telemetry/health',compact(
+            {'v':2,'sid':sid,'q':1,'t':now_ms()-3600000,'run':1,'daq':1,'drop':0,'age':0,'temp':None,'clk':0,'rev':7}))
+        snapshot=ground.snapshot()
+        self.assertEqual(snapshot['health']['q'],1)
+        self.assertFalse(snapshot['health_fresh']);self.assertFalse(snapshot['health_time_ok'])
+        self.assertEqual(ground.submit_command({'op':'stream.set','profile':'balanced'})['error'],'NODE_NOT_FRESH')
+
+    def test_ground_accepts_settings_report_with_extra_fields(self):
+        cfg=load_config();cfg['state_dir']=str(self.path/'ground-settings-extra')
+        ground=Ground(cfg);self.addCleanup(ground.journal.close)
+        sid='12ab34cd';boot='boot-current'
+        ground.receive(ground.prefix+'/state',compact({'v':2,'sid':sid,'boot':boot,'instance':'test','cfg':7}))
+        ground.settings_request_id='settings-1';raw=compact(settings()).decode('utf-8')
+        ground.receive(ground.prefix+'/settings/reported',compact(
+            {'v':2,'sid':sid,'boot':boot,'id':'settings-1','rev':7,'t':now_ms(),'settings_json':raw,'contract':'1.6'}))
+        self.assertEqual(ground.config_view()['settings_json'],raw)
+        self.assertNotIn('contract',ground.config_view()['reported'])
 
     def test_ground_routes_regular_unverified_doa_to_diagnostics(self):
         cfg=load_config();cfg['state_dir']=str(self.path/'ground-unverified-doa')
@@ -281,10 +339,12 @@ class ApplicationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ground.receive(ground.prefix+'/telemetry/angular',compact(dict(payload,q=2,sid='98ab76cd')))
         ground.health_seen=time.monotonic()-9
-        with self.assertRaisesRegex(ValueError,'ANGULAR_WITHOUT_HEALTH'):
-            ground.receive(ground.prefix+'/telemetry/angular',compact(dict(payload,q=3)))
-        with self.assertRaisesRegex(ValueError,'ANGULAR_EVIDENCE_INCOMPLETE'):
-            ground.receive(ground.prefix+'/telemetry/angular',compact(dict(payload,q=4,flags=7)))
+        # Without fresh health or with incomplete evidence a frame is shown labelled, never LIVE.
+        ground.receive(ground.prefix+'/telemetry/angular',compact(dict(payload,q=3)))
+        self.assertIn('HEALTH_STALE',ground.diagnostic_angular_view()['validation_reasons'])
+        ground.health_seen=time.monotonic()
+        ground.receive(ground.prefix+'/telemetry/angular',compact(dict(payload,q=4,flags=7)))
+        self.assertIn('CONFIG_ATTRIBUTION_UNVERIFIED',ground.diagnostic_angular_view()['validation_reasons'])
         self.assertEqual(ground.angular_view()['q'],1)
 
     def test_settings_report_requires_current_request_session_and_boot(self):
@@ -334,10 +394,12 @@ class ApplicationTests(unittest.TestCase):
         self.assertIn('SOURCE_AUTHORITY_UNVERIFIED_AT_EDGE',view['validation_reasons'])
         self.assertIsNone(ground.angular_view())
         self.assertFalse(ground.snapshot()['detection']['valid'])
-        rejected=dict(payload,q=2,flags=27)
-        with self.assertRaisesRegex(ValueError,'ANGULAR_EVIDENCE_INCOMPLETE'):
-            ground.receive(ground.prefix+'/telemetry/angular',compact(rejected))
-        self.assertEqual(ground.diagnostic_angular_view()['q'],1)
+        incomplete=dict(payload,q=2,flags=27)
+        ground.receive(ground.prefix+'/telemetry/angular',compact(incomplete))
+        view=ground.diagnostic_angular_view()
+        self.assertEqual((view['q'],view['trust']),(2,'UNVERIFIED'))
+        self.assertIn('DAQ_NOT_HEALTHY_AT_EDGE',view['validation_reasons'])
+        self.assertIsNone(ground.angular_view())
 
     def test_scheduler_publishes_trust_only_unverified_data_on_regular_topics(self):
         agent=self.a;agent.cfg['source'].update(authority_verified=False,angle_verified=False)
@@ -631,7 +693,7 @@ class ApplicationTests(unittest.TestCase):
         ground=Ground(cfg);self.addCleanup(ground.journal.close)
         ground.client=mock.Mock(ready=True);ground.client.offer.return_value=True
         ground.node_state={'sid':'12ab34cd','boot':'boot-current'};ground.node_config={'rev':7}
-        ground.health={'q':1};ground.health_seen=time.monotonic()
+        ground.health={'q':1,'t':now_ms()};ground.health_seen=time.monotonic()
         request={'id':'ground-client-0123456789abcdef','op':'system.shutdown.execute',
                  'prepare_id':'prepare-id','challenge':'challenge','base_rev':7}
         result=ground.submit_command(request)
@@ -642,7 +704,7 @@ class ApplicationTests(unittest.TestCase):
         ground=Ground(cfg);self.addCleanup(ground.journal.close)
         ground.client=mock.Mock(ready=True);ground.client.offer.return_value=True
         ground.node_state={'sid':'12ab34cd','boot':'boot-current'};ground.node_config={'rev':7}
-        ground.health={'q':1};ground.health_seen=time.monotonic()
+        ground.health={'q':1,'t':now_ms()};ground.health_seen=time.monotonic()
         result=ground.submit_command({'id':'invalid id','op':'system.shutdown.prepare','base_rev':7})
         self.assertEqual(result['error'],'INVALID_COMMAND_ID')
     def test_idempotent_query_does_not_redo(self):
@@ -811,6 +873,35 @@ class GroundCommandTests(unittest.TestCase):
         self.ground.receive(self.ground.prefix+'/telemetry/health',compact(health))
         self.assertEqual(self.ground.journal.lookup(old['id'])['stage'],'OUTCOME_UNKNOWN')
 
+class LaptopTests(unittest.TestCase):
+    """Testing without a Pi: the demo source and the explicit TEST clock."""
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.path=Path(os.path.realpath(self.tmp.name))
+    def test_demo_source_writes_what_the_edge_and_ground_console_read(self):
+        from rdf_node.cli import generate_demo
+        from rdf_node.source import parse_status,parse_doa_xml
+        stop=threading.Event();source=self.path/'source'
+        thread=threading.Thread(target=generate_demo,args=(source,stop),daemon=True);thread.start()
+        self.assertTrue(wait(lambda:(source/'doa.xml').exists(),3));stop.set();thread.join(3)
+        status=json.loads((source/'status.json').read_bytes())
+        self.assertIs(status['daq_status']['adc_overdrive'],False)
+        self.assertIs(parse_status((source/'status.json').read_bytes())['adc_overdrive'],False)
+        xml=parse_doa_xml((source/'doa.xml').read_bytes())
+        self.assertEqual((xml['frequency_mhz'],xml['source_timestamp_ms']),(433.92,status['timestamp_ms']))
+    def test_test_clock_lets_data_through_but_never_claims_sync(self):
+        a=make_agent(self.path);self.addCleanup(a.journal.close)
+        a.monitor.data.update(clock_trusted=False,clock_state='TEST')
+        a.source.poll(force=True);a._snapshot();snap=a.snapshot()
+        self.assertTrue(snap['detection']['valid'],snap['detection']['reasons'])
+        self.assertEqual(a._state(snap)['clock'],'TEST')
+        self.assertEqual(a._doa_payload(snap['detection'],snap['host'])['clk'],0)
+        request=lambda op,**x:dict(v=2,id='lap-'+uuid.uuid4().hex,sid=a.sid,boot=a.boot,issued_ms=now_ms(),
+                                    expires_ms=now_ms()+15000,base_rev=a.source.revision,op=op,**x)
+        self.assertEqual(a.commands.submit(request('stream.set',profile='balanced'),'ground-controller')['stage'],'ACCEPTED')
+        a.helper_status={'allow_lifecycle':False}
+        rejected=a.commands.submit(request('processing.set',desired='STOPPED'),'ground-controller')
+        self.assertEqual(rejected['result']['error'],'CLOCK_UNTRUSTED')
+
 class CommandTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
@@ -839,9 +930,36 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(operation['stage'],'APPLIED')
         self.assertEqual(helper.challenges[request['id']][2],'reboot')
     def test_remote_payload_cannot_choose_origin(self):
-        request=self.request('stream.set',profile='balanced',origin='ground-controller')
+        # Unknown fields are dropped and named, never obeyed: the origin stays the broker it came from.
+        request=self.request('stream.set',profile='balanced',origin='local-admin');acks=[]
+        self.a.operation_changed=lambda id,op,stage,result,link=None:acks.append((stage,result))
         result=self.a.commands.submit(request,'ground-controller')
-        self.assertEqual(result['result']['error'],'UNKNOWN_COMMAND_FIELD')
+        self.assertEqual((result['stage'],result['result']),('ACCEPTED',{'ignored':['origin']}))
+        self.assertEqual(acks[0],('ACCEPTED',{'ignored':['origin']}))
+        operation=self.a.journal.lookup(request['id'])
+        self.assertEqual(operation['link'],'ground');self.assertNotIn('origin',operation['request'])
+
+    def test_dropped_commands_are_counted_shown_and_answered_when_possible(self):
+        acks=[];self.a.operation_changed=lambda id,op,stage,result,link=None:acks.append((id,stage,result['error']))
+        topic=self.a.prefix+'/'+OPS['stream.set']
+        big=self.request('stream.set',profile='balanced',note='x'*5000)
+        self.a._incoming(topic,compact(big),False)
+        self.a._incoming(topic,b'{not json',False)
+        self.a._incoming(topic,b'x'*70000,False)
+        worker=threading.Thread(target=self.a._events,daemon=True);worker.start()
+        self.a.events.join();self.a.stop_event.set();worker.join(2)
+        self.assertEqual(acks,[(big['id'],'REJECTED','COMMAND_TOO_LARGE')])
+        self.assertEqual(self.a.inbound_rejects,{'COMMAND_TOO_LARGE':2,'COMMAND_NOT_JSON':1})
+        self.assertEqual([(r['op'],r['error']) for r in self.a.remote_rejects],
+                         [('stream.set','COMMAND_NOT_JSON'),('stream.set','COMMAND_TOO_LARGE'),('stream.set','COMMAND_TOO_LARGE')])
+
+    def test_unknown_fields_never_excuse_a_missing_safeguard(self):
+        # A misspelled base_rev is ignored, so the real one is missing and the write is still refused.
+        request=self.request('stream.set',profile='balanced',base_revision=self.a.source.revision)
+        del request['base_rev']
+        result=self.a.commands.submit(request,'ground-controller')
+        self.assertEqual(result['result']['error'],'CONFIG_REVISION_CONFLICT')
+        self.assertEqual(result['result']['ignored'],['base_revision'])
 
     def test_ground_remote_capabilities_do_not_enable_local_panel_actions(self):
         self.a.helper_status={'allow_config':False,'allow_lifecycle':False,'allow_reboot':False,
@@ -879,12 +997,60 @@ class CommandTests(unittest.TestCase):
     def test_ground_settings_write_bypasses_root_capability_flag(self):
         self.a.cfg['runtime_mode']='read_only'
         self.a.cfg['control']['config_patch_enabled']=False
+        self.a.helper_status={'allow_config':False}
         result=self.a.commands.submit(self.request('config.patch',changes={'gain_db':20.7}),'ground-controller')
         self.assertEqual(result['stage'],'ACCEPTED',result)
+
+    def test_write_without_helper_is_rejected_up_front_with_a_reason(self):
+        missing=str(self.path/'missing.sock');self.a.cfg['control']['helper_socket']=missing
+        self.a.helper_status={};acks=[]
+        self.a.operation_changed=lambda id,op,stage,result,link=None:acks.append((stage,result))
+        request=self.request('config.patch',changes={'gain_db':20.7})
+        result=self.a.commands.submit(request,'ground-controller')
+        self.assertEqual((result['stage'],result['result']['error']),('REJECTED','HELPER_UNAVAILABLE'))
+        self.assertIn('rdf-control-helper',result['result']['message'])
+        self.assertIn(missing,result['result']['detail'])
+        self.assertEqual(acks,[('REJECTED',result['result'])])
+        self.assertIsNone(self.a.journal.lookup(request['id']))
+        self.assertEqual(self.a.remote_rejects[0]['error'],'HELPER_UNAVAILABLE')
+        # stream.set never needs the helper.
+        self.assertEqual(self.a.commands.submit(self.request('stream.set',profile='balanced'),'ground-controller')['stage'],
+                         'ACCEPTED')
+
+    def test_helper_gone_after_accept_fails_instead_of_unknown(self):
+        self.a.cfg['control']['helper_socket']=str(self.path/'missing.sock')
+        self.a.helper_status={'allow_lifecycle':False}
+        self.a.commands.start();self.addCleanup(self.a.commands.stop)
+        request=self.request('processing.set',desired='STOPPED')
+        self.assertEqual(self.a.commands.submit(request,'ground-controller')['stage'],'ACCEPTED')
+        self.a.commands.queue.join()
+        operation=self.a.journal.lookup(request['id'])
+        self.assertEqual((operation['stage'],operation['result']['error']),('FAILED','HELPER_UNAVAILABLE'))
+        self.assertIn('tidak dijalankan',operation['result']['message'])
+
+    def test_unexpected_errors_get_a_code_message_and_detail(self):
+        self.a.helper_status={'allow_lifecycle':False}
+        self.a.commands.start();self.addCleanup(self.a.commands.stop)
+        cases=((TimeoutError('timed out'),'OUTCOME_UNKNOWN','HELPER_TIMEOUT'),
+               (BrokenPipeError(32,'Broken pipe'),'OUTCOME_UNKNOWN','HELPER_CONNECTION_LOST'),
+               (RuntimeError('boom'),'FAILED','INTERNAL_ERROR'))
+        for error,stage,code in cases:
+            request=self.request('processing.set',desired='STOPPED')
+            with self.subTest(code=code),mock.patch.object(self.a.commands,'_helper',side_effect=error):
+                self.a.commands.submit(request,'ground-controller');self.a.commands.queue.join()
+                result=self.a.journal.lookup(request['id'])['result']
+                self.assertEqual((self.a.journal.lookup(request['id'])['stage'],result['error']),(stage,code))
+                self.assertTrue(result['message']);self.assertIn(type(error).__name__,result['detail'])
+        # A malformed field is named as such, not as a journal error.
+        malformed=self.request('stream.set',profile='balanced');malformed['issued_ms']='soon'
+        rejected=self.a.commands.submit(malformed,'ground-controller')
+        self.assertEqual(rejected['result']['error'],'INVALID_COMMAND_FIELD')
+        self.assertIn('ValueError',rejected['result']['detail'])
 
     def test_ground_lifecycle_write_bypasses_root_capability_flags(self):
         self.a.cfg['runtime_mode']='read_only'
         self.a.cfg['control'].update(processing_enabled=False,restart_enabled=False)
+        self.a.helper_status={'allow_lifecycle':False}
         result=self.a.commands.submit(self.request('processing.set',desired='STOPPED'),'ground-controller')
         self.assertEqual(result['stage'],'ACCEPTED',result)
 
@@ -935,9 +1101,13 @@ class CommandTests(unittest.TestCase):
         helper.assert_called_once_with({'op':'ppp.restart','origin':'ground-controller'})
 
     def test_remote_payload_cannot_choose_ground_confirmation(self):
+        self.a.helper_status={'allow_ppp_restart':False}
+        self.a.commands.start();self.addCleanup(self.a.commands.stop)
         request=self.request('ppp.restart',confirm_previous_unknown=True)
-        result=self.a.commands.submit(request,'ground-controller')
-        self.assertEqual(result['result']['error'],'UNKNOWN_COMMAND_FIELD')
+        with mock.patch.object(self.a.commands,'_helper',return_value={'requested':True,'service':'t900-ppp.service'}):
+            result=self.a.commands.submit(request,'ground-controller');self.a.commands.join_ppp()
+        self.assertEqual((result['stage'],result['result']),('ACCEPTED',{'ignored':['confirm_previous_unknown']}))
+        self.assertNotIn('confirm_previous_unknown',self.a.journal.lookup(request['id'])['request'])
 
     def test_unrecognized_actor_is_rejected(self):
         result=self.a.commands.submit(self.request('stream.set',profile='balanced'),'untrusted-caller')
@@ -1262,6 +1432,7 @@ class ApiTests(unittest.TestCase):
         code,_,response=self.http('POST','/api/v2/commands',request)
         self.assertEqual((code,json.loads(response)['result']['error']),(400,'CAPABILITY_DISABLED'))
         self.a.cfg['runtime_mode']='controlled';self.a.cfg['control']['reboot_enabled']=True
+        self.a.helper_status={'allow_reboot':True}
         request['id']='local-reboot-approved'
         code,_,response=self.http('POST','/api/v2/commands',request)
         self.assertEqual((code,json.loads(response)['stage']),(202,'ACCEPTED'))

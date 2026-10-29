@@ -75,6 +75,10 @@ def validate_config(c: dict) -> None:
     validate_backup_config(c['mqtt']['backup'], c['mqtt']['allow_insecure_loopback'])
     for k,v in c['freshness'].items():
         finite(v,500,120000)
+    if c['testing']['clock'] not in (None,'system'):
+        raise ValueError('INVALID_TEST_CLOCK')
+    if c['testing']['clock'] and c['runtime_mode']!='read_only':
+        raise ValueError('TEST_CLOCK_REQUIRES_READ_ONLY')
     if c['display']['theme'] not in ('dark','light','night'):
         raise ValueError('INVALID_THEME')
     if c['display']['accent'] not in ('teal','blue','amber'):

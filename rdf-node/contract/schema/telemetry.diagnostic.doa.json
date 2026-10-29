@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sanadunt/rdf-indicator-raspberry/rdf-node/contract/schema/telemetry.diagnostic.doa.json",
+  "title": "telemetry/diagnostic/doa",
+  "description": "Relay diagnostik doa.xml, selalu UNVERIFIED. Field tambahan boleh ada dan harus diabaikan consumer.",
+  "x-topic": "telemetry/diagnostic/doa",
+  "type": "object",
+  "properties": {
+    "v": {
+      "const": 2
+    },
+    "sid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}$",
+      "description": "Session id; berubah setiap agent start."
+    },
+    "q": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "source": {
+      "const": "doa.xml"
+    },
+    "source_timestamp_ms": {
+      "type": "integer",
+      "minimum": 1000000000000,
+      "maximum": 9999999999999,
+      "description": "Unix epoch milidetik."
+    },
+    "observed_timestamp_ms": {
+      "type": "integer",
+      "minimum": 1000000000000,
+      "maximum": 9999999999999,
+      "description": "Unix epoch milidetik."
+    },
+    "raw_doa_deg": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 360
+    },
+    "frequency_mhz": {
+      "type": "number",
+      "minimum": 0.001,
+      "maximum": 5000
+    },
+    "trust": {
+      "const": "UNVERIFIED"
+    },
+    "validation_reasons": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z0-9_:]{1,64}$"
+      },
+      "maxItems": 32,
+      "minItems": 1
+    }
+  },
+  "required": [
+    "v",
+    "sid",
+    "q",
+    "source",
+    "source_timestamp_ms",
+    "observed_timestamp_ms",
+    "raw_doa_deg",
+    "frequency_mhz",
+    "trust",
+    "validation_reasons"
+  ],
+  "additionalProperties": true
+}

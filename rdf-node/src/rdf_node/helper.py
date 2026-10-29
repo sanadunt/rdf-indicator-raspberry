@@ -31,6 +31,8 @@ DEFAULT_POLICY={
 }
 
 class HelperError(ValueError): pass
+class HelperUnavailable(HelperError):
+    """The socket could not be reached: nothing was sent, so nothing ran."""
 
 def validate_changes(changes,policy):
     if not isinstance(changes,dict) or not changes or len(changes)>5 or set(changes)-set(FIELD_MAP):
@@ -109,18 +111,31 @@ def patch_file(path,changes,expected_raw_digest,policy):
 
 def call_helper(sock_path,request,timeout=8):
     with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as s:
-        s.settimeout(timeout); s.connect(sock_path); s.sendall(compact(request)+b'\n')
-        buf=b''
-        while b'\n' not in buf:
-            b=s.recv(4096)
-            if not b: raise HelperError('HELPER_CLOSED')
-            buf+=b
-            if len(buf)>16384: raise HelperError('HELPER_RESPONSE_LIMIT')
+        s.settimeout(timeout)
+        try: s.connect(sock_path)
+        except OSError as e:
+            unavailable=HelperUnavailable('HELPER_ACCESS_DENIED' if isinstance(e,PermissionError)
+                                          else 'HELPER_UNAVAILABLE')
+            unavailable.detail=f'{type(e).__name__} ({e.strerror or e}): {sock_path}'
+            raise unavailable from e
+        # Once the request may have reached the helper, a socket error leaves the outcome unknown.
+        try:
+            s.sendall(compact(request)+b'\n')
+            buf=b''
+            while b'\n' not in buf:
+                b=s.recv(4096)
+                if not b: raise HelperError('HELPER_CLOSED')
+                buf+=b
+                if len(buf)>16384: raise HelperError('HELPER_RESPONSE_LIMIT')
+        except TimeoutError as e: raise TimeoutError('HELPER_TIMEOUT') from e
+        except OSError as e: raise ConnectionError('HELPER_CONNECTION_LOST') from e
         result=strict_json(buf.split(b'\n',1)[0])
         if not result.get('ok'):
             error=result.get('error','HELPER_FAILED')
             if error=='SYSTEMD_ACTION_OUTCOME_UNKNOWN': raise TimeoutError(error)
-            raise HelperError(error)
+            failure=HelperError(error)
+            if isinstance(result.get('detail'),str): failure.detail=result['detail'][:200]
+            raise failure
         return result['result']
 
 def require_ppp_service_ready(origin='ground-controller'):
@@ -361,9 +376,11 @@ class Handler(socketserver.StreamRequestHandler):
             result=self.server.controller.dispatch(req,uid)
             self.wfile.write(compact({'ok':True,'result':result})+b'\n')
         except Exception as e:
-            msg='SYSTEMD_ACTION_OUTCOME_UNKNOWN' if isinstance(e,(subprocess.TimeoutExpired,TimeoutError)) else (
-                str(e) if isinstance(e,ValueError) and str(e).isupper() else type(e).__name__.upper())
-            try: self.wfile.write(compact({'ok':False,'error':msg})+b'\n')
+            reply={'ok':False}
+            if isinstance(e,(subprocess.TimeoutExpired,TimeoutError)): reply['error']='SYSTEMD_ACTION_OUTCOME_UNKNOWN'
+            elif isinstance(e,ValueError) and str(e).isupper(): reply['error']=str(e)
+            else: reply.update(error='HELPER_INTERNAL_ERROR',detail=f'{type(e).__name__}: {e}'[:200])
+            try: self.wfile.write(compact(reply)+b'\n')
             except OSError: pass
 
 def serve(policy_file):

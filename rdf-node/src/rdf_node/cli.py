@@ -194,10 +194,15 @@ def generate_demo(directory:Path,stop):
         for x in range(360):
             delta=((x-theta+180)%360)-180
             vals.append(round(-28+28*math.exp(-(delta/22)**2)+3*math.cos(x/30),3))
-        row=[ts,(360-theta)%360,8.27,-54.2,433920000,'UCA',436,'DEMO',0,0,0,0,'None','R','R','R','R']+vals
+        raw=round((360-theta)%360,2)
+        row=[ts,raw,8.27,-54.2,433920000,'UCA',436,'DEMO',0,0,0,0,'None','R','R','R','R']+vals
         atomic_write(directory/'DOA_value.html',(','.join(map(str,row))+'\n').encode(),0o644)
         atomic_write(directory/'status.json',compact({'timestamp_ms':ts,'daq_ok':True,'daq_num_dropped_frames':0,'gps_status':'Disabled',
-            'daq_status':{'data_frame_index':count,'frame_sync':True,'sample_delay_sync':True,'iq_sync':True,'adc_overdrive':0}}),0o644)
+            'daq_status':{'data_frame_index':count,'frame_sync':True,'sample_delay_sync':True,'iq_sync':True,'adc_overdrive':False}}),0o644)
+        # Same layout as KrakenSDR's doa.xml: TIME in Unix ms, FREQUENCY in MHz, DOA raw degrees.
+        atomic_write(directory/'doa.xml',(f'<DATA><STATION_ID>DEMO</STATION_ID><TIME>{ts}</TIME><FREQUENCY>433.92</FREQUENCY>'
+            f'<LOCATION><LATITUDE>0</LATITUDE><LONGITUDE>0</LONGITUDE><HEADING>0</HEADING></LOCATION>'
+            f'<DOA>{raw}</DOA><PWR>-54.2</PWR><CONF>8.27</CONF></DATA>\n').encode(),0o644)
         stop.wait(.5)
 
 def serve(args,ground=False,demo=False):
@@ -227,6 +232,8 @@ def serve(args,ground=False,demo=False):
         threading.Thread(target=server.shutdown,daemon=True).start()
     signal.signal(signal.SIGTERM,end); signal.signal(signal.SIGINT,end)
     print(f'RDF Node {"Ground" if ground else "Edge"}: http://127.0.0.1:{cfg["api"]["port"]}')
+    if cfg['testing']['clock']:
+        print('JAM UJI: testing.clock=system. Jam OS dipakai untuk gate data dengan label TEST; hanya untuk uji tanpa alat.')
     try: server.serve_forever(poll_interval=.2)
     finally:
         stop_demo.set(); app.stop(); server.server_close()
@@ -247,10 +254,18 @@ def main():
             s.add_argument('action',choices=['approve','shutdown-reconcile']);s.add_argument('--settings',action='store_true')
             s.add_argument('--lifecycle',action='store_true');s.add_argument('--reboot',action='store_true');s.add_argument('--shutdown',action='store_true');s.add_argument('--ppp-restart',action='store_true')
     s=sub.add_parser('demo');s.add_argument('--port',type=int,default=8790);s.add_argument('--state-dir')
+    s=sub.add_parser('demo-source',help='tulis file KrakenSDR sintetis ke DIR sampai dihentikan (uji tanpa alat)')
+    s.add_argument('directory')
     s=sub.add_parser('helper');s.add_argument('--policy',default='/etc/rdf-node/helper.yaml')
     sub.add_parser('selftest')
     a=p.parse_args()
     if a.command in ('edge','ground','demo'): serve(a,ground=a.command=='ground',demo=a.command=='demo')
+    elif a.command=='demo-source':
+        stop=threading.Event()
+        signal.signal(signal.SIGTERM,lambda *_:stop.set()); signal.signal(signal.SIGINT,lambda *_:stop.set())
+        target=Path(a.directory).resolve()
+        print(f'Sumber demo KrakenSDR: {target} (settings.json, status.json, DOA_value.html, doa.xml). Ctrl+C untuk berhenti.')
+        generate_demo(target,stop)
     elif a.command=='helper':
         from .helper import serve as helper_serve
         helper_serve(a.policy)

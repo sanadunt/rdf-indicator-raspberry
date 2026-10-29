@@ -16,19 +16,30 @@ FIELD_MAP = {
     'vfo0_squelch_db': ('vfo_squelch_0', 1),
 }
 
-def safe_settings(data:dict) -> dict:
+def safe_settings(data:dict, invalid:list|None=None) -> dict:
+    """Safe subset of native settings. A field that does not parse is left out (and named in
+    `invalid` when given) instead of making every other setting unavailable."""
     if not isinstance(data,dict):
         raise ValueError('SETTINGS_OBJECT_REQUIRED')
     result={}
     for name,(key,scale) in FIELD_MAP.items():
         if key in data:
-            n=finite(data[key],-1e6,5e9)*scale
+            try: n=finite(data[key],-1e6,5e9)*scale
+            except (ValueError,TypeError,OverflowError):
+                if invalid is not None: invalid.append(name)
+                continue
             result[name]=int(round(n)) if name.endswith('_hz') else n
     for key in ('ant_arrangement','doa_method','active_vfos','output_vfo','en_doa'):
         val=data.get(key)
         if isinstance(val,(str,int,bool)) and len(str(val))<64:
             result[key]=val
     return result
+
+def _optional(row, index, parse, name, null_fields):
+    # Metadata KrakenSDR may leave empty or NaN (no GPS, no compass): null, never a lost record.
+    try: return parse(row[index])
+    except (ValueError,TypeError,OverflowError):
+        null_fields.append(name); return None
 
 def parse_csv(data: bytes, settings: dict | None, output_vfo=0) -> dict:
     if b'\x00' in data:
@@ -43,6 +54,9 @@ def parse_csv(data: bytes, settings: dict | None, output_vfo=0) -> dict:
             row=row[:-1]
         if len(row)!=377:
             raise ValueError('CSV_FIELD_COUNT')
+        # Timestamp, angle, confidence, power, frequency, and the 360 values are the sample itself and
+        # stay strict; the metadata in between becomes null with its name in `null_fields`.
+        null_fields=[]
         rec={
             'timestamp_ms':integer(row[0],1000000000000,9999999999999),
             'raw_doa_deg':finite(row[1],0,360)%360,
@@ -50,12 +64,15 @@ def parse_csv(data: bytes, settings: dict | None, output_vfo=0) -> dict:
             'power_native_db':finite(row[3],-1e6,1e6),
             'frequency_hz':integer(row[4],1,0xffffffff),
             'array':row[5][:24],
-            'acquisition_latency_ms':finite(row[6],0,3600000),
+            'acquisition_latency_ms':_optional(row,6,lambda v:finite(v,0,3600000),'acquisition_latency_ms',null_fields),
             'station_id':row[7][:64],
-            'latitude':finite(row[8],-90,90), 'longitude':finite(row[9],-180,180),
-            'gps_heading_deg':finite(row[10],0,360), 'compass_heading_deg':finite(row[11],0,360),
+            'latitude':_optional(row,8,lambda v:finite(v,-90,90),'latitude',null_fields),
+            'longitude':_optional(row,9,lambda v:finite(v,-180,180),'longitude',null_fields),
+            'gps_heading_deg':_optional(row,10,lambda v:finite(v,0,360),'gps_heading_deg',null_fields),
+            'compass_heading_deg':_optional(row,11,lambda v:finite(v,0,360),'compass_heading_deg',null_fields),
             'heading_source':row[12][:32],
             'values':[finite(x,-1e8,1e8) for x in row[17:]],
+            'null_fields':null_fields,
         }
         parsed.append(rec)
     if settings:
@@ -103,13 +120,20 @@ def parse_status(data:bytes) -> dict:
         if type(v) is bool: return v
         if type(v) is int and v in (0,1): return bool(v)
         return None
+    # Only timestamp_ms is required; a counter that is missing or malformed is null and named.
+    null_fields=[]
+    def counter(obj,key,name):
+        if key not in obj: return None
+        try: return integer(obj[key],0)
+        except (ValueError,TypeError,OverflowError):
+            null_fields.append(name); return None
     out=dict(timestamp_ms=ts,daq_ok=b(j.get('daq_ok')),
-             dropped_frames=integer(j['daq_num_dropped_frames'],0) if 'daq_num_dropped_frames' in j else None,
-             frame_index=integer(daq['data_frame_index'],0) if 'data_frame_index' in daq else None,
+             dropped_frames=counter(j,'daq_num_dropped_frames','dropped_frames'),
+             frame_index=counter(daq,'data_frame_index','frame_index'),
              sync={k:b(daq.get(src)) for k,src in [('frame','frame_sync'),('sample_delay','sample_delay_sync'),('iq','iq_sync')]},
-             adc_overdrive=daq.get('adc_overdrive'),gps_status=str(j.get('gps_status','Unknown'))[:40],
+             adc_overdrive=b(daq.get('adc_overdrive')),gps_status=str(j.get('gps_status','Unknown'))[:40],
              rf_center_frequency_hz=daq.get('rf_center_frequency_hz',daq.get('rf_center_freq')),
-             gain_db=daq.get('gain_db'))
+             gain_db=daq.get('gain_db'),null_fields=null_fields)
     return out
 
 class Source:
@@ -117,7 +141,7 @@ class Source:
         self.cfg=cfg; self.journal=journal
         self.path=Path(cfg['source']['share_dir']) if cfg['source']['share_dir'] else None
         self.record=None; self.status=None; self.settings={}; self.safe={}
-        self.raw_settings=None; self.settings_seen=None
+        self.raw_settings=None; self.settings_seen=None; self.settings_invalid=[]
         self.raw_digest=None; self.safe_digest=None; self.config_mtime_ms=0
         self.seq=0; self.record_signature=None; self.status_signature=None
         self.record_seen=None; self.status_seen=None; self.frame_seen=None; self.last_frame=None
@@ -141,7 +165,7 @@ class Source:
             try:
                 raw=stable_read(self.path/'settings.json',65536)
                 j=strict_json(raw)
-                safe=safe_settings(j)
+                invalid=[]; safe=safe_settings(j,invalid)
                 h=digest(safe)
                 if h!=self.safe_digest:
                     self.revision=self.journal.config_revision(h)
@@ -150,6 +174,7 @@ class Source:
                     self.safe_digest=h
                 self.raw_digest=hashlib.sha256(raw).hexdigest(); self.raw_settings=raw
                 self.settings_seen=time.monotonic(); self.settings=j; self.safe=safe; self.config_error=None
+                self.settings_invalid=invalid
             except (OSError,ValueError,TypeError,KeyError,RecursionError) as e:
                 self.config_error=type(e).__name__+':SETTINGS_UNAVAILABLE'
         if force or now>=self.next_status:
@@ -180,7 +205,10 @@ class Source:
         try: self.record_file_mtime_ms=(self.path/'DOA_value.html').stat().st_mtime_ns//1000000
         except OSError: self.record_file_mtime_ms=None
         try:
-            raw=stable_read(self.path/'DOA_value.html',limit)
+            # One CSV row per active VFO (about 2.7 KB each): the read limit grows with them, up to 16.
+            vfos=self.safe.get('active_vfos')
+            vfos=vfos if type(vfos) is int and 1<=vfos<=16 else 1
+            raw=stable_read(self.path/'DOA_value.html',limit*vfos)
             rec=parse_csv(raw,self.settings or None,self.cfg['source']['output_vfo'])
             # Source timestamp is the identity. Reformatting/re-reading is not a sample.
             sig=(rec['timestamp_ms'],rec['frequency_hz'])
@@ -253,11 +281,13 @@ class Source:
                     angle_convention=self.cfg['source']['angle_mode'],q=rec['q'] if rec else 0,
                     revision=rec.get('observed_revision') if rec and attrib else None,
                     config_attributed=attrib,parse_errors=self.parse_errors,
+                    null_fields=list(rec.get('null_fields',())) if rec else [],
                     daq=dict(state='HEALTHY' if health else 'DEGRADED' if status_fresh else 'UNKNOWN',
                              healthy=health,sync=sync,source_age_ms=sa,frame_progressing=frame_progress,
                              frame_index=st['frame_index'] if st else None,
                              dropped_frames=st['dropped_frames'] if st else None,drop_delta=self.drop_delta,
-                             adc_overdrive=st['adc_overdrive'] if st else None))
+                             adc_overdrive=st['adc_overdrive'] if st else None,
+                             null_fields=list(st.get('null_fields',())) if st else []))
 
     def diagnostic_view(self, validation_reasons=()) -> dict:
         mono=time.monotonic(); utc=now_ms(); rec=self.diagnostic_record

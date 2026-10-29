@@ -169,7 +169,7 @@ Ukuran fixture bukan ukuran maksimum; digit metadata dan nilai source dapat meng
 | `telemetry/doa` | Maks. 1/s, setiap sampel baru (valid atau berlabel) | 139 B verified; 201 B berlabel (1 alasan); 283 B approval-only | 177 B verified; 239 B; 321 B |
 | `telemetry/diagnostic/doa` | Setiap 3 s selama XML tersedia; heartbeat mengulang sampel yang sama | 303 B | 352 B |
 | `telemetry/health` | 1/s | 122 B (`why` kosong) | 163 B |
-| `telemetry/health/detail` | 1/10 s | 251 B | 299 B |
+| `telemetry/health/detail` | 1/10 s | 260 B | 308 B |
 | `telemetry/angular` (`balanced`) | Minimum 4 s; contoh JSON dipace sekitar 8.96 s pada Bulk 350 B/s | 2,946 B | 2,988 B |
 | `telemetry/angular` (`graph_u8`) | Minimum 2 s; format JSON dan pace sama dengan `balanced` | 2,946 B | 2,988 B |
 | `telemetry/angular` (`control`) | Tidak dipublish | — | — |
@@ -191,14 +191,15 @@ Ukuran event memakai contoh JSON yang dicantumkan di bawah. State dapat dipublis
 
 | Topic / fixture | Kapan dikirim | Payload contoh | MQTT PUBLISH |
 |---|---|---:|---:|
-| `state` | Perubahan / maks. 60 s | 211 B | 238 B |
-| `capabilities` | Generation koneksi Control berubah | 434 B | 468 B |
-| `availability` online | Control siap | 56 B | 89 B |
-| Last Will `availability` offline | Broker saat koneksi hilang; payload disertakan di CONNECT | 66 B | Bukan PUBLISH Edge |
+| `state` | Perubahan / maks. 60 s | 228 B | 255 B |
+| `capabilities` | Generation koneksi Control berubah | 451 B | 485 B |
+| `availability` online | Control siap | 73 B | 106 B |
+| Last Will `availability` offline | Broker saat koneksi hilang; payload disertakan di CONNECT | 83 B | Bukan PUBLISH Edge |
 | `ack/config` | Progress/hasil `config.*` | 226 B* | 263 B* |
 | `ack/operation` | Progress/hasil operation lain | 226 B* | 266 B* |
 
 `*` Kedua baris ACK memakai JSON fixture `ack/config` di bawah hanya untuk mengukur ukuran paket; payload ACK aktual berubah mengikuti status dan `result` operation.
+ACK error membawa `message` dan `detail` (lihat `PROTOCOL.md#error-di-ack`): contoh `REJECTED HELPER_UNAVAILABLE` dengan path socket di `detail` berukuran 340 B; batas `detail` 200 karakter membuat ACK error tetap di bawah sekitar 500 B. ACK hanya dikirim saat ada command, jadi tidak masuk rate periodik.
 `settings/reported` bersifat request-only dan tidak masuk rate periodik. Payload compact JSON maksimum 8.192 byte; ukuran paket PUBLISH mencakup overhead MQTT tambahan.
 
 Ukuran command adalah fixture dengan envelope dan nilai umum yang sama seperti contoh `config.patch`; command execute reboot/shutdown memakai placeholder challenge 32 karakter. Nilai aktual bergantung ID, timestamp, operation field, dan isi `changes`.
@@ -289,7 +290,7 @@ lama. Kode alasan dan cara membacanya: [PROTOCOL.md](PROTOCOL.md#kode-alasan-doa
 | `p` | Power native bertanda, bukan level absolut terkalibrasi. |
 | `rev` | Revision konfigurasi aman saat sampel dibaca; `null` bila sampel belum teratribusi ke settings. |
 | `ok` | `1` menandakan DoA lolos semua gate source Edge; `0` menandakan sampel berlabel. |
-| `clk` | `1` jam Edge tersinkron, `0` tidak. |
+| `clk` | `1` jam Edge tersinkron, `0` tidak. `ok=1` dengan `clk=0` hanya terjadi dengan jam uji (`state.clock="TEST"`). |
 | `age` | Umur sampel di source (ms) saat dikirim. |
 | `reason` | Kode alasan sampel belum LIVE; kosong bila `ok=1`. |
 | `trust`, `angle_reference` | Ada pada `ok=0`: `UNVERIFIED` dan `RAW`. |
@@ -328,7 +329,7 @@ Ground memperlakukan health fresh sampai 8 s dan memerlukan `q` yang maju. Healt
 ### `telemetry/health/detail`
 
 ```json
-{"v":2,"sid":"7a8b9c0d","t":1790668800000,"usb":2,"sync":[true,true,true],"cpu":22.1,"mem":41.7,"disk_free":83.2,"throt":false,"uv":false,"tx":12.34,"rx":8.21,"adrop":0,"parse":0,"ppp":"UP","peer":"REPLY","ppp_svc":"ACTIVE","ppp_restarts":0,"perr":[]}
+{"v":2,"sid":"7a8b9c0d","t":1790668800000,"usb":2,"sync":[true,true,true],"cpu":22.1,"mem":41.7,"disk_free":83.2,"throt":false,"uv":false,"tx":12.34,"rx":8.21,"adrop":0,"parse":0,"ppp":"UP","peer":"REPLY","ppp_svc":"ACTIVE","ppp_restarts":0,"perr":[],"crej":0}
 ```
 
 - `usb`: jumlah device USB yang terhitung, dapat `null`.
@@ -348,6 +349,8 @@ Ground memperlakukan health fresh sampai 8 s dan memerlukan `q` yang maju. Healt
   `null` bila tidak terbaca.
 - `perr`: topic yang gagal disusun pada putaran publish terakhir, mis. `["telemetry/doa"]`; kosong
   bila semua berhasil. Satu topic yang gagal tidak menghentikan topic lain.
+- `crej`: jumlah command masuk yang dibuang sebelum diproses sejak agent start (terlalu besar, bukan
+  JSON, atau antrean penuh). Rinciannya per kode ada di snapshot panel `link.command_drops`.
 
 Empat field PPP bersifat aditif; Edge versi lama tidak mengirimnya, jadi consumer harus menerima
 field yang tidak ada. Detail juga dikirim ke broker cadangan, sehingga consumer di sana tetap dapat
@@ -358,16 +361,19 @@ Detail tidak menggantikan gate health utama. Ground saat ini menyimpan detail te
 ### `state`
 
 ```json
-{"v":2,"sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","t":1790668800123,"run":"RUNNING","daq":true,"cfg":7,"profile":"balanced","clock":"SYNCED"}
+{"v":2,"sid":"7a8b9c0d","contract":"1.5","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","t":1790668800123,"run":"RUNNING","daq":true,"cfg":7,"profile":"balanced","clock":"SYNCED"}
 ```
 
-`run` adalah state processing berupa string; `daq` adalah boolean ringkas; `cfg` revision konfigurasi; `profile` profile saat ini; `clock` state clock. `state.daq=false` tidak membedakan degraded dan unknown. Gunakan `telemetry/health.daq` untuk enum health dan freshness. Ground memakai `sid` bersama `boot` dan `instance` untuk memeriksa identitas sesi.
+`contract` adalah revisi kontrak MQTT (`major.minor`, sejak 1.5; lihat [contract/README.md](../contract/README.md)). `run` adalah state processing berupa string; `daq` adalah boolean ringkas; `cfg` revision konfigurasi; `profile` profile saat ini; `clock` state clock: `SYNCED`, `UNTRUSTED`, `DEMO`, atau `TEST` (jam OS untuk uji tanpa alat, `testing.clock: system`; tidak pernah berarti tersinkron). `state.daq=false` tidak membedakan degraded dan unknown. Gunakan `telemetry/health.daq` untuk enum health dan freshness. Ground memakai `sid` bersama `boot` dan `instance` untuk memeriksa identitas sesi.
 
 ### `capabilities`
 
 ```json
-{"v":2,"sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","t":1790668800123,"version":"1.0.0","mode":"read_only","codecs":["json"],"angle":"theta_mirror","native_axis":1,"count":360,"profiles":["control","balanced","graph_u8"],"scope":"SDR_STACK","helper_available":true,"remote_commands":true,"config_patch":false,"processing":false,"restart":false,"reboot":false,"shutdown":false,"ppp_restart":false,"remote_config_patch":false,"remote_processing":false,"remote_restart":false,"remote_reboot":true,"remote_shutdown":true,"remote_ppp_restart":true}
+{"v":2,"sid":"7a8b9c0d","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","t":1790668800123,"version":"1.5.0","contract":"1.5","mode":"read_only","codecs":["json"],"angle":"theta_mirror","native_axis":1,"count":360,"profiles":["control","balanced","graph_u8"],"scope":"SDR_STACK","helper_available":true,"remote_commands":true,"config_patch":false,"processing":false,"restart":false,"reboot":false,"shutdown":false,"ppp_restart":false,"remote_config_patch":false,"remote_processing":false,"remote_restart":false,"remote_reboot":true,"remote_shutdown":true,"remote_ppp_restart":true}
 ```
+
+`version` adalah nomor rilis paket dan `contract` revisi kontrak MQTT; consumer membandingkan
+`contract`, bukan `version`. Edge sebelum 1.5.0 tidak mengirim `contract`.
 
 Boolean tanpa prefix (`config_patch`, `processing`, `restart`, `reboot`, `shutdown`,
 `ppp_restart`) melaporkan gate panel Edge lokal. `remote_*` melaporkan jalur/target Ground:
@@ -424,13 +430,13 @@ mutation tetap memakai subset safe yang diizinkan.
 Saat Control siap, retained publish:
 
 ```json
-{"v":2,"sid":"7a8b9c0d","online":true,"t":1790668800123}
+{"v":2,"sid":"7a8b9c0d","contract":"1.5","online":true,"t":1790668800123}
 ```
 
 Last Will saat koneksi MQTT hilang:
 
 ```json
-{"v":2,"sid":"7a8b9c0d","online":false,"reason":"CONNECTION_LOST"}
+{"v":2,"sid":"7a8b9c0d","contract":"1.5","online":false,"reason":"CONNECTION_LOST"}
 ```
 
 Availability adalah nilai terakhir, bukan heartbeat dan bukan bukti DAQ sehat. Cek `state`,
@@ -680,12 +686,12 @@ Gunakan `GET /api/v2/snapshot` untuk memeriksa `node_state`, `config`, `health_f
 | 4 | 16 | Atribusi konfigurasi cocok. |
 | 5 | 32 | Authority source diverifikasi. |
 
-Untuk `telemetry/angular`, mask integritas minimum adalah `1|2|4|16 = 23`. Jika
-`flags & 23 != 23`, frame tidak memenuhi bukti integritas dan ditolak. Jika mask minimum lolos
-dan `flags == 63`, frame dapat masuk LIVE setelah seluruh gate lain lolos. `revision` tidak
-dibandingkan dengan `state.cfg`. Jika mask minimum lolos tetapi `flags != 63`, simpan sebagai
-`UNVERIFIED` di jalur diagnostic; hilangnya bit convention dan/atau authority tidak membuatnya
-valid.
+Untuk `telemetry/angular`, frame masuk LIVE hanya bila `flags == 63`, timestamp fresh, dan health
+fresh dengan `daq=1`. `revision` tidak dibandingkan dengan `state.cfg`. Frame lain tidak dibuang
+(sejak 1.5.0): ia disimpan sebagai `UNVERIFIED` di jalur diagnostic, dan `validation_reasons`
+menyebut bit yang hilang (`SOURCE_FRESHNESS_UNVERIFIED`, `DAQ_NOT_HEALTHY_AT_EDGE`,
+`CONFIG_ATTRIBUTION_UNVERIFIED`, dan seterusnya), `SOURCE_STALE`, atau `HEALTH_STALE`. Rilis
+sebelum 1.5.0 menolak frame dengan `flags & 23 != 23` atau tanpa health fresh.
 
 `telemetry/diagnostic/angular` juga membawa satu JSON object dengan 360 values. Ground menyimpannya
 terpisah sebagai `UNVERIFIED`; ia tidak mengisi Angular LIVE. Endpoint diagnostic menambahkan
@@ -698,17 +704,23 @@ belum memiliki authority/convention.
 |---|---|
 | `BAD_ANGULAR_JSON` | Payload harus JSON object dengan `v=2` dan `encoding="json"`; decoder binary lama tidak kompatibel. |
 | `EXPECTED_360_SAMPLES` | Payload harus memuat seluruh 360 angka dalam satu PUBLISH, bukan potongan atau array parsial. |
-| `SOURCE_TIMESTAMP_NOT_FRESH` | `timestamp_ms` adalah Unix ms dari source; cek satuan, freshness source, dan sinkronisasi clock kedua host. |
-| `ANGULAR_EVIDENCE_INCOMPLETE` | Salah satu bit parsed, fresh, DAQ, atau config tidak ada. Perbaiki bukti di Edge/source; jangan mengisi bit di Ground. |
-| `ANGULAR_WITHOUT_HEALTH` | Health belum diterima, sudah stale, atau `daq` bukan `1`. Tunggu health fresh sebelum memproses frame LIVE. |
-| `flags` lolos mask `23`, tetapi bukan `63` | Frame trust-only `UNVERIFIED`; baca endpoint diagnostic. `detection.valid=false` adalah hasil yang diharapkan, bukan kegagalan JSON. |
-| `link.rejected` bertambah | Counter tidak mengungkap alasan. Periksa bentuk payload/topic dan korelasi `sid`, waktu, health, flags, dan sequence. |
+| `SOURCE_STALE` / `SOURCE_TIME_FUTURE` di diagnostic | `timestamp_ms` adalah Unix ms dari source; cek satuan, freshness source, dan sinkronisasi clock kedua host. |
+| Bit hilang di diagnostic (`..._UNVERIFIED`, `DAQ_NOT_HEALTHY_AT_EDGE`) | Perbaiki bukti di Edge/source; jangan mengisi bit di Ground. |
+| `HEALTH_STALE` di diagnostic | Health belum diterima, sudah stale, atau timestamp-nya jauh dari jam Ground (`health_time_ok=false`). |
+| `flags` bukan `63` | Frame `UNVERIFIED`; baca endpoint diagnostic. `detection.valid=false` adalah hasil yang diharapkan, bukan kegagalan JSON. |
+| `link.rejected` bertambah | Hanya payload yang tidak bisa dibaca sama sekali (bukan JSON, sid/identitas rusak, nilai inti bukan angka). Alasannya dihitung di `link.reject_reasons`. |
 
-Untuk DoA, `telemetry/doa` dengan `ok=1` dapat mengisi detection setelah freshness, sequence,
-sample values, dan health lolos; Ground tidak membandingkan `rev` dengan `state.cfg`.
-`ok=0` hanya diterima sebagai raw `UNVERIFIED` bila `trust`, `angle_reference="RAW"`, revision,
-health, dan reasons yang diizinkan cocok; ia tidak mengisi detection. `telemetry/diagnostic/doa`
-juga selalu terpisah dari deteksi LIVE.
+Untuk DoA, `telemetry/doa` dengan `ok=1` mengisi detection setelah freshness, sequence, sample
+values, dan health lolos; Ground tidak membandingkan `rev` dengan `state.cfg`. Sejak 1.5.0 sampel
+lain tidak dibuang. `ok=0` dengan alasan apa pun, dan `ok=1` yang tidak bisa dikonfirmasi Ground
+(timestamp basi, health stale, DAQ tidak sehat), tampil sebagai `diagnostic_doa` `UNVERIFIED`.
+`validation_reasons`-nya adalah `reason` Edge ditambah label Ground (`SOURCE_STALE`,
+`HEALTH_STALE`, `DAQ_NOT_HEALTHY`, `PREVIOUS_CONFIG`, `OK_FLAG_MISSING`), lengkap dengan `clk` dan
+`source_age_ms`. `ok=1` yang dilabeli membawa `relative_doa_deg` dengan `angle_reference="RELATIVE"`;
+`ok=0` membawa `raw_doa_deg`. Keduanya tidak mengisi detection. `telemetry/diagnostic/doa` juga
+selalu terpisah dari deteksi LIVE. Health dengan timestamp jauh dari jam Ground disimpan dan
+ditampilkan, tetapi `health_fresh` dan `health_time_ok` bernilai `false`, sehingga health itu tidak
+membuat DoA LIVE dan tidak meloloskan command.
 
 Versi Edge yang mengirim Angular JSON tidak kompatibel dengan Ground RDF2 yang mengharapkan
 binary chunk. Perbarui decoder Ground ke kontrak JSON v2 sebelum mengubah gate validitas.

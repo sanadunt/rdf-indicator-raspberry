@@ -1,4 +1,4 @@
-# Implementasi RDF Node 1.0.0
+# Implementasi RDF Node 1.5.0
 
 ## Arsitektur yang benar-benar dibuat
 
@@ -229,9 +229,18 @@ Perubahan berikut eksplisit, bukan klaim bahwa semuanya identik dengan contoh pl
 
 ## Source validity
 
-CSV: 377 field, opsional trailing delimiter kosong. Exact 360 nilai finite; satu output VFO
-harus tidak ambigu. Source timestamp, frequency dan revision-at-read dilacak. Re-reading
-file tidak membuat q baru. Timestamp regresi ditolak sampai sumber/agent direkonsiliasi.
+CSV: 377 field, opsional trailing delimiter kosong. Timestamp, DoA, confidence, power,
+frequency, dan tepat 360 nilai finite tetap wajib; satu output VFO harus tidak ambigu. Metadata
+di antaranya (latency, latitude, longitude, heading GPS/kompas) boleh kosong atau `NaN`: nilainya
+menjadi null dan namanya masuk `detection.null_fields`, bukan membuang record. Batas baca
+`DOA_value.html` adalah `max_record_bytes` dikali `active_vfos` (1–16), karena KrakenSDR menulis
+satu baris (~2,7 KB) per VFO aktif. Source timestamp, frequency, dan revision-at-read dilacak.
+Re-reading file tidak membuat q baru. Timestamp regresi ditolak sampai sumber/agent direkonsiliasi.
+
+`status.json` hanya mewajibkan `timestamp_ms`. Counter `daq_num_dropped_frames` dan
+`data_frame_index` yang tidak valid menjadi null (`daq.null_fields`); `adc_overdrive` dibaca sebagai
+boolean, dan 0/1 diterima. `settings.json` yang satu field amannya rusak tetap dipakai: field itu
+dikeluarkan dari subset aman dan digest, lalu namanya muncul di `config.invalid_settings`.
 
 `doa.xml` diparse terpisah hanya untuk tampilan/relay diagnostik. `TIME` adalah Unix milliseconds,
 `FREQUENCY` dalam MHz, dan `DOA` dipertahankan sebagai nilai raw. Diagnostik tidak mengisi

@@ -30,7 +30,7 @@ class Ground:
         self.diagnostic_angular_q=0; self.regular_unverified_angular_q=0
         self.health_seen=0; self.doa_seen=0; self.diagnostic_seen=None; self.diagnostic_angular_seen=None
         self.angular_seen=0; self.state_seen=0; self.sid_map={}
-        self.rejected=0; self.snapshot_seq=0; self.current_gen=-1
+        self.rejected=0; self.reject_reasons={}; self.snapshot_seq=0; self.current_gen=-1
         self.client=Client(cfg=cfg['mqtt'],client_id=cfg['node_id']+'-ground'+('-demo' if demo else ''),
             credentials_file=cfg['mqtt']['control_credentials_file'],rate=1000,
             subscriptions=[(self.prefix+'/telemetry/'+s,0,True) for s in
@@ -43,15 +43,24 @@ class Ground:
         self.stop_event.set(); self.thread.join(3); self.client.stop(); self.journal.close()
     def _incoming(self,topic,payload,retained):
         try: self.events.put_nowait((topic,payload,retained))
-        except queue.Full: self.rejected+=1
+        except queue.Full: self._count_reject('QUEUE_FULL')
+    def _count_reject(self,code):
+        # Only what cannot be read at all is counted here; incomplete data is kept with labels instead.
+        with self.lock:
+            self.rejected+=1; self.reject_reasons[code]=self.reject_reasons.get(code,0)+1
+            if len(self.reject_reasons)>32: self.reject_reasons.pop(next(iter(self.reject_reasons)))
     def _loop(self):
         while not self.stop_event.is_set():
             try:
                 topic,data,retained=self.events.get(timeout=.1)
-                self.receive(topic,data,retained)
-                self.events.task_done()
             except queue.Empty: pass
-            except Exception: self.rejected+=1
+            else:
+                try: self.receive(topic,data,retained)
+                except Exception as e:
+                    text=str(e)
+                    self._count_reject(text if isinstance(e,ValueError) and re.fullmatch(r'[A-Z0-9_]{1,64}',text)
+                                       else type(e).__name__.upper())
+                finally: self.events.task_done()
             now=time.monotonic()
             if self.client.generation!=self.current_gen:
                 self.current_gen=self.client.generation
@@ -59,8 +68,24 @@ class Ground:
     def _fresh(self,t,limit=10000):
         n=integer(t,1000000000000,9999999999999)
         if not -1000<=now_ms()-n<=limit: raise ValueError('SOURCE_TIMESTAMP_NOT_FRESH')
+    @staticmethod
+    def _time_label(t,limit):
+        # None when t is within [-1 s, limit] of Ground's clock, else the label that says why not.
+        age=now_ms()-integer(t,1000000000000,9999999999999)
+        return 'SOURCE_TIME_FUTURE' if age<-1000 else 'SOURCE_STALE' if age>limit else None
+    def _health_clock_ok(self):
+        # Health whose timestamp was far from Ground's clock when it arrived is kept and shown, but it
+        # never counts as fresh, so it cannot make DoA LIVE or let a command through.
+        t=self.health.get('t') if self.health else None
+        if type(t) is not int: return False
+        skew=now_ms()-t-(time.monotonic()-self.health_seen)*1000
+        return -1000<=skew<=8000
+    def _health_label(self):
+        if not self.health or time.monotonic()-self.health_seen>8 or not self._health_clock_ok(): return 'HEALTH_STALE'
+        if self.health.get('daq')!=1: return 'DAQ_NOT_HEALTHY'
+        return None
     def _reconcile_ppp_restart_health(self):
-        if not self.health or not self.node_state or time.monotonic()-self.health_seen>8: return
+        if not self.health or not self.node_state or time.monotonic()-self.health_seen>8 or not self._health_clock_ok(): return
         health_ms=self.health.get('t'); sid=self.node_state.get('sid')
         if type(health_ms) is not int or not isinstance(sid,str): return
         for operation in self.journal.pending_ppp_restarts():
@@ -92,12 +117,11 @@ class Ground:
                 a=decode(data)
                 if a['sid']!=self.node_state.get('sid'):
                     raise ValueError('ANGULAR_SESSION_MISMATCH')
-                self._fresh(a['timestamp_ms'],10000)
-                required=FLAG_PARSED|FLAG_FRESH|FLAG_DAQ|FLAG_CONFIG
-                if a['flags']&required!=required: raise ValueError('ANGULAR_EVIDENCE_INCOMPLETE')
-                if not self.health or self.health.get('daq')!=1 or time.monotonic()-self.health_seen>8:
-                    raise ValueError('ANGULAR_WITHOUT_HEALTH')
-                if a['flags']==ALL_FLAGS:
+                # Only complete evidence with fresh time and health is LIVE; any other frame is still shown,
+                # as UNVERIFIED, with diagnostic_angular_view() naming what is missing.
+                live=(a['flags']==ALL_FLAGS and self._time_label(a['timestamp_ms'],10000) is None and
+                      self._health_label() is None)
+                if live:
                     if self.angular and a['q']<=self.angular['q']: return
                     a['received_ms']=now_ms(); self.angular=a; self.angular_seen=time.monotonic()
                 else:
@@ -135,7 +159,7 @@ class Ground:
             if suffix=='settings/reported':
                 expected={'v','sid','boot','id','rev','t','settings_json'}
                 if retained: raise ValueError('RETAINED_SETTINGS_REPORT')
-                if set(j)!=expected: raise ValueError('BAD_SETTINGS_REPORT')
+                if not expected<=set(j): raise ValueError('BAD_SETTINGS_REPORT')
                 if sid!=self.node_state.get('sid'): raise ValueError('SETTINGS_REPORT_SESSION_MISMATCH')
                 if j['boot']!=self.node_state.get('boot'): raise ValueError('SETTINGS_REPORT_BOOT_MISMATCH')
                 if not isinstance(j['id'],str) or j['id']!=self.settings_request_id:
@@ -148,65 +172,62 @@ class Ground:
                 effective=safe_settings(parsed)
                 self.node_config={'rev':j['rev'],'proof':'REQUESTED_NATIVE_FILE','effective':effective}
                 self.settings_json=raw
-                self.settings_report={key:value for key,value in j.items() if key!='settings_json'}
+                self.settings_report={key:j[key] for key in expected if key!='settings_json'}
                 self.settings_request_id=None
                 return
             if sid!=self.node_state.get('sid'): return
             if suffix.startswith('telemetry/') and retained: raise ValueError('RETAINED_TELEMETRY')
             if suffix=='telemetry/health':
-                self._fresh(j.get('t'),8000); q=integer(j.get('q'),1,0xffffffff)
+                q=integer(j.get('q'),1,0xffffffff); integer(j.get('t'),1000000000000,9999999999999)
                 if q<=self.health.get('q',0): return
-                if j.get('daq') not in (0,1,2) or j.get('run') not in (0,1,2,3,4,5,255): raise ValueError('BAD_HEALTH_ENUM')
+                # Unknown run/daq values are kept: they simply never read as healthy (daq must be 1).
                 self.health=j; self.health_seen=time.monotonic()
+                if not self._health_clock_ok(): return
                 for old in self.journal.latest():
                     if old['stage']=='REBOOT_SCHEDULED' and old['request'].get('boot')!=self.node_state.get('boot'):
                         self.journal.update(old['id'],'APPLIED',{'proof':'NEW_BOOT_AND_FRESH_HEALTH','boot':self.node_state.get('boot')})
                 self._reconcile_ppp_restart_health()
             elif suffix=='telemetry/doa':
-                self._fresh(j.get('t'),5000); q=integer(j.get('q'),1,0xffffffff)
+                q=integer(j.get('q'),1,0xffffffff)
+                angle=finite(j['a'],0,360); frequency=integer(j['f'],1,0xffffffff)
+                confidence=finite(j['c'],-327.67,327.67); power=finite(j['p'],-1e6,1e6)
                 ok=j.get('ok')
-                if ok==1:
+                labels=[label for label in (self._time_label(j.get('t'),5000),self._health_label()) if label]
+                if ok==1 and not labels:
                     if q<=self.doa.get('q',0): return
-                    finite(j['a'],0,360); finite(j['c'],-327.67,327.67); finite(j['p'],-1e6,1e6); integer(j['f'],1,0xffffffff)
-                    if not self.health or self.health.get('daq')!=1 or time.monotonic()-self.health_seen>8: raise ValueError('DOA_WITHOUT_HEALTH')
                     self.doa=j; self.doa_seen=time.monotonic()
-                elif ok==0:
-                    if q<=self.regular_unverified_doa_q: return
-                    reasons=j.get('validation_reasons')
-                    allowed={'SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'}
-                    if (j.get('trust')!='UNVERIFIED' or j.get('angle_reference')!='RAW' or
-                            (self.node_state.get('cfg') is not None and j.get('rev')!=self.node_state.get('cfg')) or
-                            not isinstance(reasons,list) or not 1<=len(reasons)<=2 or
-                            any(not isinstance(r,str) or r not in allowed for r in reasons) or
-                            len(set(reasons))!=len(reasons)):
-                        raise ValueError('BAD_UNVERIFIED_DOA')
-                    raw=finite(j['a'],0,360); frequency=integer(j['f'],1,0xffffffff)
-                    confidence=finite(j['c'],-327.67,327.67); power=finite(j['p'],-1e6,1e6)
-                    if not self.health or self.health.get('daq')!=1 or time.monotonic()-self.health_seen>8:
-                        raise ValueError('DOA_WITHOUT_HEALTH')
-                    self.regular_unverified_doa_q=q
-                    self.regular_unverified_doa={'v':2,'sid':sid,'q':q,'source':'DOA_value.html',
-                        'source_timestamp_ms':j['t'],'observed_timestamp_ms':now_ms(),'raw_doa_deg':raw,
-                        'frequency_mhz':frequency/1000000,'confidence_native_db':confidence,
-                        'power_native_db':power,'trust':'UNVERIFIED','validation_reasons':list(reasons)}
-                    self.regular_unverified_doa_seen=time.monotonic()
-                else:
-                    raise ValueError('DOA_NOT_VERIFIED')
+                    return
+                # Labelled, not dropped: ok=0 with any Edge reason, or ok=1 that Ground cannot confirm here.
+                if q<=self.regular_unverified_doa_q: return
+                edge=j.get('reason',j.get('validation_reasons')) if ok==0 else []
+                edge=[r for r in edge if isinstance(r,str) and re.fullmatch(r'[A-Z0-9_:]{1,64}',r)][:32] if isinstance(edge,list) else []
+                if ok not in (0,1): labels.append('OK_FLAG_MISSING')
+                if ok==0 and self.node_state.get('cfg') is not None and j.get('rev')!=self.node_state.get('cfg'):
+                    labels.append('PREVIOUS_CONFIG')
+                relative=ok==1
+                self.regular_unverified_doa_q=q
+                self.regular_unverified_doa={'v':2,'sid':sid,'q':q,'source':'DOA_value.html',
+                    'source_timestamp_ms':j.get('t'),'observed_timestamp_ms':now_ms(),
+                    'raw_doa_deg':None if relative else angle,'relative_doa_deg':angle if relative else None,
+                    'angle_reference':'RELATIVE' if relative else 'RAW',
+                    'frequency_mhz':frequency/1000000,'confidence_native_db':confidence,'power_native_db':power,
+                    'clk':j.get('clk'),'source_age_ms':j.get('age'),'trust':'UNVERIFIED',
+                    'validation_reasons':list(dict.fromkeys(edge+labels))}
+                self.regular_unverified_doa_seen=time.monotonic()
             elif suffix=='telemetry/diagnostic/doa':
                 q=integer(j.get('q'),1,0xffffffff)
                 source_time=integer(j.get('source_timestamp_ms'),1000000000000,9999999999999)
                 integer(j.get('observed_timestamp_ms'),1000000000000,9999999999999)
                 angle=finite(j.get('raw_doa_deg'),0,360)
                 finite(j.get('frequency_mhz'),0.001,5000)
+                # Always UNVERIFIED whatever the labels say; missing or odd labels are replaced, not fatal.
                 reasons=j.get('validation_reasons')
-                if (j.get('source')!='doa.xml' or j.get('trust')!='UNVERIFIED' or
-                    not isinstance(reasons,list) or not 1<=len(reasons)<=32 or
-                    any(not isinstance(r,str) or not re.fullmatch(r'[A-Z0-9_:-]{1,64}',r) for r in reasons) or
-                    'DIAGNOSTIC_UNVERIFIED' not in reasons):
-                    raise ValueError('BAD_DIAGNOSTIC_DOA')
+                reasons=[r for r in reasons if isinstance(r,str) and re.fullmatch(r'[A-Z0-9_:-]{1,64}',r)][:32] if isinstance(reasons,list) else []
                 if q<=self.diagnostic_doa_q: return
-                if source_time<self.diagnostic_doa_source_time:
-                    raise ValueError('DIAGNOSTIC_SOURCE_TIME_REGRESSED')
+                # An older doa.xml sample than the one shown is a reordering, not new data.
+                if source_time<self.diagnostic_doa_source_time: return
+                j=dict(j,source='doa.xml',trust='UNVERIFIED',
+                       validation_reasons=list(dict.fromkeys(['DIAGNOSTIC_UNVERIFIED']+reasons)))
                 self.diagnostic_doa_q=q; self.diagnostic_doa_source_time=source_time
                 self.diagnostic_doa=j; self.diagnostic_seen=time.monotonic()
             elif suffix=='telemetry/health/detail': self.detail=j
@@ -248,7 +269,7 @@ class Ground:
             now=time.monotonic()
             ha=round((now-self.health_seen)*1000) if self.health else None
             da=round((now-self.doa_seen)*1000) if self.doa else None
-            fresh=bool(ha is not None and ha<8000)
+            fresh=bool(ha is not None and ha<8000 and self._health_clock_ok())
             doa_valid=bool(fresh and self.health.get('daq')==1 and self.doa and da<5000 and now_ms()-self.doa.get('t',0)<5000)
             diagnostic_seen=self.diagnostic_seen
             if (self.regular_unverified_doa is not None and self.regular_unverified_doa_seen is not None and
@@ -261,16 +282,18 @@ class Ground:
             if diagnostic:
                 diagnostic['available']=True
                 diagnostic['received_age_ms']=diagnostic_age
-                diagnostic['stale']=diagnostic_age>5000
+                diagnostic['stale']=diagnostic_age>5000 or 'SOURCE_STALE' in diagnostic.get('validation_reasons',())
             latest=self.journal.latest(1)
             return {'schema_version':2,'snapshot_seq':self.snapshot_seq,'snapshot_ms':now_ms(),'node_id':self.cfg['node_id'],
                     'mode':'DEMO' if self.demo else 'LIVE','sid':self.node_state.get('sid'),'boot_id':self.node_state.get('boot'),
                     'node_state':copy.deepcopy(self.node_state),'health':dict(self.health),'health_age_ms':ha,'health_fresh':fresh,
+                    'health_time_ok':self._health_clock_ok(),
                     'detection':{'valid':doa_valid,'relative_doa_deg':self.doa.get('a') if doa_valid else None,
                                  'frequency_hz':self.doa.get('f'),'source_timestamp_ms':self.doa.get('t'),'confidence_native_db':self.doa.get('c'),
                                  'power_native_db':self.doa.get('p'),'received_age_ms':da},
                     'diagnostic_doa':diagnostic,
-                    'config':self.config_view(),'link':{'mqtt_control':self.client.status(),'rejected':self.rejected},
+                    'config':self.config_view(),'link':{'mqtt_control':self.client.status(),'rejected':self.rejected,
+                            'reject_reasons':dict(self.reject_reasons)},
                     'capabilities':self.capabilities(),'last_operation':CommandManager.public(latest[0]) if latest else None}
     def angular_view(self):
         with self.lock:
@@ -278,7 +301,7 @@ class Ground:
             a=copy.deepcopy(self.angular); a['source_age_ms']=max(0,now_ms()-a['timestamp_ms'])
             reasons=[]
             if a['source_age_ms']>10000: reasons.append('SOURCE_STALE')
-            if not self.health or time.monotonic()-self.health_seen>8: reasons.append('HEALTH_STALE')
+            if not self.health or time.monotonic()-self.health_seen>8 or not self._health_clock_ok(): reasons.append('HEALTH_STALE')
             elif self.health.get('daq')!=1 or self.health.get('run')!=1: reasons.append('DAQ_OR_PROCESSING_NOT_HEALTHY')
             a['stale']=bool(reasons); a['reasons']=reasons
             return a
@@ -296,7 +319,7 @@ class Ground:
             if not flags&FLAG_CONFIG: reasons.append('CONFIG_ATTRIBUTION_UNVERIFIED')
             if age < -1000: reasons.append('SOURCE_TIME_FUTURE')
             elif source_age>self.cfg['freshness']['doa_ms']: reasons.append('SOURCE_STALE')
-            if not self.health or now-self.health_seen>8:
+            if not self.health or now-self.health_seen>8 or not self._health_clock_ok():
                 reasons.append('HEALTH_STALE')
             else:
                 if self.health.get('daq')!=1: reasons.append('DAQ_NOT_HEALTHY')
@@ -322,7 +345,7 @@ class Ground:
         if not isinstance(obj,dict) or obj.get('op') not in OPS: return {'stage':'REJECTED','error':'UNSUPPORTED_OPERATION'}
         op=obj['op']
         if not self.client.ready: return {'stage':'REJECTED','error':'NODE_NOT_FRESH'}
-        if op!='config.get' and (not self.health or time.monotonic()-self.health_seen>8):
+        if op!='config.get' and (not self.health or time.monotonic()-self.health_seen>8 or not self._health_clock_ok()):
             return {'stage':'REJECTED','error':'NODE_NOT_FRESH'}
         if not isinstance(self.node_state.get('sid'),str) or not isinstance(self.node_state.get('boot'),str):
             return {'stage':'REJECTED','error':'NODE_SESSION_UNAVAILABLE'}

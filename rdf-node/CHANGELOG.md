@@ -1,8 +1,101 @@
 # Changelog
 
-## Unreleased
+## 1.5.0 - Unreleased
 
-- Labelled DoA (planned release 1.4.0). `telemetry/doa` is no longer withheld when a gate fails:
+Contract `1.5`. This is the first release that reports its own number: `capabilities.version` is
+`1.5.0` and `availability`, `capabilities`, and `state` carry `contract: "1.5"`. Releases 1.1.0 to 1.4.0
+below were numbered afterwards; their packages still reported `version: "1.0.0"` (the 1.1.0 and
+1.2.0 packages are the builds stamped `1.0.0-20261006185856` and `1.0.0-20261013194717`).
+
+- Visible contract version. `rdf_node.CONTRACT` (`1.5`) is published as `contract` in
+  `availability` (online, Last Will, and farewell), `capabilities`, and `state`, and shown in the
+  panel snapshot. `capabilities.version` follows the release number. The contract revision is the
+  major.minor of the release that last changed a topic or field, so a consumer compares `contract`
+  and can ignore patch releases.
+- Machine-readable contract: `contract/schema/<topic>.json` holds a JSON Schema (2020-12 subset) for
+  every topic the Edge publishes plus the `cmd/#` envelope. `contract/validate.py` (standard library
+  only) checks a payload or a `mosquitto_sub` stream against it. `tests/test_contract.py` validates
+  the payloads the Edge actually builds (each DoA state, diagnostic, angular, settings report, ACKs,
+  Last Will). The schemas allow extra fields, as consumers must.
+- Testable without hardware:
+  - `python3 run.py demo-source DIR` writes the synthetic KrakenSDR files (`settings.json`,
+    `status.json`, `DOA_value.html`, `doa.xml`) without demo mode, so a real `run.py edge` can read
+    them. The demo `status.json` now writes `adc_overdrive` as a boolean, and the demo also writes
+    `doa.xml` (TIME in ms, FREQUENCY in MHz, raw DOA).
+  - New `testing.clock: system` (default `null`): the OS clock times the data gates, so DoA can be
+    `ok: 1` on a laptop or macOS without `timedatectl`. It is labelled: `state.clock` is `TEST`,
+    `clk` in health and DoA stays 0, and helper-backed commands are still `CLOCK_UNTRUSTED` (only
+    `stream.set` is timed by it). It is rejected with `runtime_mode: controlled`
+    (`TEST_CLOCK_REQUIRES_READ_ONLY`).
+  - New guide `docs/UJI_TANPA_ALAT.md`: Edge, a loopback Mosquitto, and the demo source on a
+    laptop, to test Ground Console.
+- Operations write-ups (steps only; nothing runs automatically):
+  - `docs/UPGRADE_1.5.md`: bring the groundstation `rdf-ground` (1.1.0) and the Edge (1.2.0) to
+    1.5.0, groundstation first, with backups and rollback. It also clears retained topics no
+    longer used (`config/reported` from 1.1.0, any retained `cmd/...`) through a temporary broker
+    account.
+  - `docs/UJI_SINYAL_437.md`: tell approval-only `ok: 0`, "no signal above squelch", and a stuck
+    pipeline apart at 437.425 MHz, with a test transmitter or a temporarily lowered squelch.
+- Ground receiver (`rdf-ground`) labels instead of dropping (decision D4).
+  - DoA with `ok: 0` and any reasons, and `ok: 1` samples Ground cannot confirm (stale timestamp,
+    stale health, DAQ not healthy), appear in `diagnostic_doa` as `UNVERIFIED`, with the Edge
+    `reason` plus Ground labels (`SOURCE_STALE`, `HEALTH_STALE`, `DAQ_NOT_HEALTHY`,
+    `PREVIOUS_CONFIG`, `OK_FLAG_MISSING`), `clk`, and `source_age_ms`.
+  - Angular frames without `flags: 63`, fresh time, or fresh health go to the diagnostic view with
+    their reasons, instead of `ANGULAR_EVIDENCE_INCOMPLETE`/`ANGULAR_WITHOUT_HEALTH`.
+  - Health with a skewed timestamp is kept and shown, but `health_fresh`/`health_time_ok` stay
+    false. It never makes DoA LIVE, never lets a command through, and never reconciles a reboot or
+    PPP restart.
+  - `diagnostic/doa` with missing labels is accepted (always `UNVERIFIED`); an out-of-order older
+    `doa.xml` sample is skipped instead of counted as rejected.
+  - `settings/reported` with extra fields is accepted.
+  - Only unreadable payloads still count in `link.rejected`, and the reason is now counted per
+    code in `link.reject_reasons`.
+  - A rejected message no longer leaves the Ground event queue unfinished.
+- Lenient reading.
+  - Commands: fields this Edge does not know are dropped and listed in `result.ignored` on the
+    first ACK instead of rejecting the whole command `UNKNOWN_COMMAND_FIELD`. Session, deadline,
+    `base_rev`, each operation's own fields, and value limits are still required.
+  - Dropped commands are visible:
+    - A command over 4,096 bytes is answered `REJECTED COMMAND_TOO_LARGE` when its `id` can still
+      be read (up to 64 KiB).
+    - Non-JSON payloads (`COMMAND_NOT_JSON`) and a full inbound queue (`COMMAND_QUEUE_FULL`) cannot
+      be answered by id. All three go to `remote_rejects` and the snapshot's `link.command_drops`,
+      and are counted in `telemetry/health/detail.crej`.
+  - KrakenSDR `DOA_value.html`: empty or `NaN` metadata (latency, latitude, longitude, GPS/compass
+    heading) becomes null and is named in `detection.null_fields`; the record is no longer lost.
+    Timestamp, angle, confidence, power, frequency, and the 360 values stay strict.
+  - The read limit for `DOA_value.html` is `max_record_bytes` times `active_vfos` (1-16), so a
+    multi-VFO file is no longer rejected for size.
+  - `status.json`: a malformed `daq_num_dropped_frames` or `data_frame_index` becomes null
+    (`daq.null_fields`) instead of failing the whole status. `adc_overdrive` is read as a boolean,
+    and 0/1 are accepted.
+  - `settings.json`: one malformed safe field is left out of the safe subset and its digest and
+    listed in `config.invalid_settings`, instead of making all settings `CONFIG_UNAVAILABLE` and
+    blocking DoA.
+- Readable command errors. Every `REJECTED`, `FAILED`, and
+  `OUTCOME_UNKNOWN` result now carries `message` (Indonesian operator text) and, when there is a
+  technical cause, `detail` (at most 200 characters) next to the unchanged `error` code. Raw
+  exception names are gone:
+  - Helper socket missing: was `OUTCOME_UNKNOWN OSERROR`, now `HELPER_UNAVAILABLE`, `FAILED`
+    (nothing was sent, so nothing ran). `HELPER_ACCESS_DENIED` covers a socket the agent may not
+    open.
+  - Timeout or socket loss after the request was sent: `HELPER_TIMEOUT` and
+    `HELPER_CONNECTION_LOST`, still `OUTCOME_UNKNOWN`.
+  - An unexpected exception inside the helper: `HELPER_INTERNAL_ERROR` with the cause in `detail`.
+  - In the agent: `INVALID_COMMAND_FIELD`, `JOURNAL_UNAVAILABLE`, or `INTERNAL_ERROR` instead of
+    `JOURNAL_OR_REQUEST_ERROR`.
+- Mutations that need the root helper (`config.patch`, `processing.set`, `service.restart`,
+  `ppp.restart`, reboot and shutdown) are rejected `HELPER_UNAVAILABLE` before they are journaled
+  when the helper does not answer a status probe. Before this, Ground learned this only after the
+  command was queued and failed.
+- The Edge panel labels the new codes and falls back to the Edge `message` for codes it does not
+  know. The Ground preview shows the `message` next to the code. Ground Console 3.0.0 drops
+  `message` and `detail` (its ACK allowlist) but already shows the clearer `error` code.
+
+## 1.4.0 - 2026-10-28
+
+- Labelled DoA. `telemetry/doa` is no longer withheld when a gate fails:
   every new DoA sample (new `q` with a parsed timestamp and angle) is published once with
   `ok: 0` when the source is stale, DAQ is not healthy, the clock is not verified, or a
   verification flag is missing. New fields on every DoA: `clk` (clock verified, 0/1), `age`
@@ -30,7 +123,10 @@
 - Compatibility: consumers that only read `ok: 1` DoA are unaffected. Ground Console 3.0.0 and
   the bundled `rdf-ground` receiver still treat `ok: 0` DoA with reasons other than
   `SOURCE_UNVERIFIED`/`ANGLE_UNVERIFIED` as invalid and drop it; they keep working on health and
-  verified DoA until they are updated to read the new labels.
+  verified DoA until they are updated to read the new labels (`rdf-ground` does from 1.5.0).
+
+
+## 1.3.0 - 2026-10-27
 
 - `cmd/config/get` on the primary broker is now answered with `settings/reported` whether or not
   the primary uses TLS. `mqtt.tls: false` is the operator's choice of a trusted link (for example
@@ -138,6 +234,9 @@
   `PPP_SERVICE_NOT_ACTIVE`; the docs recommend `Type=simple` + `nodetach`. Operators are told to
   check the Link tab before pressing `Coba lagi`.
 
+
+## 1.2.0 - 2026-10-13
+
 - Add an optional backup MQTT broker on the Edge (`mqtt.backup`, panel `Data > Cadangan`). A third
   client, `<client_id>-backup`, mirrors every Edge publish to a LAN or online broker under the same
   `sdr/v2/{node_id}` topics, independent of the PPP/T900 primary, and keeps publishing while the
@@ -238,13 +337,16 @@
 
 - Default lifecycle setup to `rdfsdr.service` when registered and require an audited fixed target for Ground SDR controls; Ground reboot/shutdown retain explicit UI confirmation and durable challenges.
 
-- Publish diagnostic `doa.xml` every 3 s when available, independent of normal DoA validity.
-  Ground keeps it `UNVERIFIED`, separate from live DoA and commands.
-
 - Replace RDF2/Q16/U8 Angular chunk transport with one JSON PUBLISH containing all 360 source
   values on normal and diagnostic topics. Ground validates session, freshness, health, and flags
   before marking LIVE; the reported revision is metadata, not a LIVE equality gate. Edge and
   Ground must be upgraded together; byte-budget pacing can extend profile and diagnostic intervals.
+
+
+## 1.1.0 - 2026-10-06
+
+- Publish diagnostic `doa.xml` every 3 s when available, independent of normal DoA validity.
+  Ground keeps it `UNVERIFIED`, separate from live DoA and commands.
 
 - Distinguish local API outage from stale cached data in both panels; add immediate manual retry while regular polling continues, without automatic service or SDR recovery.
 - Prevent duplicate shutdown scheduling per boot, retain unresolved outcomes across all journal pages/sessions, and add root-only systemd-evidence-checked local reconciliation.
@@ -266,7 +368,6 @@
 - Keep CTRL/BULK credentials separate and reconfigure clients live after admin save. Plaintext exposes credentials and payloads; use only on a trusted link.
 - Retain verified TCP/TLS and WSS, including MQTT binary frames and the `mqtt` WebSocket subprotocol.
 - Use OS CA roots by default or a configured CA bundle for private/self-signed certificates; migrate MQTT UI settings schemas 1 and 2 to schema 3.
-
 
 ## 1.0.0 - 2026-09-29
 

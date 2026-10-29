@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sanadunt/rdf-indicator-raspberry/rdf-node/contract/schema/telemetry.health.json",
+  "title": "telemetry/health",
+  "description": "Heartbeat 1/s. Field tambahan boleh ada dan harus diabaikan consumer.",
+  "x-topic": "telemetry/health",
+  "type": "object",
+  "properties": {
+    "v": {
+      "const": 2
+    },
+    "sid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}$",
+      "description": "Session id; berubah setiap agent start."
+    },
+    "q": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "t": {
+      "type": "integer",
+      "minimum": 1000000000000,
+      "maximum": 9999999999999,
+      "description": "Unix epoch milidetik."
+    },
+    "run": {
+      "enum": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        255
+      ]
+    },
+    "daq": {
+      "enum": [
+        0,
+        1,
+        2
+      ]
+    },
+    "drop": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "age": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "temp": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": -100,
+      "maximum": 200
+    },
+    "clk": {
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "rev": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "why": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z0-9_:]{1,64}$"
+      },
+      "maxItems": 32,
+      "description": "Alasan DoA belum live; kosong saat live."
+    }
+  },
+  "required": [
+    "v",
+    "sid",
+    "q",
+    "t",
+    "run",
+    "daq",
+    "drop",
+    "age",
+    "temp",
+    "clk",
+    "rev",
+    "why"
+  ],
+  "additionalProperties": true
+}
