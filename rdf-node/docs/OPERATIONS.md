@@ -110,6 +110,45 @@ Asal command dan nilai sebelum perubahan disimpan di tabel tambahan `operation_m
 `operations` tidak berubah, jadi rilis sebelumnya tetap dapat menulis jurnal setelah rollback dan
 hanya mengabaikan tabel tambahan itu.
 
+Rilis sebelum 1.6 tidak mengenal bagian `nav:`. Bila config sudah memuat `nav:`, hapus bagian itu
+(`sudoedit /etc/rdf-node/config.yaml`) sebelum rollback ke 1.5.x, karena schema strict menolak key
+yang tidak dikenal dan `rdf-edge` tidak akan start.
+
+## Kompas GY-26 dan GPS (sejak 1.6)
+
+Edge membaca sendiri kompas GY-26 (USB-TTL, perintah baca sudut `0x31`, 9600 8N1) dan GPS NMEA
+(u-blox 7 lewat USB CDC-ACM; fix, satelit, HDOP, dan ketinggian dari GGA; kecepatan dan arah gerak
+dari RMC). Hasilnya dikirim sebagai field opsional di `telemetry/health` ke setiap broker READY,
+utama maupun cadangan. Keduanya mati secara default.
+
+1. Pasang [deploy/examples/nav/99-rdf-nav.rules](../deploy/examples/nav/99-rdf-nav.rules) agar
+   ModemManager tidak membuka port sensor dan agar ada symlink `/dev/rdf-compass` dan `/dev/rdf-gps`.
+2. Unit `rdf-edge.service` 1.6 memakai `SupplementaryGroups=dialout`. Port T900
+   (`link.serial_alias`) tetap ditolak oleh pembaca sensor walaupun ditulis di config.
+3. Tambahkan ke `/etc/rdf-node/config.yaml`:
+
+   ```yaml
+   nav:
+     compass:
+       enabled: true
+       device: /dev/rdf-compass
+       offset_deg: 0.0        # koreksi pemasangan / deklinasi magnetik
+     gps:
+       enabled: true
+       device: /dev/rdf-gps
+       publish_position: true # kirim lat/lon/alt ke Ground; default false
+   ```
+
+4. `sudo systemctl restart rdf-edge.service`, lalu periksa `nav` di
+   `curl -fsS http://127.0.0.1:8790/api/v2/snapshot`: kompas `OK` dengan `heading_deg`, GPS `FIX`
+   atau `NO_FIX` dengan jumlah satelit.
+
+State yang mungkin: kompas `NO_DEVICE` (port tidak ada, error `DEVICE_MISSING`, `ERRNO_13` untuk izin,
+atau `DEVICE_IS_LINK_PORT`), `NO_REPLY` (modul diam: periksa TX/RX, GND, dan VCC), `BAD_FRAME`
+(checksum salah atau baud salah), `STALE`. GPS `NO_DATA` (tidak ada byte sama sekali), `BAD_DATA` (byte ada tetapi bukan NMEA valid: baud atau perangkat salah), `NO_FIX` (data
+ada tetapi belum ada satelit cukup; pindahkan antena ke langit terbuka). Nilai basi tidak pernah
+dikirim sebagai angka.
+
 ## Ground writes and broker trust boundary
 
 Semua command write Ground yang didukung berjalan tanpa remote grant dan tanpa approval root

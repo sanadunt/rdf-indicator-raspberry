@@ -1,5 +1,6 @@
 from __future__ import annotations
 import copy
+import math
 import queue
 import re
 import threading
@@ -13,6 +14,7 @@ from .config import PROFILES
 from .journal import Journal
 from .source import Source
 from .monitor import Monitor
+from .nav import Nav
 from .control import CommandManager, OPS, READ_OPS
 from .helper import call_helper
 from .mqtt import Client
@@ -23,6 +25,8 @@ UNVERIFIED_REASONS=frozenset(('SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'))
 # makes new DoA samples (valid or labelled); the smaller one once it has gone stale.
 ANGULAR_CONTROL_BASELINE_VALID=800
 ANGULAR_CONTROL_BASELINE_INVALID=510
+# Extra Control cost-byte/s of the nav fields in telemetry/health (compass + GPS fix with position).
+NAV_CONTROL_RESERVE=110
 # Bulk yields the shared PPP link while a Control PUBACK is this late or this many Bulk bytes are unACKed.
 BULK_YIELD_PENDING_MS=1000
 DIAGNOSTIC_ANGULAR_MIN_GAP_S=6
@@ -35,7 +39,8 @@ class Agent:
         self.cfg=cfg; self.demo=demo; self.boot=read_boot_id(); self.instance=str(uuid.uuid4()); self.sid=uuid.uuid4().hex[:8]
         self.prefix=('sdr/demo/v2/' if demo else 'sdr/v2/')+cfg['node_id']
         self.journal=Journal(Path(cfg['state_dir'])/'state.sqlite3'); self.journal.recover(self.boot)
-        self.source=Source(cfg,self.journal); self.monitor=Monitor(cfg); self.commands=CommandManager(self)
+        self.source=Source(cfg,self.journal); self.monitor=Monitor(cfg); self.nav=Nav(cfg['nav'],cfg['link']); self.commands=CommandManager(self)
+        self.nav_enabled=cfg['nav']['compass']['enabled'] or cfg['nav']['gps']['enabled']
         self.profile=self.journal.get('profile',cfg['telemetry']['profile'])
         if self.profile not in PROFILES: self.profile=cfg['telemetry']['profile']
         self.config_proof='unverified'; self.planned_reboot=False
@@ -402,7 +407,7 @@ class Agent:
         self._apply_pending_mqtt(); self._apply_pending_backup()
         with self.mqtt_apply_lock:
             self.mqtt_running=True
-            self.monitor.start(); self.commands.start()
+            self.monitor.start(); self.nav.start(); self.commands.start()
             for client in self.clients.values(): client.start()
             if self.backup_client: self.backup_client.start()
             for fn,name in ((self._collect,'rdf-collector'),(self._schedule,'rdf-scheduler'),(self._events,'rdf-inbound')):
@@ -414,7 +419,7 @@ class Agent:
             self.mqtt_running=False
             for c in self.clients.values(): c.stop()
             if self.backup_client: self.backup_client.stop()
-        self.monitor.stop()
+        self.monitor.stop(); self.nav.stop()
         for t in self.threads: t.join(3)
         # A long lifecycle worker may still be reconciling; daemon exits without replay.
         if not self.commands.thread.is_alive(): self.journal.close()
@@ -490,6 +495,10 @@ class Agent:
         self._watch_link(host)
         latest=self.journal.latest(1,READ_OPS)
         remote=self.journal.latest(1,READ_OPS,links=('ground','backup'))
+        try: nav=self.nav.snapshot()
+        except Exception as e:
+            # A sensor bug must not freeze the snapshot (and with it health and DoA).
+            nav={name:{'state':'ERROR','error':type(e).__name__.upper()[:64]} for name in ('compass','gps')}
         alerts=[]
         if self.demo: alerts.append({'severity':'warning','code':'DEMO','text':'DEMO - bukan data perangkat'})
         if not self.source.path: alerts.append({'severity':'warning','code':'SETUP_REQUIRED','text':'Pilih folder output SDR terlebih dahulu'})
@@ -504,7 +513,7 @@ class Agent:
               'node_id':self.cfg['node_id'],'sid':self.sid,'boot_id':self.boot,'agent_instance_id':self.instance,
               'snapshot_seq':self.snapshot_seq,'snapshot_ms':now_ms(),
               'processing':{'observed':processing,'desired':self.helper_status.get('desired'),'scope':'SDR_STACK'},
-              'detection':view,'diagnostic_doa':diagnostic,'daq':view['daq'],'host':host,
+              'detection':view,'diagnostic_doa':diagnostic,'daq':view['daq'],'host':host,'nav':nav,
               'link':{'usb':host['usb'],'ppp':host['ppp'],'interface':host['interface'],
                       'ppp_probe':host['ppp_probe'],'ppp_peer':self.cfg['link']['peer_ip'],
                       'mqtt_control':cs,'mqtt_bulk':bs,'mqtt_topic_delivery':topic_delivery,
@@ -539,6 +548,9 @@ class Agent:
                 'angle':self.cfg['source']['angle_mode'],'native_axis':1,'count':360,
                 'profiles':list(PROFILES),'scope':'SDR_STACK','helper_available':helper_available,
                 'remote_commands':remote,
+                # Sensors this node reads for telemetry/nav; position is sent only when publish_position is on.
+                'nav':{'compass':self.cfg['nav']['compass']['enabled'],'gps':self.cfg['nav']['gps']['enabled'],
+                       'position':self.cfg['nav']['gps']['enabled'] and self.cfg['nav']['gps']['publish_position']},
                 'remote_config_patch':remote and settings_target,
                 'remote_processing':remote and lifecycle_target,
                 'remote_restart':remote and lifecycle_target,
@@ -711,6 +723,30 @@ class Agent:
             if all(reason in UNVERIFIED_REASONS for reason in d['reasons']):
                 payload['validation_reasons']=list(d['reasons'])
         return payload
+    def _nav_health_fields(self,nav):
+        # Optional telemetry/health fields, only for configured sensors (health stays byte-identical without).
+        # A sensor that is silent or stale sends its state and no number.
+        def num(v,lo,hi,digits):
+            # Anything not finite or outside the schema range goes out as null, never as NaN/Infinity.
+            if isinstance(v,bool) or not isinstance(v,(int,float)) or not math.isfinite(v): return None
+            v=round(v,digits)
+            return v if lo<=v<=hi else None
+        def state(v): return v if isinstance(v,str) and re.fullmatch(r'[A-Z0-9_]{1,32}',v) else 'ERROR'
+        out={}
+        c=nav.get('compass') or {}; g=nav.get('gps') or {}
+        if self.cfg['nav']['compass']['enabled']:
+            out['hs']=state(c.get('state')); out['hdg']=num(c.get('heading_deg'),0,359.9,1) if out['hs']=='OK' else None
+        if self.cfg['nav']['gps']['enabled']:
+            out['gs']=state(g.get('state'))
+            out['fix']=g.get('fix') if g.get('fix') in (2,3) and out['gs']=='FIX' else 0
+            sat=g.get('sats_used'); out['sat']=sat if type(sat) is int and 0<=sat<=255 else None
+            lat=num(g.get('lat'),-90,90,5); lon=num(g.get('lon'),-180,180,5)
+            # Position leaves the node only when the deployment allows it (nav.gps.publish_position).
+            if out['fix'] and self.cfg['nav']['gps']['publish_position'] and lat is not None and lon is not None:
+                cog=num(g.get('course_deg'),0,360,0)
+                out.update(lat=lat,lon=lon,alt=num(g.get('alt_m'),-1000,100000,1),sog=num(g.get('speed_mps'),0,1000,1),
+                           cog=None if cog is None else int(cog)%360)
+        return out
     def _angular_flags(self,d,r,h,daq):
         flags=FLAG_PARSED
         if (h.get('clock_usable',h['clock_trusted']) and d['source_age_ms'] is not None and
@@ -788,6 +824,12 @@ class Agent:
                                  # Why DoA is not live (empty when it is): Ground can tell an empty DOA file
                                  # (EMPTY_CSV) from one that stopped changing (DOA_FILE_NOT_UPDATING).
                                  'why':list(d['reasons'])}
+                        if self.nav_enabled:
+                            # Read the sensors now, not the collector's cached snapshot, so nothing stale is sent;
+                            # a nav problem only drops the nav fields, never the health message.
+                            try: payload.update(self._nav_health_fields(self.nav.snapshot()))
+                            except Exception as e: self._publish_failed('telemetry/health:nav',e)
+                            else: self._publish_ok('telemetry/health:nav')
                         self._offer('health','telemetry/health',payload,expiry=5,priority=1,links=ready)
                 except Exception as e: self._publish_failed('telemetry/health',e)
                 else: self._publish_ok('telemetry/health')
@@ -890,7 +932,7 @@ class Agent:
                             doa_flowing=(d['q'] and d['source_age_ms'] is not None and
                                          d['source_age_ms']<=self.cfg['freshness']['doa_ms'])
                             control_baseline=(ANGULAR_CONTROL_BASELINE_VALID if doa_flowing
-                                else ANGULAR_CONTROL_BASELINE_INVALID)
+                                else ANGULAR_CONTROL_BASELINE_INVALID)+(NAV_CONTROL_RESERVE if self.nav_enabled else 0)
                             control_available=max(1,self.cfg['telemetry']['control_budget_bytes_s']-control_baseline)
                             period=max(diagnostic_period,
                                 (len(data)+len(self.prefix+'/telemetry/diagnostic/angular')+160)/

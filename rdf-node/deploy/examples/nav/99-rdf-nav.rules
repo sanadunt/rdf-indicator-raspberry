@@ -1,0 +1,18 @@
+# Contoh udev untuk sensor nav RDF Node (kompas GY-26 lewat USB-TTL PL2303 dan GPS u-blox 7).
+# Salin ke /etc/udev/rules.d/99-rdf-nav.rules, lalu: sudo udevadm control --reload && sudo udevadm trigger
+#
+# ID_MM_DEVICE_IGNORE=1 mencegah ModemManager mengirim perintah AT ke kedua port. Grup dialout
+# dipakai service rdf-edge (SupplementaryGroups=dialout) untuk membuka port. Symlink tetap
+# /dev/rdf-compass dan /dev/rdf-gps boleh dipakai di nav.compass.device / nav.gps.device; jalur
+# /dev/serial/by-id/... juga stabil selama hanya ada satu adapter dengan VID:PID yang sama.
+
+ACTION=="remove", GOTO="rdf_nav_end"
+SUBSYSTEM!="tty", GOTO="rdf_nav_end"
+
+# Kompas GY-26 di adapter Prolific PL2303 (067b:2303).
+KERNEL=="ttyUSB[0-9]*", ENV{ID_VENDOR_ID}=="067b", ENV{ID_MODEL_ID}=="2303", SYMLINK+="rdf-compass", GROUP="dialout", MODE="0660", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+# GPS u-blox 7 (1546:01a7, USB CDC-ACM).
+KERNEL=="ttyACM[0-9]*", ENV{ID_VENDOR_ID}=="1546", ENV{ID_MODEL_ID}=="01a7", SYMLINK+="rdf-gps", GROUP="dialout", MODE="0660", ENV{ID_MM_DEVICE_IGNORE}="1"
+
+LABEL="rdf_nav_end"

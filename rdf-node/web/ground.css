@@ -95,3 +95,12 @@ canvas{display:block;width:100%;height:auto}
 
 @media(max-width:860px){main{grid-template-columns:1fr;padding:12px}}
 @media(max-width:480px){header{padding:10px 12px;gap:8px}.brand span{display:none}.statepill{font-size:11px;padding:5px 9px}.card,.ppp-control,.settings-form{padding:14px}h1{font-size:44px}.settings-fields{grid-template-columns:1fr}.api-status{top:50px}}
+
+/* Position and compass */
+.nav-grid{display:grid;grid-template-columns:minmax(0,220px) minmax(0,1fr);gap:16px;align-items:start;margin-top:4px}
+.nav-big{font-size:28px;font-weight:700;color:var(--ok);margin:6px 0 0;text-align:center;font-variant-numeric:tabular-nums}
+.navpill{font-size:11px;font-weight:700;letter-spacing:.6px;padding:4px 10px;border-radius:999px;background:var(--bg);border:1px solid var(--line);color:var(--dim)}
+.navpill.good{color:var(--ok);background:var(--ok-soft);border-color:transparent}.navpill.warn{color:var(--warn);background:var(--warn-soft);border-color:transparent}
+#track{border-radius:10px;background:var(--bg);border:1px solid var(--line)}
+.nav.stale canvas{opacity:.55;filter:grayscale(.6)}
+@media(max-width:560px){.nav-grid{grid-template-columns:1fr}.nav-grid canvas{max-width:280px;margin:auto}}

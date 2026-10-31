@@ -180,6 +180,13 @@ source, bukan latency E2E. Selama `DOA_value.html` kosong atau rusak, sampel ter
 jadi `age` terus naik. `why` menjelaskan sebabnya (kode di tabel atas; kosong bila DoA LIVE).
 Clock: 0 untrusted, 1 synced. Field unavailable dapat null. Health q tetap maju saat SDR stop.
 
+Sejak kontrak 1.6 health dapat membawa field nav opsional dari sensor yang dikonfigurasi di `nav:`:
+`hdg` (heading kompas GY-26, derajat, `null` bila tidak OK) dan `hs` (state kompas); `gs` (state GPS),
+`fix` (0/2/3), dan `sat`; serta `lat`, `lon`, `alt`, `sog`, `cog` hanya bila ada fix dan
+`nav.gps.publish_position` aktif. Sensor yang diam atau basi mengirim state tanpa angka, bukan nilai
+terakhir. Consumer harus menerima field ini tidak ada. Lihat
+[MQTT_TOPIC_SUMMARY.md](MQTT_TOPIC_SUMMARY.md#telemetryhealth).
+
 `telemetry/health/detail` (tiap 10 s) menambah field aditif status link PPP: `ppp` (`UP`/`DOWN`),
 `peer` (hasil ping peer), `ppp_svc` (`ActiveState` unit `t900-ppp.service`), dan `ppp_restarts`
 (`NRestarts` systemd), serta `perr`: daftar topic yang gagal disusun pada putaran publish terakhir
