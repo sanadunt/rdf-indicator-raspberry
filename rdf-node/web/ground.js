@@ -573,6 +573,77 @@ function plot(a){
  }
  c.fillStyle=col.face;c.strokeStyle=col.dim;c.lineWidth=2;c.beginPath();c.arc(cx,cy,5,0,Math.PI*2);c.fill();c.stroke();
 }
+// Position and compass (telemetry/nav). Heading is the node's compass heading, north up; the track is the
+// node's own path, drawn in metres around its latest fix. Neither is a map: no tiles leave this host.
+let navTrack=[],navTrackCount=-1,navTrackAt=0;
+function prepCanvas(id,size){const canvas=$(id),dpr=Math.min(window.devicePixelRatio||1,3);if(canvas.width!==Math.round(size*dpr)){canvas.width=Math.round(size*dpr);canvas.height=Math.round(size*dpr);}const c=canvas.getContext('2d');c.setTransform(dpr,0,0,dpr,0,0);c.clearRect(0,0,size,size);return c;}
+function drawCompass(hdg){
+ const c=prepCanvas('compass',220),col=plotColors(),cx=110,cy=110,r=96;
+ const point=(deg,radius)=>{const t=deg*Math.PI/180;return [cx+radius*Math.sin(t),cy-radius*Math.cos(t)];};
+ c.fillStyle=col.face;c.beginPath();c.arc(cx,cy,r+6,0,Math.PI*2);c.fill();
+ c.strokeStyle=col.line;c.lineWidth=1;c.beginPath();c.arc(cx,cy,r,0,Math.PI*2);c.stroke();
+ for(let deg=0;deg<360;deg+=10){const major=deg%90===0,[x1,y1]=point(deg,r-(major?14:deg%30===0?9:5)),[x2,y2]=point(deg,r);c.globalAlpha=major?1:.6;c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();}
+ c.globalAlpha=1;c.font='700 13px system-ui,sans-serif';c.textAlign='center';c.textBaseline='middle';
+ for(const [deg,label] of [[0,'U'],[90,'T'],[180,'S'],[270,'B']]){const [x,y]=point(deg,r-26);c.fillStyle=deg===0?col.accent:col.dim;c.fillText(label,x,y);}
+ if(Number.isFinite(hdg)){
+  const [tx,ty]=point(hdg,r-12),[lx,ly]=point(hdg+150,22),[rx,ry]=point(hdg-150,22);
+  c.fillStyle=col.ok;c.beginPath();c.moveTo(tx,ty);c.lineTo(lx,ly);c.lineTo(cx,cy);c.lineTo(rx,ry);c.closePath();c.fill();
+ }
+ c.fillStyle=col.face;c.strokeStyle=col.dim;c.lineWidth=2;c.beginPath();c.arc(cx,cy,4,0,Math.PI*2);c.fill();c.stroke();
+}
+function niceStep(span){const raw=span/4,p=10**Math.floor(Math.log10(raw)),m=raw/p;return (m<1.5?1:m<3.5?2:m<7.5?5:10)*p;}
+function drawTrack(points,nav){
+ const size=320,c=prepCanvas('track',size),col=plotColors(),pad=22;
+ // A current fix is drawn solid with its heading; without one the last track point is only a hollow
+ // "last known" marker, never presented as where the node is now.
+ const live=!!nav&&Number.isFinite(nav.lat)&&Number.isFinite(nav.lon);
+ const here=live?[nav.lat,nav.lon]:points.length?[points[points.length-1][1],points[points.length-1][2]]:null;
+ if(!here){c.fillStyle=col.dim;c.font='600 12px system-ui,sans-serif';c.textAlign='center';c.fillText('Belum ada posisi GPS',size/2,size/2);return null;}
+ const k=Math.PI/180*6371000,cos=Math.cos(here[0]*Math.PI/180);
+ const xy=([lat,lon])=>[(((lon-here[1]+540)%360)-180)*k*cos,(lat-here[0])*k];
+ const pts=points.map(p=>xy([p[1],p[2]]));
+ let span=20;for(const [x,y] of pts)span=Math.max(span,Math.abs(x)*2,Math.abs(y)*2);span*=1.1;
+ const scale=(size-pad*2)/span,px=([x,y])=>[size/2+x*scale,size/2-y*scale];
+ const step=niceStep(span);c.strokeStyle=col.line;c.lineWidth=1;c.globalAlpha=.6;
+ for(let v=-Math.floor(span/2/step)*step;v<=span/2;v+=step){const a=size/2+v*scale;c.beginPath();c.moveTo(a,pad/2);c.lineTo(a,size-pad/2);c.moveTo(pad/2,a);c.lineTo(size-pad/2,a);c.stroke();}
+ c.globalAlpha=1;
+ if(pts.length>1){c.strokeStyle=col.accent;c.lineWidth=2;c.lineJoin='round';c.beginPath();pts.forEach((p,i)=>{const [x,y]=px(p);if(i)c.lineTo(x,y);else c.moveTo(x,y);});c.stroke();
+  const [sx,sy]=px(pts[0]);c.fillStyle=col.dim;c.beginPath();c.arc(sx,sy,4,0,Math.PI*2);c.fill();}
+ const [hx,hy]=px([0,0]),hdg=live?nav.hdg:null;
+ if(!live){c.strokeStyle=col.dim;c.lineWidth=2;c.beginPath();c.arc(hx,hy,5,0,Math.PI*2);c.stroke();}
+ else if(Number.isFinite(hdg)){const t=hdg*Math.PI/180,tip=[hx+14*Math.sin(t),hy-14*Math.cos(t)],l=[hx+8*Math.sin(t+2.5),hy-8*Math.cos(t+2.5)],rr=[hx+8*Math.sin(t-2.5),hy-8*Math.cos(t-2.5)];c.fillStyle=col.ok;c.beginPath();c.moveTo(...tip);c.lineTo(...l);c.lineTo(...rr);c.closePath();c.fill();}
+ if(live){c.fillStyle=col.ok;c.beginPath();c.arc(hx,hy,5,0,Math.PI*2);c.fill();c.strokeStyle=col.face;c.lineWidth=2;c.stroke();}
+ c.fillStyle=col.dim;c.font='600 11px system-ui,sans-serif';c.textAlign='left';c.textBaseline='top';c.fillText('U ↑',6,5);
+ c.textAlign='right';c.fillText(`kisi ${step>=1000?(step/1000)+' km':step+' m'}`,size-6,5);
+ return span;
+}
+const navLabels={OK:'OK',STALE:'BASI',NO_REPLY:'TIDAK MEMBALAS',BAD_FRAME:'FRAME RUSAK',NO_DEVICE:'PERANGKAT TIDAK ADA',DISABLED:'MATI',STARTING:'MEMULAI',ERROR:'ERROR',FIX:'FIX',NO_FIX:'BELUM FIX',NO_DATA:'TIDAK ADA DATA',BAD_DATA:'DATA RUSAK',INVALID:'DATA TIDAK VALID'};
+async function renderNav(nav){
+ const card=document.querySelector('.card.nav'),pill=$('nav-state');
+ card.classList.toggle('stale',!!nav&&!nav.fresh);
+ if(!nav){
+  pill.textContent='BELUM ADA DATA';pill.className='navpill';drawCompass(null);
+  $('heading').textContent='--';$('heading-meta').textContent='Kompas: --';$('position').textContent='Posisi: --';$('gps-meta').textContent='GPS: --';
+  const span=drawTrack(navTrack,null);$('track-meta').textContent=navTrack.length?`Jejak: ${navTrack.length} titik (posisi terakhir, bukan sekarang) · area ${span>=1000?(span/1000).toFixed(2)+' km':span.toFixed(0)+' m'}`:'Jejak: belum ada titik';
+  return;
+ }
+ const label=v=>v==null?'tidak dipasang':navLabels[v]||v;
+ const hs=label(nav.hs),gs=label(nav.gs),good=nav.fresh&&(nav.hs==null||nav.hs==='OK')&&(nav.gs==null||nav.gs==='FIX');
+ pill.textContent=nav.fresh?`KOMPAS ${hs} · GPS ${gs}`:`BASI · ${(nav.received_age_ms/1000).toFixed(0)} s`;pill.className=`navpill ${good?'good':'warn'}`;
+ drawCompass(nav.hdg);
+ $('heading').textContent=Number.isFinite(nav.hdg)?`${nav.hdg.toFixed(1)}°`:'--';
+ $('heading-meta').textContent=`Kompas: ${hs}${nav.fresh?'':' (data basi)'}`;
+ const fixText=nav.fix===3?'3D':nav.fix===2?'2D':'tidak ada';
+ $('position').textContent=Number.isFinite(nav.lat)?`Posisi: ${nav.lat.toFixed(6)}, ${nav.lon.toFixed(6)}${Number.isFinite(nav.alt)?` · alt ${nav.alt.toFixed(1)} m`:''}${Number.isFinite(nav.sog)?` · ${(nav.sog*3.6).toFixed(1)} km/j`:''}${Number.isFinite(nav.cog)?` · arah gerak ${nav.cog.toFixed(0)}°`:''}`:
+  nav.gs==='FIX'&&snapshot.capabilities?.nav?.position===false?'Posisi: tidak dikirim (publish_position mati di node)':'Posisi: --';
+ $('gps-meta').textContent=`GPS: ${gs} · fix ${fixText} · satelit ${nav.sat??'--'}${Number.isFinite(nav.hdop)?` · HDOP ${nav.hdop}`:''} · diterima ${nav.received_age_ms} ms lalu`;
+ const now=Date.now();
+ if(nav.track_points!==navTrackCount||now-navTrackAt>10000){
+  try{const t=await get('/api/v2/nav/track');navTrack=Array.isArray(t.points)?t.points:[];navTrackCount=nav.track_points;navTrackAt=now;}catch{}
+ }
+ const span=drawTrack(navTrack,nav.fresh?nav:null);
+ $('track-meta').textContent=navTrack.length?`Jejak: ${navTrack.length} titik${Number.isFinite(nav.lat)&&nav.fresh?'':' (posisi terakhir, bukan sekarang)'} · area ${span>=1000?(span/1000).toFixed(2)+' km':span.toFixed(0)+' m'}`:'Jejak: belum ada titik';
+}
 const runNames={0:'STOPPED',1:'RUNNING',2:'STARTING',3:'STOPPING',4:'ERROR',255:'UNKNOWN'},daqNames={0:'DEGRADED',1:'HEALTHY',2:'UNKNOWN'};
 // Tiles mirror telemetry/health codes. When health is not fresh every node-reported tile is
 // dimmed: the last values stay readable but are not presented as current.
@@ -621,6 +692,7 @@ updateActionButtons();
   document.querySelector('main').classList.remove('data-stale');
   const d=snapshot.detection||{};
   renderDiagnostic(snapshot.diagnostic_doa);
+  try{await renderNav(snapshot.nav);}catch{}
   const mqttState=snapshot.link?.mqtt_control?.state||'--';
   setStatePill(`${snapshot.mode} / ${snapshot.health_fresh?'HEALTH FRESH':'HEALTH STALE'} / MQTT ${mqttState}`,mqttState==='ERROR'?'bad':snapshot.health_fresh&&mqttState==='CONNECTED'?'good':'warn');
   $('angle').textContent=d.valid?`${d.relative_doa_deg.toFixed(1)}\u00b0`:'--';
@@ -655,5 +727,5 @@ $('retry').onclick=()=>{
  if(pollPending){pollAgain=true;return;}
  void poll(true);
 };
-plot(null);
+plot(null);drawCompass(null);drawTrack([],null);
 get('/api/v2/session').then(r=>{csrf=r.csrf;updatePppButton();updateSettingsButton();updateShutdownButton();if(csrf)void refreshPppHistory(true);}).catch(()=>{});poll();

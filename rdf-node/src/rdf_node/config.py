@@ -100,6 +100,7 @@ def validate_config(c: dict) -> None:
     if c['mqtt']['enabled']:
         if not c['mqtt']['control_credentials_file'] or not c['mqtt']['bulk_credentials_file']:
             raise ValueError('MQTT_CREDENTIALS_REQUIRED')
+    validate_nav_config(c['nav'], c['link']['serial_alias'])
     if c['runtime_mode'] == 'read_only' and any(c['control'][k] for k in ('config_patch_enabled','processing_enabled','restart_enabled','reboot_enabled','shutdown_enabled','ppp_restart_enabled')):
         raise ValueError('MUTATION_REQUIRES_CONTROLLED_MODE')
 
@@ -129,6 +130,35 @@ def validate_backup_config(b: dict, allow_insecure_loopback: bool) -> None:
             raise ValueError('ABSOLUTE_PATH_REQUIRED')
     if b['host'] is not None and not b['tls'] and _is_loopback(b['host']) and not allow_insecure_loopback:
         raise ValueError('PLAINTEXT_ONLY_EXPLICIT_LOOPBACK_TEST')
+
+NAV_BAUDS = (4800, 9600, 19200, 38400, 57600, 115200)
+
+def validate_nav_config(n: dict, link_port: str | None = None) -> None:
+    for name in ('compass', 'gps'):
+        s = n[name]
+        if type(s['enabled']) is not bool:
+            raise ValueError('BOOLEAN_REQUIRED')
+        if s['device'] is not None and (not isinstance(s['device'], str) or not Path(s['device']).is_absolute()):
+            raise ValueError('ABSOLUTE_PATH_REQUIRED')
+        if s['enabled'] and s['device'] is None:
+            raise ValueError(f'NAV_{name.upper()}_DEVICE_REQUIRED')
+        if type(s['baud']) is not int or s['baud'] not in NAV_BAUDS:
+            raise ValueError('INVALID_NAV_BAUD')
+        finite(s['stale_ms'], 500, 60000)
+    finite(n['compass']['poll_ms'], 100, 5000)
+    # A reading must survive at least one missed poll before it reads as STALE.
+    if n['compass']['stale_ms'] < 2 * n['compass']['poll_ms']:
+        raise ValueError('NAV_STALE_SHORTER_THAN_TWO_POLLS')
+    offset = n['compass']['offset_deg']
+    if isinstance(offset, bool) or type(offset) not in (int, float):
+        raise ValueError('NUMBER_REQUIRED')
+    finite(offset, -360, 360)
+    if type(n['gps']['publish_position']) is not bool:
+        raise ValueError('BOOLEAN_REQUIRED')
+    # The T900 link port belongs to pppd; two sensors cannot share one port.
+    devices = [n[name]['device'] for name in ('compass', 'gps') if n[name]['enabled']]
+    if len(set(devices)) != len(devices) or (link_port and link_port in devices):
+        raise ValueError('NAV_DEVICE_CONFLICT')
 
 def save_config(path: Path, cfg: dict) -> None:
     from .util import atomic_write

@@ -20,7 +20,7 @@ Semua topic di tabel berikut adalah suffix setelah prefix tersebut. Topic bersif
 
 Semua payload telemetry JSON, termasuk `telemetry/angular` dan `telemetry/diagnostic/angular`.
 Setiap pesan Angular membawa metadata dan tepat 360 angka `values` dalam satu PUBLISH, tanpa
-wrapper chunk atau Base64. MQTT tidak mengirim raw IQ, raw CSV, koordinat GPS, kredensial broker, atau PIN admin.
+wrapper chunk atau Base64. MQTT tidak mengirim raw IQ, raw CSV, kredensial broker, atau PIN admin. Koordinat GPS hanya dikirim bila operator menyalakan `nav.gps.publish_position` (sejak 1.6; default mati).
 
 ## Koneksi dan pemisahan kanal
 
@@ -325,6 +325,30 @@ Ground menerima `ok=1` sebagai detection hanya setelah session, sequence, timest
 | `why` | Kode alasan DoA belum LIVE (kosong bila LIVE), mis. `EMPTY_CSV` (file kosong tetapi masih ditulis) atau `DOA_FILE_NOT_UPDATING` (file berhenti ditulis). Daftar: [PROTOCOL.md](PROTOCOL.md#kode-alasan-doa-reason-healthwhy). |
 
 Ground memperlakukan health fresh sampai 8 s dan memerlukan `q` yang maju. Health tetap dipublish saat SDR berhenti; service aktif atau MQTT tersambung bukan bukti `daq=1`.
+
+Sejak kontrak 1.6, health membawa field nav opsional. Field ini hanya ada bila sensornya dikonfigurasi
+di `nav:`; tanpa sensor, payload sama persis dengan 1.5. Consumer harus menerima field ini tidak ada.
+
+| Field | Makna |
+|---|---|
+| `hdg` | Heading kompas GY-26 dalam derajat (0 = utara magnetik, searah jarum jam), 0.1°, sudah ditambah `nav.compass.offset_deg`. `null` bila `hs` bukan `OK`. |
+| `hs` | State kompas: `OK`, `STALE`, `NO_REPLY`, `BAD_FRAME`, `NO_DEVICE`, `STARTING`, `ERROR`. |
+| `gs` | State GPS: `FIX`, `NO_FIX`, `NO_DATA` (tidak ada byte), `BAD_DATA` (byte ada tetapi bukan NMEA valid: baud atau perangkat salah), `NO_DEVICE`, `STARTING`, `ERROR`. |
+| `fix` | `0` tanpa fix, `2` fix 2D, `3` fix 3D (dari GGA dan GSA). |
+| `sat` | Satelit yang dipakai (GGA); `null` bila GPS tidak mengirim data. |
+| `lat`, `lon` | Posisi WGS84, 5 desimal (~1 m). Hanya ada bila fix dan `nav.gps.publish_position: true`. |
+| `alt` | Ketinggian MSL meter (fix 3D); `sog` kecepatan m/s; `cog` arah gerak derajat true (dari RMC, dapat `null`). Hanya bersama `lat`/`lon`. |
+
+Contoh dengan kompas dan GPS berposisi:
+
+```json
+{"v":2,"sid":"7a8b9c0d","q":87,"t":1790668801123,"run":1,"daq":1,"drop":12,"age":280,"temp":61.4,"clk":1,"rev":7,"why":[],"hdg":201.1,"hs":"OK","gs":"FIX","fix":3,"sat":7,"lat":-6.20576,"lon":106.81,"alt":715.9,"sog":0.1,"cog":null}
+```
+
+Biaya: kompas saja sekitar +25 cost-B/s, kompas + GPS tanpa posisi sekitar +50, dengan posisi sekitar
++110 cost-B/s pada budget Control. Scheduler menambah reserve diagnostic Angular sebesar 110 B/s bila
+sensor nav aktif. Ground bawaan menyimpan jejak posisi (titik baru tiap ≥ 2 m atau 10 s, maks. 2000
+titik) dan menampilkannya bersama kompas; heading tidak mengubah arti DoA relatif `a`.
 
 ### `telemetry/health/detail`
 
