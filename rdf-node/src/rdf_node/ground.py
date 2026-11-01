@@ -4,18 +4,34 @@ when its preview browser is closed.
 """
 from __future__ import annotations
 import copy
+import math
 from pathlib import Path
 import queue
 import threading
 import time
 import re
 import uuid
+from collections import deque
 from .util import now_ms, strict_json, integer, finite, compact
 from .mqtt import Client
 from .codec import decode, FLAG_PARSED, FLAG_FRESH, FLAG_DAQ, FLAG_CONVENTION, FLAG_CONFIG, FLAG_AUTHORITY, ALL_FLAGS
 from .journal import Journal, TERMINAL
 from .control import OPS, CommandManager
 from .source import safe_settings
+
+NAV_STATE=re.compile(r'[A-Z0-9_]{1,32}')
+# Track kept for the preview: one point per >= NAV_TRACK_MIN_M of movement or NAV_TRACK_MIN_S, newest last.
+NAV_TRACK_POINTS=2000; NAV_TRACK_MIN_M=2.0; NAV_TRACK_MIN_S=10.0
+
+def _nav_number(j,key,lo,hi,digits):
+    v=j.get(key)
+    return None if v is None else round(finite(v,lo,hi),digits)
+
+def nav_distance_m(a,b):
+    # Equirectangular approximation; good to well under 1% over the few km a track spans.
+    lat=math.radians((a[0]+b[0])/2)
+    dlon=(b[1]-a[1]+540)%360-180
+    return math.hypot(math.radians(b[0]-a[0]),math.radians(dlon)*math.cos(lat))*6371000
 
 class Ground:
     def __init__(self,cfg,demo=False):
@@ -30,6 +46,7 @@ class Ground:
         self.diagnostic_angular_q=0; self.regular_unverified_angular_q=0
         self.health_seen=0; self.doa_seen=0; self.diagnostic_seen=None; self.diagnostic_angular_seen=None
         self.angular_seen=0; self.state_seen=0; self.sid_map={}
+        self.nav={}; self.nav_seen=0; self.nav_track=deque(maxlen=NAV_TRACK_POINTS)
         self.rejected=0; self.reject_reasons={}; self.snapshot_seq=0; self.current_gen=-1
         self.client=Client(cfg=cfg['mqtt'],client_id=cfg['node_id']+'-ground'+('-demo' if demo else ''),
             credentials_file=cfg['mqtt']['control_credentials_file'],rate=1000,
@@ -148,7 +165,7 @@ class Ground:
                     for old in self.journal.pending_ppp_restarts():
                         result=dict(old['result']);result['reason']='PPP_RESTART_SESSION_CHANGED'
                         self.journal.update(old['id'],'OUTCOME_UNKNOWN',result)
-                    self.health={}; self.doa={}; self.diagnostic_doa=None; self.diagnostic_seen=None
+                    self.health={}; self.doa={}; self.diagnostic_doa=None; self.diagnostic_seen=None; self.nav={}
                     self.regular_unverified_doa=None; self.regular_unverified_doa_seen=None
                     self.diagnostic_doa_q=0; self.regular_unverified_doa_q=0; self.diagnostic_doa_source_time=0
                     self.diagnostic_angular=None; self.diagnostic_angular_seen=None; self.angular=None
@@ -182,6 +199,8 @@ class Ground:
                 if q<=self.health.get('q',0): return
                 # Unknown run/daq values are kept: they simply never read as healthy (daq must be 1).
                 self.health=j; self.health_seen=time.monotonic()
+                # Compass/GPS fields ride on health (Edge 1.6+). A bad nav field never costs the health message.
+                self._nav_from_health(j)
                 if not self._health_clock_ok(): return
                 for old in self.journal.latest():
                     if old['stage']=='REBOOT_SCHEDULED' and old['request'].get('boot')!=self.node_state.get('boot'):
@@ -292,9 +311,64 @@ class Ground:
                                  'frequency_hz':self.doa.get('f'),'source_timestamp_ms':self.doa.get('t'),'confidence_native_db':self.doa.get('c'),
                                  'power_native_db':self.doa.get('p'),'received_age_ms':da},
                     'diagnostic_doa':diagnostic,
+                    'nav':self._nav_view(now),
                     'config':self.config_view(),'link':{'mqtt_control':self.client.status(),'rejected':self.rejected,
                             'reject_reasons':dict(self.reject_reasons)},
                     'capabilities':self.capabilities(),'last_operation':CommandManager.public(latest[0]) if latest else None}
+    def _nav_reject(self,e):
+        self._count_reject(str(e) if isinstance(e,ValueError) and re.fullmatch(r'[A-Z0-9_]{1,64}',str(e)) else 'BAD_NAV')
+    def _nav_from_health(self,j):
+        # Compass and GPS are read separately: a bad GPS field never hides a good heading, and nothing
+        # here can cost the health message itself.
+        if not any(key in j for key in ('hdg','hs','gs')):
+            self.nav={}; return
+        nav={'q':j['q'],'t':j['t'],'hdg':None,'hs':None,'gs':None,'fix':0,'sat':None,
+             'lat':None,'lon':None,'alt':None,'sog':None,'cog':None}
+        try:
+            if 'hs' in j or 'hdg' in j:
+                hs=j.get('hs')
+                if not (isinstance(hs,str) and NAV_STATE.fullmatch(hs)): raise ValueError('BAD_NAV_STATE')
+                hdg=_nav_number(j,'hdg',0,360,1)
+                nav.update(hs=hs,hdg=None if hs!='OK' or hdg is None else hdg%360)
+        except Exception as e:
+            nav.update(hs='INVALID',hdg=None); self._nav_reject(e)
+        try:
+            if 'gs' in j:
+                gs=j.get('gs'); fix=j.get('fix',0)
+                if not (isinstance(gs,str) and NAV_STATE.fullmatch(gs)): raise ValueError('BAD_NAV_STATE')
+                if fix not in (0,2,3): raise ValueError('BAD_NAV_FIX')
+                sat=j.get('sat')
+                nav.update(gs=gs,fix=fix,sat=None if sat is None else integer(sat,0,255))
+                lat=_nav_number(j,'lat',-90,90,6); lon=_nav_number(j,'lon',-180,180,6)
+                if (lat is None)!=(lon is None) or (lat is not None and not fix): raise ValueError('BAD_NAV_POSITION')
+                if lat is not None:
+                    nav.update(lat=lat,lon=lon)
+                    # Optional extras: one bad value is dropped on its own.
+                    for key,lo,hi,digits in (('alt',-1000,100000,1),('sog',0,1000,1),('cog',0,360,1)):
+                        try: nav[key]=_nav_number(j,key,lo,hi,digits)
+                        except Exception as e: self._nav_reject(e)
+        except Exception as e:
+            nav.update(gs='INVALID',fix=0,sat=None,lat=None,lon=None,alt=None,sog=None,cog=None); self._nav_reject(e)
+        self.nav=nav; self.nav_seen=self.health_seen
+        # A position with an untrusted Edge clock is shown but not added to the track.
+        if nav['lat'] is not None and self._health_clock_ok():
+            point=(nav['lat'],nav['lon']); t=nav['t']
+            last=self.nav_track[-1] if self.nav_track else None
+            if (last is None or nav_distance_m((last[1],last[2]),point)>=NAV_TRACK_MIN_M or
+                    t-last[0]>=NAV_TRACK_MIN_S*1000):
+                self.nav_track.append((t,nav['lat'],nav['lon'],nav['hdg']))
+    def _nav_view(self,now):
+        if not self.nav: return None
+        age=round((now-self.nav_seen)*1000)
+        fresh=age<=5000 and self._health_clock_ok()
+        view=dict(self.nav,received_age_ms=age,fresh=fresh,track_points=len(self.nav_track))
+        if not fresh:
+            # A stale message is shown with its states, never with a number that looks current.
+            view.update(hdg=None,lat=None,lon=None,alt=None,sog=None,cog=None)
+        return view
+    def nav_track_view(self):
+        with self.lock:
+            return {'points':[list(p) for p in self.nav_track],'min_step_m':NAV_TRACK_MIN_M,'max_points':NAV_TRACK_POINTS}
     def angular_view(self):
         with self.lock:
             if not self.angular: return None

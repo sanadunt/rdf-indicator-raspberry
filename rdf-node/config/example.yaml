@@ -70,6 +70,24 @@ api:
   admin_hash_file: /etc/rdf-node/admin-hash.json
   session_seconds: 600
   max_clients: 16
+nav:
+  # GY-26 digital compass on a USB-serial (TTL) adapter, polled with the read-angle command 0x31.
+  # Use a stable /dev/serial/by-id path. The service account needs the dialout group.
+  compass:
+    enabled: false
+    device: null
+    baud: 9600
+    poll_ms: 500
+    stale_ms: 2000
+    # Added to the sensor heading (mounting offset or magnetic declination), degrees.
+    offset_deg: 0.0
+  # NMEA GNSS receiver (u-blox 7 on USB CDC-ACM). Position goes to MQTT only with publish_position.
+  gps:
+    enabled: false
+    device: null
+    baud: 9600
+    stale_ms: 3000
+    publish_position: false
 testing:
   # Laptop/macOS testing only. `system` uses the OS clock as the data clock instead of timedatectl;
   # it is labelled TEST (state.clock), clk stays 0, and helper-backed commands stay CLOCK_UNTRUSTED.

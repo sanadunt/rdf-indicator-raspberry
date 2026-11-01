@@ -8,6 +8,8 @@ StartLimitBurst=10
 Type=exec
 User=rdf-edge
 Group=rdf-edge
+# Serial access for the optional nav sensors (GY-26 compass, GPS). The T900 port is refused in code.
+SupplementaryGroups=dialout
 WorkingDirectory=/opt/rdf-node/current
 ExecStart=/usr/bin/python3 /opt/rdf-node/current/run.py edge --config /etc/rdf-node/config.yaml
 Restart=on-failure

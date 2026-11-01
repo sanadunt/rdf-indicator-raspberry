@@ -257,7 +257,7 @@ mengirim DoA/angular pada topic normal dengan metadata/flags UNVERIFIED; ini tid
 control tetap wajib.
 Tidak ada cara membuktikan NO_DETECTION dari file stale saja; panel menyebut NO_FRESH_DOA.
 Array tetap native; PAPR tetap dB native; power bukan link RSSI dan bukan calibrated dBm.
-GPS/altitude/SNR tidak diisi dengan angka dummy. Mode nav OFF.
+GPS/altitude/SNR tidak diisi dengan angka dummy. Mode nav OFF. Sejak 1.6, kompas GY-26 dan GPS NMEA dibaca langsung oleh Edge (`nav.py`, bagian `nav:` di config) dan dikirim di `telemetry/health`; kolom heading/lat/lon KrakenSDR tetap tidak dipakai.
 
 ## Konfigurasi dan bukti
 

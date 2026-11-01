@@ -148,6 +148,9 @@ class Handler(BaseHTTPRequestHandler):
                 if self.server.ground: return self.reply(200,app.angular_view())
                 r=app.source.record
                 return self.reply(200,{'q':r['q'],'timestamp_ms':r['timestamp_ms'],'values':r['values'],'live':snap.get('detection',{}).get('valid',False)} if r else None)
+            if p=='/api/v2/nav/track':
+                if not self.server.ground: return self.reply(404,{'error':'NOT_FOUND'})
+                return self.reply(200,app.nav_track_view())
             if p=='/api/v2/angular/diagnostic/latest':
                 if not self.server.ground: return self.reply(404,{'error':'NOT_FOUND'})
                 return self.reply(200,app.diagnostic_angular_view())

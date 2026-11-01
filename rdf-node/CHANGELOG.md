@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.6.0 - Unreleased
+
+Contract `1.6` (additive): `telemetry/health` can carry optional compass and GPS fields.
+
+- GY-26 compass and NMEA GPS on the Edge. New `nav.py` polls a GY-26 over USB-serial (read-angle
+  command `0x31`, checksummed 8-byte frame) and reads a GNSS receiver's NMEA stream (GGA is the fix
+  source; RMC adds speed and course; GSA/GSV add mode and satellites in view). Each sensor runs in
+  its own thread with non-blocking I/O, reopens its port after errors, takes `TIOCEXCL`, and refuses
+  the T900 port (`link.serial_alias`). A silent, garbled, or stale sensor reports a state and no
+  number. A sensor bug cannot freeze the snapshot.
+- New config section `nav:` (`compass` and `gps`, both off by default; `gps.publish_position` off by
+  default). Validated strictly; the two sensors and the T900 port must be different devices
+  (`NAV_DEVICE_CONFLICT`). Releases before 1.6 reject the section, so remove it before a rollback.
+- `telemetry/health` adds `hdg`/`hs` (compass) and `gs`/`fix`/`sat` (GPS) only for configured
+  sensors, and `lat`/`lon`/`alt`/`sog`/`cog` only with a fix and `publish_position`. Health without
+  sensors is byte-identical to 1.5. The fields go to every READY broker, primary and backup.
+  `capabilities.nav` lists the configured sensors. The diagnostic Angular reserve grows by 110 B/s
+  while a sensor is enabled.
+- Ground keeps the latest nav reading and a position track (a point per 2 m or 10 s, up to 2000),
+  exposes them as `snapshot.nav` and `GET /api/v2/nav/track`, and the Ground preview shows a compass
+  and the track. A bad nav field is counted as a reject and never costs the health message.
+- `rdf-edge.service` gains `SupplementaryGroups=dialout`; `deploy/examples/nav/99-rdf-nav.rules` sets
+  stable symlinks and keeps ModemManager off the sensor ports.
+
 ## 1.5.0 - Unreleased
 
 Contract `1.5`. This is the first release that reports its own number: `capabilities.version` is
