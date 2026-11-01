@@ -280,6 +280,9 @@ class Sender:
         if kind==TIME and chunk[:1]==b'\x01': chunk=TIME_REQ.pack(1,time.time_ns()//1000)
         elif kind==TIME and chunk[:1]==b'\x02' and len(chunk)==TIME_RESP.size:
             _,t1,t2,_=TIME_RESP.unpack(chunk); chunk=TIME_RESP.pack(2,t1,t2,time.time_ns()//1000)
+        elif kind==HEARTBEAT and len(chunk)>=20:
+            # The peer derives clock_offset_ms from this wall clock, so it must be the send time too.
+            chunk=chunk[:12]+struct.pack('!Q',now_ms())+chunk[20:]
         return kind,msg,topic,flags,index,count,chunk
     def _take(self,limit,now,max_bytes):
         out=[]; used=0

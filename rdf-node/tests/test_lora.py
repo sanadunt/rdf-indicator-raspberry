@@ -117,6 +117,14 @@ class SenderTests(unittest.TestCase):
         self.assertGreater(lora.TIME_RESP.unpack(ops[0])[3],1_000_000_000_000_000)
         self.assertEqual(lora.TIME_RESP.unpack(ops[0])[1:3],(5,6))
         self.assertGreater(lora.TIME_REQ.unpack(ops[1])[1],1_000_000_000_000_000)
+        # Heartbeats too: queued now, sent later, the clock in them is the send time.
+        from unittest import mock
+        s.heartbeat(1,Receiver().stats)
+        with mock.patch.object(lora,'now_ms',return_value=1_800_000_000_000):
+            beat=s.next_frames(time.monotonic()+2)
+        r=Receiver()
+        with mock.patch.object(lora,'now_ms',return_value=1_800_000_000_000): r.feed(beat[0])
+        self.assertEqual(r.peer['clock_offset_ms'],0)
     def test_a_large_message_never_bursts_past_the_module_buffer(self):
         s=Sender(1000,200);s.offer(4,ANGULAR,now=0.0)
         first=sum(map(len,s.next_frames(0.0)))
