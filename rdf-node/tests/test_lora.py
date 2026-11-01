@@ -182,6 +182,48 @@ class TimeSyncTests(unittest.TestCase):
         self.assertEqual(rmc_utc(f),1793442526.0)
         self.assertIsNone(rmc_utc(['102846.00','V']+f[2:]))
 
+class EdgePanelLoraTests(unittest.TestCase):
+    """rdf-edge reads the bridge's retained lora/edge status and shows LoRa instead of PPP."""
+    def setUp(self):
+        from test_system import make_agent
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.a=make_agent(Path(os.path.realpath(self.tmp.name)));self.addCleanup(self.a.journal.close)
+    def status(self,t,link='UP',sent=1000,msgs=10,rx=5,frames=50,lost=1,peer_frames=200,peer_lost=4):
+        return json.dumps({'v':1,'role':'edge','t':t,'link':link,'last_rx_ms':300,'port':'OPEN','port_error':None,
+            'mqtt':'CONNECTED','rx':{'frames':frames,'crc_errors':0,'bad_frames':0,'lost_frames':lost,'messages':rx,
+            'duplicates':0,'incomplete':0,'heartbeats':10},'tx':{'queued':12,'superseded':0,'expired':1,
+            'sent_messages':msgs,'sent_frames':20,'sent_bytes':sent,'too_large':0},'queue':0,
+            'peer':{'uptime_s':10,'rx_frames':peer_frames,'crc_errors':0,'lost_frames':peer_lost,'clock_offset_ms':-12},
+            'mqtt_dropped':0,'ignored':0,'link_changes':1,'time':{'offset_ms':16.4,'delay_ms':62.3}}).encode()
+    def test_lora_status_drives_transport_rates_and_loss(self):
+        a=self.a;topic=a.prefix+'/lora/edge'
+        a._snapshot();self.assertEqual(a.snapshot()['link']['transport'],'PPP');self.assertIsNone(a.snapshot()['link']['lora'])
+        a._incoming(topic,self.status(1_000_000),True)
+        a._incoming(topic,self.status(1_005_000,sent=6000,msgs=20,rx=15),False)
+        a._snapshot();l=a.snapshot()['link']
+        self.assertEqual(l['transport'],'LORA');lo=l['lora']
+        self.assertEqual((lo['link'],lo['tx_kbit_s'],lo['tx_msg_s'],lo['rx_msg_s']),('UP',8.0,2.0,2.0))
+        self.assertEqual((lo['uplink_loss_pct'],lo['downlink_loss_pct'],lo['clock_offset_ms']),(2.0,2.0,16.4))
+        # The status never reaches the command path.
+        self.assertTrue(a.events.empty())
+    def test_link_down_and_stale_bridge_raise_alerts(self):
+        a=self.a;topic=a.prefix+'/lora/edge'
+        a._incoming(topic,self.status(1_000_000,link='DOWN'),True);a._snapshot()
+        self.assertIn('LORA_LINK_DOWN',[x['code'] for x in a.snapshot()['active_alerts']])
+        a.lora_seen-=60;a._snapshot();snap=a.snapshot()
+        self.assertEqual((snap['link']['transport'],snap['link']['lora']['link']),('PPP','STALE'))
+        self.assertIn('LORA_BRIDGE_STALE',[x['code'] for x in snap['active_alerts']])
+    def test_bad_status_is_ignored(self):
+        a=self.a
+        for bad in (b'not json',b'[]',b'{"v":2,"role":"edge"}',b'{"v":1,"role":"ground"}'):
+            a._incoming(a.prefix+'/lora/edge',bad,True)
+        self.assertIsNone(a.lora);self.assertTrue(a.events.empty())
+    def test_subscribed_on_the_primary_control_client_only(self):
+        self.a.cfg['mqtt']['enabled']=True
+        clients=self.a._new_mqtt_clients(dict(self.a.mqtt_desired,enabled=True))
+        self.assertIn((self.a.prefix+'/lora/edge',0,False),clients['control'].subscriptions)
+        self.assertNotIn((self.a.prefix+'/lora/edge',0,False),self.a._command_subscriptions())
+
 class StatusContractTests(unittest.TestCase):
     def test_status_fields_the_ground_console_reads(self):
         # Ground Console reads lora/ground and lora/edge (v 1). Add fields freely; renaming or changing

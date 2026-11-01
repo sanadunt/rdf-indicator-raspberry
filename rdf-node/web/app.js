@@ -140,6 +140,11 @@ function setTopicDelivery(entry,status){
 function updateTopicStatuses(statuses){
  for(const [suffix,entry] of topicStatusCells)setTopicDelivery(entry,statuses?.[suffix]);
 }
+// LoRa serial link (rdf-lora-edge). While its status is fresh the radio is LoRa, not PPP/T900.
+const DIAGNOSTIC_STALE_MS=60000;
+function loraActive(l){return l?.transport==='LORA'&&!!l.lora;}
+function pct(v){return typeof v==='number'&&Number.isFinite(v)?`${v.toFixed(1)}%`:'--';}
+function loraLinkCode(lo){return !lo?'':lo.link==='UP'?'UP':lo.link==='STALE'?'STALE':'LOST';}
 function mqttPairState(l){
  const states=[l.mqtt_control?.state||'DISABLED',l.mqtt_bulk?.state||'DISABLED'];
  return states.includes('ERROR')?'ERROR':states.every(value=>value==='CONNECTED')?'CONNECTED':states.every(value=>value==='DISABLED')?'':'CONNECTING';
@@ -636,7 +641,9 @@ function tabAlerts(s){
  // An enabled backup that is not connected only asks for attention; it never outranks a primary
  // ERROR, and an intentionally disabled backup adds nothing.
  const backup=mqttBackupState(l),backupDown=backup.enabled&&backup.state!=='CONNECTED';
- const link=mqtt.includes('ERROR')?'bad':(l.ppp!=='UP'||l.usb!=='PRESENT'||['NO_REPLY','ERROR'].includes(l.ppp_probe)||mqtt.includes('CONNECTING')||backupDown)?'warn':'';
+ const lora=loraActive(l)?l.lora:null;
+ const link=mqtt.includes('ERROR')||(lora&&lora.link!=='UP')?'bad':
+  ((lora?false:(l.ppp!=='UP'||['NO_REPLY','ERROR'].includes(l.ppp_probe)))||l.usb!=='PRESENT'||mqtt.includes('CONNECTING')||backupDown)?'warn':'';
  const system=(q.state==='DEGRADED'||p.observed==='ERROR'||h.undervoltage===true)?'bad':(q.state!=='HEALTHY'||p.observed!=='RUNNING'||h.clock_trusted!==true)?'warn':'';
  const config=c.source_configured?'':'warn';
  const data=Object.values(l.mqtt_topic_delivery||{}).some(entry=>entry?.state==='ERROR'&&!deliverySkipped(entry))?'bad':'';
@@ -652,20 +659,28 @@ function renderTabAlerts(s){
 }
 function render(s){
  const d=s.detection||{},l=s.link||{},h=s.host||{},q=s.daq||{},c=s.config||{},p=s.processing||{};
- const diag=s.diagnostic_doa||{},showDiagnostic=!d.valid&&diag.available;
+ // A doa.xml sample older than a minute is history, not the current bearing: KrakenSDR writes no
+ // doa.xml while it has no DoA, so the last one can be hours old.
+ const diag=s.diagnostic_doa||{},diagStale=!(typeof diag.source_age_ms==='number'&&diag.source_age_ms<=DIAGNOSTIC_STALE_MS);
+ const showDiagnostic=!d.valid&&diag.available&&!diagStale;
+ const lora=loraActive(l)?l.lora:null,setFreq=c.safe_settings?.vfo0_frequency_hz;
  const diagnosticReason=Array.isArray(diag.validation_reasons)&&diag.validation_reasons.find(reason=>reason!=='DIAGNOSTIC_UNVERIFIED')||'UNVERIFIED';
  $('mode').textContent=s.mode==='DEMO'?'DEMO':'';
  const names={RUNNING:'RDF BERJALAN',STOPPED:'RDF BERHENTI',STARTING:'MEMULAI RDF',STOPPING:'MENGHENTIKAN',ERROR:'RDF ERROR',UNKNOWN:'RDF UNKNOWN'};
  label('run',names[p.observed]||'MENUNGGU',p.observed==='RUNNING'?'HEALTHY':p.observed);
- label('ppp',l.ppp||'--',l.ppp);label('mqtt',l.mqtt_control?.state||'DISABLED',l.mqtt_control?.state);
+ $('ppplabel').textContent=lora?'LORA':'PPP';
+ if(lora)label('ppp',lora.link||'--',loraLinkCode(lora));else label('ppp',l.ppp||'--',l.ppp);label('mqtt',l.mqtt_control?.state||'DISABLED',l.mqtt_control?.state);
  $('angle-label').textContent=showDiagnostic?'DOA RAW / UNVERIFIED':'ARAH RELATIF';
  $('angle').textContent=showDiagnostic?fmt(diag.raw_doa_deg):d.valid?fmt(d.relative_doa_deg):'--';
  if(s.sid!==trailSid){trailSid=s.sid;bearingTrail=[];}
  updateDial(d.valid?d.relative_doa_deg:null,showDiagnostic,d.q);
  $('angle').className=showDiagnostic?'warn':d.valid?'good':'neutral';
- $('age').textContent=showDiagnostic?`doa.xml / umur ${age(diag.source_age_ms)}`:d.valid?`Umur ${age(d.source_age_ms)}`:`${d.state||'MENUNGGU'} / ${age(d.source_age_ms)}`;
- $('frequency-label').textContent=showDiagnostic?'FREKUENSI XML':'FREKUENSI VFO';
- $('freq').textContent=showDiagnostic?fmt(diag.frequency_mhz,3):d.frequency_hz?fmt(d.frequency_hz/1e6,3):'--';
+ $('age').textContent=showDiagnostic?`doa.xml / umur ${age(diag.source_age_ms)}`:d.valid?`Umur ${age(d.source_age_ms)}`:
+  diag.available?`Belum ada DoA baru · doa.xml terakhir ${age(diag.source_age_ms)}`:`${d.state||'MENUNGGU'} / ${age(d.source_age_ms)}`;
+ // Without a live or fresh sample, show the frequency the SDR is set to (settings.json), labelled as such.
+ const sampleFreq=showDiagnostic?diag.frequency_mhz:d.frequency_hz?d.frequency_hz/1e6:null;
+ $('frequency-label').textContent=showDiagnostic?'FREKUENSI XML':d.frequency_hz?'FREKUENSI VFO':'FREKUENSI SETELAN';
+ $('freq').textContent=sampleFreq!=null?fmt(sampleFreq,3):typeof setFreq==='number'?fmt(setFreq/1e6,3):'--';
  $('quality').textContent=showDiagnostic?`Gate: ${diagnosticReason}`:`PAPR ${fmt(d.confidence_native_db,2)} dB / P ${fmt(d.power_native_db)} dB`;
  label('daq',q.state==='HEALTHY'?'SINKRON':q.state||'UNKNOWN',q.state);
  label('sync',c.sdr_revision==null?'--':`r${c.sdr_revision}`,'');
@@ -675,10 +690,24 @@ function render(s){
  $('alerticon').textContent=a?'!':'\u2713';$('temp').textContent=`${fmt(h.temperature_c)}\u00b0C`;
  $('focus-angle-label').textContent=$('angle-label').textContent;$('focusangle').textContent=$('angle').textContent;$('focusangle').className=$('angle').className;
  $('focusage').textContent=$('age').textContent;$('focusfreq').textContent=$('freq').textContent;
- label('focusppp',`PPP ${l.ppp||'--'}`,l.ppp);label('focusmqtt',`MQTT ${l.mqtt_control?.state||'DISABLED'}`,l.mqtt_control?.state);label('focusdaq',`DAQ ${q.state==='HEALTHY'?'SINKRON':q.state||'UNKNOWN'}`,q.state);
+ if(lora)label('focusppp',`LORA ${lora.link||'--'}`,loraLinkCode(lora));else label('focusppp',`PPP ${l.ppp||'--'}`,l.ppp);label('focusmqtt',`MQTT ${l.mqtt_control?.state||'DISABLED'}`,l.mqtt_control?.state);label('focusdaq',`DAQ ${q.state==='HEALTHY'?'SINKRON':q.state||'UNKNOWN'}`,q.state);
  $('focusalert').textContent=a?a.text:'';$('focusalert').className=`focus-alert ${a?(a.severity==='error'?'bad':'warn'):''}`;
  const backup=mqttBackupState(l);
- if(!linkData){rows('linkrows',[["T900 USB",l.usb,l.usb,'plug'],["PPP / interface",`${l.ppp||'--'} / ${l.interface||'--'}`,l.ppp,'chain'],[`Ping ${l.ppp_peer||'peer'}`,pppProbeNames[l.ppp_probe]||'BELUM DICEK',l.ppp_probe,'radar'],["MQTT CTRL / BULK",`${l.mqtt_control?.state||'--'} / ${l.mqtt_bulk?.state||'--'}`,mqttPairState(l),'cloud'],["MQTT cadangan",backup.state,backup.code,'layers'],["TX / RX (PPP/IP)",`${fmt(l.tx_kbit_s,2)} / ${fmt(l.rx_kbit_s,2)} kbit/s`,'','updown']]);}
+ if(lora&&!linkData){
+  const rate=`${fmt(lora.tx_msg_s,1)} pesan/s · ${fmt(lora.tx_kbit_s,2)} kbit/s`;
+  rows('linkrows',[["Link LoRa",`${lora.link||'--'}${lora.last_rx_ms!=null?` · ${age(lora.last_rx_ms)}`:''}`,loraLinkCode(lora),'radio'],
+   ["Radio USB / port",`${l.usb||'--'} / ${lora.port||'--'}`,lora.port==='OPEN'&&l.usb==='PRESENT'?'PRESENT':l.usb,'plug'],
+   ["Kirim ke Ground",rate,'','updown'],
+   ["Hilang naik / turun",`${pct(lora.uplink_loss_pct)} / ${pct(lora.downlink_loss_pct)}`,'','xcircle'],
+   ["Jam vs Ground",lora.clock_offset_ms!=null?`${fmt(lora.clock_offset_ms,1)} ms`:'--',lora.clock_offset_ms!=null&&Math.abs(lora.clock_offset_ms)<1000?'SYNCED':lora.clock_offset_ms!=null?'DEGRADED':'','clock'],
+   ["MQTT lokal CTRL / BULK",`${l.mqtt_control?.state||'--'} / ${l.mqtt_bulk?.state||'--'}`,mqttPairState(l),'cloud']]);
+ }
+ else if(lora){
+  rows('linkrows',[["Antrean radio",String(lora.queue??'--'),'','layers'],["Pesan dikirim / kedaluwarsa",`${lora.tx_messages??'--'} / ${lora.tx_expired??'--'}`,'','activity'],
+   ["Pesan diterima",String(lora.rx_messages??'--'),'','updown'],["Putus-sambung link",String(lora.link_changes??'--'),'','sync'],
+   ["Error port",lora.port_error||'--','','warn'],["Status jembatan",`umur ${age(lora.status_age_ms)}`,lora.fresh?'':'STALE','history']]);
+ }
+ else if(!linkData){rows('linkrows',[["T900 USB",l.usb,l.usb,'plug'],["PPP / interface",`${l.ppp||'--'} / ${l.interface||'--'}`,l.ppp,'chain'],[`Ping ${l.ppp_peer||'peer'}`,pppProbeNames[l.ppp_probe]||'BELUM DICEK',l.ppp_probe,'radar'],["MQTT CTRL / BULK",`${l.mqtt_control?.state||'--'} / ${l.mqtt_bulk?.state||'--'}`,mqttPairState(l),'cloud'],["MQTT cadangan",backup.state,backup.code,'layers'],["TX / RX (PPP/IP)",`${fmt(l.tx_kbit_s,2)} / ${fmt(l.rx_kbit_s,2)} kbit/s`,'','updown']]);}
  else{
   // systemd state of t900-ppp.service; absent on an older Edge.
   const svc=l.ppp_service&&typeof l.ppp_service==='object'?l.ppp_service:null,svcState=typeof svc?.state==='string'?svc.state:'';

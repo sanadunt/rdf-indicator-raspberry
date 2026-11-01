@@ -33,6 +33,9 @@ DIAGNOSTIC_ANGULAR_MIN_GAP_S=6
 # Commands above COMMAND_MAX_BYTES are refused; up to COMMAND_READ_MAX_BYTES they are parsed to ACK the id.
 COMMAND_MAX_BYTES=4096; COMMAND_READ_MAX_BYTES=65536
 BULK_YIELD_BACKLOG_BYTES=2048
+# The LoRa serial bridge (run.py lora-bridge --role edge) publishes its status retained on <prefix>/lora/edge
+# every 5 s. While it is fresh the radio link is LoRa and the PPP/T900 rows no longer apply.
+LORA_STATUS_FRESH_S=20
 
 class Agent:
     def __init__(self,cfg,demo=False):
@@ -73,6 +76,7 @@ class Agent:
         # Operator-visible command history and PPP link recovery state (panel only; no extra radio traffic).
         self.operation_seq=0; self.remote_rejects=deque(maxlen=5)
         self.ppp_recovery=None; self._last_ppp=None; self._last_probe=None
+        self.lora=None; self.lora_seen=None; self.lora_prev=None; self.lora_rates={}
         self.backup_desired=self._load_backup_settings()
         self.backup_active=self.backup_desired
         self.backup_client=self._new_backup_client(self.backup_desired)
@@ -147,7 +151,8 @@ class Agent:
     def _new_mqtt_clients(self,settings):
         if not self.cfg['mqtt']['enabled']: return {}
         m=self.cfg['mqtt']; demo_suffix='-demo' if self.demo else ''
-        subs=self._command_subscriptions(); will=self._will()
+        # The primary also hears the LoRa bridge status on its (local) broker; retained, so it arrives at once.
+        subs=self._command_subscriptions()+[(self.prefix+'/lora/edge',0,False)]; will=self._will()
         epoch=self.link_epoch['primary']
         return {
             'control':Client(cfg=m,client_id=settings['client_id']+'-control'+demo_suffix,
@@ -429,7 +434,44 @@ class Agent:
         suffix=topic[len(self.prefix)+1:] if isinstance(topic,str) and topic.startswith(self.prefix+'/') else ''
         op=next((name for name,path in OPS.items() if path==suffix),'unknown')
         self.remote_rejected(CommandManager.origin('ground-controller',link),op,code)
+    def _lora_status(self,payload):
+        try: j=strict_json(payload)
+        except (ValueError,RecursionError): return
+        if not isinstance(j,dict) or j.get('v')!=1 or j.get('role')!='edge': return
+        now=time.monotonic()
+        with self.lock:
+            prev=self.lora
+            if prev and isinstance(j.get('t'),int) and isinstance(prev.get('t'),int) and j['t']>prev['t']:
+                # Rates between two statuses (5 s apart): what really crossed the radio.
+                dt=(j['t']-prev['t'])/1000
+                def delta(a,b,k):
+                    x,y=(a or {}).get(k),(b or {}).get(k)
+                    return y-x if isinstance(x,int) and isinstance(y,int) and y>=x else None
+                tx=delta(prev.get('tx'),j.get('tx'),'sent_bytes'); msg=delta(prev.get('tx'),j.get('tx'),'sent_messages')
+                rx=delta(prev.get('rx'),j.get('rx'),'messages')
+                self.lora_rates={'tx_kbit_s':None if tx is None else round(tx*8/1000/dt,2),
+                                 'tx_msg_s':None if msg is None else round(msg/dt,2),
+                                 'rx_msg_s':None if rx is None else round(rx/dt,2)}
+            self.lora=j; self.lora_seen=now
+    def _lora_view(self):
+        with self.lock: j=self.lora; seen=self.lora_seen; rates=dict(self.lora_rates)
+        if not j: return None
+        age=round((time.monotonic()-seen)*1000)
+        rx=j.get('rx') or {}; tx=j.get('tx') or {}; peer=j.get('peer') or {}; tm=j.get('time') or {}
+        frames=rx.get('frames') or 0; lost=(rx.get('lost_frames') or 0)+(rx.get('crc_errors') or 0)
+        peer_frames=peer.get('rx_frames') or 0; peer_lost=(peer.get('lost_frames') or 0)+(peer.get('crc_errors') or 0)
+        fresh=age<=LORA_STATUS_FRESH_S*1000
+        return {'fresh':fresh,'status_age_ms':age,'link':j.get('link') if fresh else 'STALE','last_rx_ms':j.get('last_rx_ms'),
+                'port':j.get('port'),'port_error':j.get('port_error'),'mqtt':j.get('mqtt'),'queue':j.get('queue'),
+                'tx_messages':tx.get('sent_messages'),'tx_expired':tx.get('expired'),
+                'rx_messages':rx.get('messages'),
+                # Ground's own counters (from its heartbeats): what the Edge sent and Ground lost.
+                'uplink_loss_pct':round(100*peer_lost/(peer_frames+peer_lost),1) if peer_frames+peer_lost else None,
+                'downlink_loss_pct':round(100*lost/(frames+lost),1) if frames+lost else None,
+                'clock_offset_ms':tm.get('offset_ms'),'clock_delay_ms':tm.get('delay_ms'),
+                'link_changes':j.get('link_changes'),**rates}
     def _incoming(self,topic,payload,retained,link='primary',epoch=None):
+        if topic==self.prefix+'/lora/edge': return self._lora_status(payload)
         # Larger payloads are still read far enough to answer them; only absurd ones go unanswered.
         if len(payload)>COMMAND_READ_MAX_BYTES: return self._command_dropped(topic,link,'COMMAND_TOO_LARGE')
         # Keep half of the queue for the primary (Ground) link.
@@ -499,9 +541,14 @@ class Agent:
         except Exception as e:
             # A sensor bug must not freeze the snapshot (and with it health and DoA).
             nav={name:{'state':'ERROR','error':type(e).__name__.upper()[:64]} for name in ('compass','gps')}
+        lora=self._lora_view()
         alerts=[]
         if self.demo: alerts.append({'severity':'warning','code':'DEMO','text':'DEMO - bukan data perangkat'})
         if not self.source.path: alerts.append({'severity':'warning','code':'SETUP_REQUIRED','text':'Pilih folder output SDR terlebih dahulu'})
+        if lora and lora['fresh'] and lora['link']!='UP':
+            alerts.append({'severity':'error','code':'LORA_LINK_DOWN','text':'Link LoRa ke Ground terputus'})
+        elif lora and not lora['fresh']:
+            alerts.append({'severity':'warning','code':'LORA_BRIDGE_STALE','text':'Jembatan LoRa tidak melapor: cek rdf-lora-edge'})
         if host.get('undervoltage'): alerts.append({'severity':'error','code':'UNDERVOLTAGE','text':'Tegangan rendah: periksa power'})
         if host.get('temperature_c') is not None and host['temperature_c']>=80: alerts.append({'severity':'error','code':'HOT','text':'Suhu tinggi: periksa pendinginan'})
         if host.get('disk_free_percent') is not None and host['disk_free_percent']<5: alerts.append({'severity':'error','code':'DISK_LOW','text':'Storage hampir penuh'})
@@ -520,6 +567,7 @@ class Agent:
                       'mqtt_backup':self._backup_status(),
                       'ppp_service':{k:v for k,v in (host.get('ppp_service') or {}).items() if k!='since'} or None,
                       'ppp_recovery':self._ppp_recovery_view(),
+                      'lora':lora,'transport':'LORA' if lora and lora['fresh'] else 'PPP',
                       'tx_kbit_s':host['tx_kbit_s'],'rx_kbit_s':host['rx_kbit_s'],
                       'traffic_layer':'PPP_IP_COUNTERS','profile':self.profile,'bulk_pause':self.bulk_reason,'angular_aborted':self.angular_abort,
                       'publish_errors':dict(self.publish_errors),'command_drops':dict(self.inbound_rejects)},

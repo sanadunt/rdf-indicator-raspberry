@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.6.1 - Unreleased
+
+Contract `1.6` (unchanged).
+
+- Edge panel on LoRa: rdf-edge subscribes to the bridge's retained `lora/edge` status on its local
+  broker and exposes it as `snapshot.link.lora` with rates and loss, plus `link.transport`
+  (`LORA` while the status is fresh, else `PPP`). The panel header and Link tab show the LoRa link, data
+  rate, loss each way, clock vs Ground and radio port instead of T900/PPP rows. Alerts
+  `LORA_LINK_DOWN` and `LORA_BRIDGE_STALE`.
+- A `doa.xml` sample older than 60 s is no longer shown as the current bearing (KrakenSDR writes none
+  while it has no DoA, so it can be hours old). Without a live or fresh sample the panel shows the
+  frequency the SDR is set to, labelled `FREKUENSI SETELAN`.
+
 ## 1.6.0 - Unreleased
 
 Contract `1.6` (additive): `telemetry/health` can carry optional compass and GPS fields.
