@@ -92,6 +92,31 @@ class SenderTests(unittest.TestCase):
         # 10 s at 500 B/s plus one bucket (400 B): never above the budget, and frame by frame.
         self.assertLessEqual(sent,500*10+400)
         self.assertGreater(sent,500*10*.8)
+    def test_doa_goes_twice_and_ranks_above_health(self):
+        s=Sender(100000,200);t=1000.0
+        s.offer(1,HEALTH,now=t);s.offer(3,b'{"v":2,"a":12.5}',now=t)
+        r=Receiver();got=[];x=t
+        for _ in range(40):
+            x+=.1
+            for topic,*_ in r.feed(b''.join(s.next_frames(x))): got.append(topic)
+        self.assertEqual(got,[3,1]);self.assertEqual(r.stats['duplicates'],1)
+    def test_turn_frame_then_quiet_window(self):
+        s=Sender(100000,200,turn_every_s=1.0,quiet_s=.3);t=1000.0
+        for i in range(4): s.offer(11,b'{"ack":%d}'%i,now=t)
+        first=s.next_frames(t)
+        self.assertEqual(len(first),1);self.assertTrue(decode_frame(first[0][:-1])[4]&lora.F_TURN)
+        self.assertEqual(s.next_frames(t+.2),[])  # quiet: the other side's turn
+        later=s.next_frames(t+.4)
+        self.assertTrue(later);self.assertFalse(any(decode_frame(f[:-1])[4]&lora.F_TURN for f in later))
+        r=Receiver();r.feed(first[0]);self.assertIsNotNone(r.turn_at)
+    def test_time_frames_are_stamped_when_sent_not_when_queued(self):
+        s=Sender(100000,200)
+        s.urgent(lora.TIME,lora.TIME_REQ.pack(1,1));s.urgent(lora.TIME,lora.TIME_RESP.pack(2,5,6,7))
+        frames=s.next_frames(time.monotonic()+1)
+        ops=[decode_frame(f[:-1])[-1] for f in frames]
+        self.assertGreater(lora.TIME_RESP.unpack(ops[0])[3],1_000_000_000_000_000)
+        self.assertEqual(lora.TIME_RESP.unpack(ops[0])[1:3],(5,6))
+        self.assertGreater(lora.TIME_REQ.unpack(ops[1])[1],1_000_000_000_000_000)
     def test_a_large_message_never_bursts_past_the_module_buffer(self):
         s=Sender(1000,200);s.offer(4,ANGULAR,now=0.0)
         first=sum(map(len,s.next_frames(0.0)))

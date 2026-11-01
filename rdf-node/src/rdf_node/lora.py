@@ -40,6 +40,13 @@ TIME_REQ=struct.Struct('!BQ')        # op 1, t1 (edge wall clock, us)
 TIME_RESP=struct.Struct('!BQQQ')     # op 2, t1, t2 (ground receive), t3 (ground send), us
 HEADER=struct.Struct('!BBHBBBBB')  # magic type seq msg topic flags index count
 F_RETAIN=1; F_QOS1=2; F_ZLIB=4
+# Half-duplex turn taking: the edge marks a frame with F_TURN about once a second and then stays quiet
+# for EDGE_QUIET_S; the ground transmits only right after such a frame (or freely when the edge has been
+# silent for GROUND_FREE_AFTER_S), so the two radios rarely talk at once.
+F_TURN=8
+AIR_S_PER_BYTE=0.0005  # measured on the link: ~0.48 ms per byte on air
+EDGE_TURN_EVERY_S=1.0; EDGE_QUIET_S=0.3
+GROUND_REPLY_WINDOW_S=0.08; GROUND_FREE_AFTER_S=3.0; GROUND_WINDOW_BYTES=250
 CRC_LEN=2
 # Fragment state older than this is dropped (a lost fragment never completes its message).
 REASSEMBLY_S=15.0
@@ -60,9 +67,10 @@ GROUND_TOPICS={
 TOPIC_IDS={suffix:i for i,suffix in {**EDGE_TOPICS,**GROUND_TOPICS}.items()}
 
 # Sending policy per topic id: (priority: lower first, max age s or None, latest-wins, sent twice).
-# Ages stay inside what Ground accepts as fresh (DoA 5 s, angular 10 s, health 8 s).
+# Ages stay inside what Ground accepts as fresh (DoA 5 s, angular 10 s, health 8 s). DoA comes first
+# among telemetry and goes twice; health is the newest one at most every 2 s (Ground needs <= 8 s).
 POLICY={
-    1:(1,5,True,False), 2:(4,15,True,False), 3:(1,3,True,False), 4:(5,8,True,False),
+    1:(2,6,True,False), 2:(4,15,True,False), 3:(1,3,True,True), 4:(5,8,True,False),
     5:(2,3,True,False), 6:(5,8,True,False), 7:(0,None,True,False), 8:(3,None,True,False),
     9:(0,None,True,False), 10:(2,30,False,True), 11:(0,30,False,True), 12:(0,30,False,True),
 }
@@ -159,7 +167,7 @@ class Receiver:
         self.buf=bytearray(); self.parts={}; self.recent={}; self.last_seq=None
         self.stats=dict(frames=0,crc_errors=0,bad_frames=0,lost_frames=0,messages=0,duplicates=0,
                         incomplete=0,heartbeats=0)
-        self.peer=None; self.time_frames=[]
+        self.peer=None; self.time_frames=[]; self.turn_at=None
     def feed(self,data,now=None):
         now=time.monotonic() if now is None else now
         out=[]; self.buf+=data
@@ -174,6 +182,7 @@ class Receiver:
             except ValueError as e:
                 self.stats['crc_errors' if str(e)=='CRC_MISMATCH' else 'bad_frames']+=1; continue
             self.stats['frames']+=1
+            if flags&F_TURN: self.turn_at=now
             if self.last_seq is not None:
                 gap=(seq-self.last_seq-1)&0xFFFF
                 if 0<gap<1000: self.stats['lost_frames']+=gap
@@ -223,8 +232,9 @@ class Sender:
 
     The radio module has a ~1 KB buffer and no flow control, so the bucket holds at most `burst` bytes:
     a multi-frame message (an Angular curve) leaves frame by frame at `rate` bytes/s, never in one go."""
-    def __init__(self,rate,frame_max,min_interval=None,burst=400):
+    def __init__(self,rate,frame_max,min_interval=None,burst=400,turn_every_s=None,quiet_s=0.0):
         self.rate=rate; self.frame_max=frame_max; self.min_interval=dict(min_interval or {})
+        self.turn_every_s=turn_every_s; self.quiet_s=quiet_s; self.last_turn=-1e9; self.next_at=0.0
         self.burst=max(burst,frame_max*2)
         self.lock=threading.Lock(); self.box={}; self.fifo=0; self.seq=0; self.msg=0
         self.wire=deque(); self.last_sent={}; self.tokens=float(self.burst); self.refilled=time.monotonic()
@@ -263,21 +273,36 @@ class Sender:
             self.box[('copy',self.fifo)]=Pending(p.topic,p.payload,p.retain,p.qos1,p.priority,p.created,
                                                  p.repeat-1,msg,now+REPEAT_GAP_S)
         if p.msg is None: self.last_sent[p.topic]=now; self.stats['sent_messages']+=1
-    def _take(self,limit):
-        out=[]
-        while self.wire:
-            frame=frame_bytes(self.seq,self.wire[0])
-            if len(frame)>self.tokens or (limit is not None and len(out)>=limit): break
-            self.wire.popleft(); self.seq=(self.seq+1)&0xFFFF; self.tokens-=len(frame); out.append(frame)
+    @staticmethod
+    def _stamp(part):
+        # TIME frames carry the wall clock of the moment they really leave, not when they were queued.
+        kind,msg,topic,flags,index,count,chunk=part
+        if kind==TIME and chunk[:1]==b'\x01': chunk=TIME_REQ.pack(1,time.time_ns()//1000)
+        elif kind==TIME and chunk[:1]==b'\x02' and len(chunk)==TIME_RESP.size:
+            _,t1,t2,_=TIME_RESP.unpack(chunk); chunk=TIME_RESP.pack(2,t1,t2,time.time_ns()//1000)
+        return kind,msg,topic,flags,index,count,chunk
+    def _take(self,limit,now,max_bytes):
+        out=[]; used=0
+        while self.wire and now>=self.next_at:
+            part=self._stamp(self.wire[0])
+            turn=self.turn_every_s is not None and now-self.last_turn>=self.turn_every_s
+            if turn: part=part[:3]+(part[3]|F_TURN,)+part[4:]
+            frame=frame_bytes(self.seq,part)
+            if (len(frame)>self.tokens or (limit is not None and len(out)>=limit) or
+                    (max_bytes is not None and used+len(frame)>max_bytes)): break
+            self.wire.popleft(); self.seq=(self.seq+1)&0xFFFF; self.tokens-=len(frame); out.append(frame); used+=len(frame)
             self.stats['sent_frames']+=1; self.stats['sent_bytes']+=len(frame)
+            if turn:
+                # Stay off the air until this frame is out and the other side had its turn.
+                self.last_turn=now; self.next_at=now+len(frame)*AIR_S_PER_BYTE+self.quiet_s; break
         return out
-    def next_frames(self,now=None,limit=None):
-        """Frames the budget allows now (possibly part of a message), or []."""
+    def next_frames(self,now=None,limit=None,max_bytes=None):
+        """Frames the budget (and the turn taking) allows now, possibly part of a message, or []."""
         now=time.monotonic() if now is None else now
         with self.lock:
             self.tokens=min(float(self.burst),self.tokens+max(0.0,now-self.refilled)*self.rate); self.refilled=now
             if not self.wire: self._load(now)
-            return self._take(limit)
+            return self._take(limit,now,max_bytes)
     def urgent(self,kind,body):
         """One small control frame (TIME) ahead of everything queued."""
         with self.lock: self.wire.appendleft(split_message(kind,0,0,body,frame_max=self.frame_max)[0])
@@ -308,14 +333,16 @@ def open_port(path,baud):
 class Bridge:
     def __init__(self,*,role,device,baud,mqtt_cfg,node_id,credentials_file=None,demo=False,rate=1000,
                  frame_max=200,heartbeat_s=5.0,link_timeout_s=15.0,angular_every_s=20.0,detail_every_s=30.0,
-                 status_every_s=5.0,time_every_s=16.0,chrony_sock=None):
+                 status_every_s=5.0,time_every_s=16.0,chrony_sock=None,health_every_s=2.0):
         if role not in ('edge','ground'): raise ValueError('ROLE')
         self.role=role; self.device=device; self.baud=baud; self.node_id=node_id
         self.prefix=('sdr/demo/v2/' if demo else 'sdr/v2/')+node_id
         self.heartbeat_s=heartbeat_s; self.link_timeout_s=link_timeout_s; self.status_every_s=status_every_s
-        intervals={4:angular_every_s,6:angular_every_s,2:detail_every_s} if role=='edge' else {}
-        self.sender=Sender(rate,frame_max,intervals); self.receiver=Receiver()
-        self.started=time.monotonic(); self.last_rx=None; self.link_up=False; self.link_changes=0
+        intervals={4:angular_every_s,6:angular_every_s,2:detail_every_s,1:health_every_s} if role=='edge' else {}
+        self.sender=(Sender(rate,frame_max,intervals,turn_every_s=EDGE_TURN_EVERY_S,quiet_s=EDGE_QUIET_S)
+                     if role=='edge' else Sender(rate,frame_max,intervals))
+        self.receiver=Receiver(); self.rx_event=threading.Event()
+        self.started=time.monotonic(); self.last_rx=None; self.last_frame_rx=None; self.link_up=False; self.link_changes=0
         self.retained={}; self.stop_event=threading.Event(); self.fd=None; self.port_error=None
         self.mqtt_dropped=0; self.ignored=0; self.lock=threading.Lock(); self.threads=[]
         # Edge asks Ground for the time (NTP-style t1..t4); the best of the last samples feeds chrony.
@@ -355,8 +382,10 @@ class Bridge:
                 if not data: raise OSError(0,'SERIAL_EOF')
             except (OSError,ValueError) as e:
                 self._port_failed(e); continue
-            now=time.monotonic()
+            now=time.monotonic(); before=self.receiver.stats['frames']
             messages=self.receiver.feed(data,now)
+            if self.receiver.stats['frames']>before:
+                self.last_frame_rx=now; self.rx_event.set()
             if self.receiver.stats['frames'] or messages:
                 was=self.link_up; self.last_rx=now; self.link_up=True
                 if not was:
@@ -413,14 +442,24 @@ class Bridge:
                 if self.role=='edge' and now-last_time>=self.time_every_s:
                     last_time=now; self.time_requests+=1
                     self.sender.urgent(TIME,TIME_REQ.pack(1,time.time_ns()//1000))
-                frames=self.sender.next_frames(now)
+                if self.role=='ground':
+                    # Talk only in the edge's quiet window, or freely when the edge has gone silent.
+                    turn=self.receiver.turn_at
+                    free=self.last_frame_rx is None or now-self.last_frame_rx>GROUND_FREE_AFTER_S
+                    if free: frames=self.sender.next_frames(now)
+                    elif turn is not None and now-turn<=GROUND_REPLY_WINDOW_S:
+                        frames=self.sender.next_frames(now,max_bytes=GROUND_WINDOW_BYTES)
+                        if frames: self.receiver.turn_at=None
+                    else: frames=[]
+                else: frames=self.sender.next_frames(now)
                 if frames: self._write(frames)
             except (OSError,ValueError) as e:
                 self._port_failed(e); continue
             if now-last_status>=self.status_every_s and self.client.connected:
                 last_status=now
                 self.client.offer('lora:status',self.prefix+'/lora/'+self.role,json.dumps(self.status(),separators=(',',':')).encode(),retain=True)
-            self.stop_event.wait(.02 if frames else .05)
+            # Wake at once when a frame arrives (the ground's turn is short).
+            self.rx_event.wait(.02 if frames else .05); self.rx_event.clear()
     def _port_failed(self,e):
         fd,self.fd=self.fd,None
         self.port_error=f'ERRNO_{e.errno}' if getattr(e,'errno',None) else (str(e) or type(e).__name__)

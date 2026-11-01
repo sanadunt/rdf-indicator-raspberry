@@ -246,7 +246,8 @@ def lora_bridge(a):
     bridge=Bridge(role=a.role,device=a.device,baud=a.baud,mqtt_cfg=cfg,node_id=a.node_id,
                   credentials_file=a.mqtt_credentials,demo=a.demo_namespace,rate=a.rate,frame_max=a.frame_max,
                   heartbeat_s=a.heartbeat,link_timeout_s=a.link_timeout,angular_every_s=a.angular_every,
-                  detail_every_s=a.detail_every,time_every_s=a.time_every,chrony_sock=a.chrony_sock)
+                  detail_every_s=a.detail_every,time_every_s=a.time_every,chrony_sock=a.chrony_sock,
+                  health_every_s=a.health_every)
     stop=threading.Event()
     for sig in (signal.SIGINT,signal.SIGTERM): signal.signal(sig,lambda *_:stop.set())
     bridge.start()
@@ -291,6 +292,7 @@ def main():
     s.add_argument('--heartbeat',type=float,default=5.0);s.add_argument('--link-timeout',type=float,default=15.0)
     s.add_argument('--angular-every',type=float,default=20.0,help='jarak minimum kurva angular, detik')
     s.add_argument('--detail-every',type=float,default=30.0,help='jarak minimum health/detail, detik')
+    s.add_argument('--health-every',type=float,default=2.0,help='jarak minimum telemetry/health, detik (Ground: segar <= 8 s)')
     s.add_argument('--status-every',type=float,default=30.0)
     s.add_argument('--time-every',type=float,default=16.0,help='edge: tanya jam Ground tiap N detik')
     s.add_argument('--chrony-sock',help='edge: kirim sampel jam ke chrony (refclock SOCK), mis. /run/chrony.lora.sock')

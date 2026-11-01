@@ -35,6 +35,10 @@ Contract `1.6` (additive): `telemetry/health` can carry optional compass and GPS
   the best sample to chrony (`--chrony-sock`, `refclock SOCK`); the GPS reader can feed RMC time of a
   valid fix to chrony too (`nav.gps.chrony_sock`). `run.py lora-test` measures LoRa throughput, loss and
   latency with RLS1 TEST frames (rx, tx sweep, echo).
+- Field test on the real link drove three bridge changes: DoA ranks first among telemetry and goes twice;
+  health is the newest one at most every 2 s (`--health-every`); half-duplex turn taking (the edge sets
+  F_TURN about once a second and stays quiet 0.3 s, the ground transmits only then or after 3 s of edge
+  silence). TIME frames are stamped when they leave, not when queued.
 
 ## 1.5.0 - Unreleased
 

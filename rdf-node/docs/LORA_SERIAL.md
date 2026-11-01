@@ -51,9 +51,9 @@ arah sebaliknya dan selisih jam (`peer.clock_offset_ms`, termasuk latensi satu a
 
 | Id | Topik (`sdr/v2/<node>/…`) | Arah | Prioritas | Umur maks | Kebijakan |
 |---|---|---|---|---|---|
-| 1 | `telemetry/health` | Edge→Ground | 1 | 5 s | terbaru menang |
+| 1 | `telemetry/health` | Edge→Ground | 2 | 6 s | terbaru menang, min. tiap 2 s (`--health-every`) |
 | 2 | `telemetry/health/detail` | Edge→Ground | 4 | 15 s | terbaru menang, min. tiap 30 s |
-| 3 | `telemetry/doa` | Edge→Ground | 1 | 3 s | terbaru menang |
+| 3 | `telemetry/doa` | Edge→Ground | 1 | 3 s | terbaru menang, **dikirim 2×** (prioritas data tertinggi) |
 | 4 | `telemetry/angular` | Edge→Ground | 5 | 8 s | terbaru menang, min. tiap 20 s |
 | 5 | `telemetry/diagnostic/doa` | Edge→Ground | 2 | 3 s | terbaru menang |
 | 6 | `telemetry/diagnostic/angular` | Edge→Ground | 5 | 8 s | terbaru menang, min. tiap 20 s |
@@ -69,6 +69,14 @@ Umur maks menjaga data tetap di dalam jendela freshness Ground (health 8 s, DoA 
 command di dalam deadline 15 s (`expires_ms`). Tidak ada retransmisi: telemetry digantikan yang lebih
 baru, salinan kedua command/ACK dibuang penerima (id pesan sama), dan `state`, `capabilities`,
 `availability` dikirim ulang oleh jembatan Edge setiap kali link kembali naik.
+
+## Giliran bicara (half-duplex)
+
+Radio LoRa tidak bisa kirim dan terima bersamaan. Kira-kira sekali per detik Edge menandai satu frame
+dengan flag `TURN` (bit3), lalu diam `0.3 s` (setelah perkiraan airtime frame itu, ~0.5 ms/byte).
+Ground hanya memancar dalam `0.08 s` setelah menerima frame `TURN` (maks. 250 B per giliran), atau bebas
+bila Edge diam lebih dari 3 s. Frame TIME diberi timestamp saat benar-benar dikirim, jadi menunggu giliran
+tidak merusak ukuran jam. Terukur sebelum giliran ini: hilang ~4% Edge→Ground dan ~11% Ground→Edge.
 
 ## Status jembatan
 
