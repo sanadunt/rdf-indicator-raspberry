@@ -88,6 +88,8 @@ nav:
     baud: 9600
     stale_ms: 3000
     publish_position: false
+    # GPS time to chrony (`refclock SOCK <path> refid GPS offset 0.2`), e.g. /run/chrony.gps.sock.
+    chrony_sock: null
 testing:
   # Laptop/macOS testing only. `system` uses the OS clock as the data clock instead of timedatectl;
   # it is labelled TEST (state.clock), clk stays 0, and helper-backed commands stay CLOCK_UNTRUSTED.

@@ -238,6 +238,26 @@ def serve(args,ground=False,demo=False):
     finally:
         stop_demo.set(); app.stop(); server.server_close()
 
+def lora_bridge(a):
+    import json, signal
+    from .lora import Bridge
+    cfg={'host':a.mqtt_host,'port':a.mqtt_port,'tls':a.mqtt_tls,'ca_file':a.mqtt_ca,'transport':a.mqtt_transport,
+         'websocket_path':a.mqtt_path,'keepalive':15,'reconnect_max':10}
+    bridge=Bridge(role=a.role,device=a.device,baud=a.baud,mqtt_cfg=cfg,node_id=a.node_id,
+                  credentials_file=a.mqtt_credentials,demo=a.demo_namespace,rate=a.rate,frame_max=a.frame_max,
+                  heartbeat_s=a.heartbeat,link_timeout_s=a.link_timeout,angular_every_s=a.angular_every,
+                  detail_every_s=a.detail_every,time_every_s=a.time_every,chrony_sock=a.chrony_sock)
+    stop=threading.Event()
+    for sig in (signal.SIGINT,signal.SIGTERM): signal.signal(sig,lambda *_:stop.set())
+    bridge.start()
+    print(f'LoRa bridge {a.role}: {a.device} @ {a.baud}, MQTT {a.mqtt_host}:{a.mqtt_port} ({a.mqtt_transport}), '
+          f'topik {bridge.prefix}, budget {a.rate} B/s, frame maks {a.frame_max} B',flush=True)
+    try:
+        while not stop.wait(a.status_every):
+            print(json.dumps(bridge.status(),separators=(',',':')),flush=True)
+    finally:
+        bridge.stop()
+
 def main():
     p=argparse.ArgumentParser(description='RDF Node service and deployment CLI')
     sub=p.add_subparsers(dest='command',required=True)
@@ -258,6 +278,31 @@ def main():
     s.add_argument('directory')
     s=sub.add_parser('helper');s.add_argument('--policy',default='/etc/rdf-node/helper.yaml')
     sub.add_parser('selftest')
+    s=sub.add_parser('lora-bridge',help='jembatan MQTT lewat serial LoRa transparan (tanpa PPP); lihat docs/LORA_SERIAL.md')
+    s.add_argument('--role',choices=['edge','ground'],required=True)
+    s.add_argument('--device',required=True,help='port serial LoRa, mis. /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0')
+    s.add_argument('--baud',type=int,default=115200)
+    s.add_argument('--node-id',default='uav-01');s.add_argument('--demo-namespace',action='store_true')
+    s.add_argument('--mqtt-host',default='127.0.0.1');s.add_argument('--mqtt-port',type=int,default=1883)
+    s.add_argument('--mqtt-transport',choices=['tcp','websocket'],default='tcp');s.add_argument('--mqtt-path',default='/mqtt')
+    s.add_argument('--mqtt-tls',action='store_true');s.add_argument('--mqtt-ca');s.add_argument('--mqtt-credentials')
+    s.add_argument('--rate',type=int,default=1000,help='byte/s ke radio (default 1000; terukur ~1.2-1.5 KB/s)')
+    s.add_argument('--frame-max',type=int,default=200,help='byte per frame di kabel (default 200)')
+    s.add_argument('--heartbeat',type=float,default=5.0);s.add_argument('--link-timeout',type=float,default=15.0)
+    s.add_argument('--angular-every',type=float,default=20.0,help='jarak minimum kurva angular, detik')
+    s.add_argument('--detail-every',type=float,default=30.0,help='jarak minimum health/detail, detik')
+    s.add_argument('--status-every',type=float,default=30.0)
+    s.add_argument('--time-every',type=float,default=16.0,help='edge: tanya jam Ground tiap N detik')
+    s.add_argument('--chrony-sock',help='edge: kirim sampel jam ke chrony (refclock SOCK), mis. /run/chrony.lora.sock')
+    s=sub.add_parser('lora-test',help='uji kecepatan, loss, dan latensi link LoRa serial (frame RLS1 TEST)')
+    s.add_argument('--role',choices=['tx','rx','echo'],required=True)
+    s.add_argument('--device',required=True);s.add_argument('--baud',type=int,default=115200)
+    s.add_argument('--rates',default='500,1000,1500,2000,3000',help='tx: byte/s yang dicoba')
+    s.add_argument('--sizes',default='64,200,240',help='tx: ukuran frame di kabel (byte)')
+    s.add_argument('--duration',type=float,default=15.0,help='tx: detik per langkah')
+    s.add_argument('--gap',type=float,default=3.0,help='tx: jeda antar langkah')
+    s.add_argument('--expect-echo',action='store_true',help='tx: ukur RTT dari sisi echo')
+    s.add_argument('--run',type=int,default=0);s.add_argument('--idle',type=float,default=20.0,help='rx/echo: berhenti setelah diam N detik')
     a=p.parse_args()
     if a.command in ('edge','ground','demo'): serve(a,ground=a.command=='ground',demo=a.command=='demo')
     elif a.command=='demo-source':
@@ -269,6 +314,10 @@ def main():
     elif a.command=='helper':
         from .helper import serve as helper_serve
         helper_serve(a.policy)
+    elif a.command=='lora-bridge': lora_bridge(a)
+    elif a.command=='lora-test':
+        from .lora_test import main as lora_test_main
+        lora_test_main(a)
     elif a.command=='doctor': doctor(a)
     elif a.command=='setup': setup(a)
     elif a.command=='import-bundle': import_bundle(a)

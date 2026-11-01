@@ -1,0 +1,453 @@
+"""MQTT over a transparent LoRa serial link, without PPP or TCP/IP (RLS1, see docs/LORA_SERIAL.md).
+
+One bridge runs on each side of the radio and talks to its own local MQTT broker:
+
+* edge:   subscribes the Edge topics (telemetry, state, availability, ACKs...) on the Pi's broker and
+          sends them over LoRa; publishes Ground commands it receives back into that broker.
+* ground: subscribes the node's `cmd/#` on the Ground broker and sends them over LoRa; publishes what
+          the Edge sent into the Ground broker with the same topic, payload bytes and retain flag.
+
+So rdf-edge, rdf-ground and any other consumer keep the MQTT contract unchanged. A frame is
+`header | chunk | CRC-16`, COBS-encoded and ended by 0x00. Payloads are zlib-compressed with a shared
+dictionary when that is smaller, split into fragments of at most `frame_max` bytes on the wire, and
+paced by a byte budget so the module's ~1 KB buffer never overflows. There is no retransmission:
+telemetry is replaced by newer telemetry, retained topics are resent when the link comes back, and
+commands and ACKs are sent twice (the receiver drops the copy).
+"""
+from __future__ import annotations
+import json
+import os
+import select
+import struct
+import threading
+import time
+import zlib
+from collections import deque
+from .mqtt import Client
+from .util import now_ms
+from .timesync import ChronySock
+try:
+    import fcntl
+    import termios
+except ImportError:  # pragma: no cover - non-POSIX hosts
+    fcntl = termios = None
+
+MAGIC=0xA1
+DATA=1
+HEARTBEAT=2
+TIME=4  # 3 is the TEST frame of lora_test
+TIME_REQ=struct.Struct('!BQ')        # op 1, t1 (edge wall clock, us)
+TIME_RESP=struct.Struct('!BQQQ')     # op 2, t1, t2 (ground receive), t3 (ground send), us
+HEADER=struct.Struct('!BBHBBBBB')  # magic type seq msg topic flags index count
+F_RETAIN=1; F_QOS1=2; F_ZLIB=4
+CRC_LEN=2
+# Fragment state older than this is dropped (a lost fragment never completes its message).
+REASSEMBLY_S=15.0
+DEDUP_S=30.0
+
+# Topic ids are part of the wire format: never renumber, only append.
+EDGE_TOPICS={
+    1:'telemetry/health', 2:'telemetry/health/detail', 3:'telemetry/doa', 4:'telemetry/angular',
+    5:'telemetry/diagnostic/doa', 6:'telemetry/diagnostic/angular', 7:'state', 8:'capabilities',
+    9:'availability', 10:'settings/reported', 11:'ack/config', 12:'ack/operation',
+}
+GROUND_TOPICS={
+    64:'cmd/config/get', 65:'cmd/config/patch', 66:'cmd/processing/set', 67:'cmd/service/restart',
+    68:'cmd/service/ppp/restart', 69:'cmd/system/reboot/prepare', 70:'cmd/system/reboot/execute',
+    71:'cmd/system/shutdown/prepare', 72:'cmd/system/shutdown/execute', 73:'cmd/operation/get',
+    74:'cmd/stream/set',
+}
+TOPIC_IDS={suffix:i for i,suffix in {**EDGE_TOPICS,**GROUND_TOPICS}.items()}
+
+# Sending policy per topic id: (priority: lower first, max age s or None, latest-wins, sent twice).
+# Ages stay inside what Ground accepts as fresh (DoA 5 s, angular 10 s, health 8 s).
+POLICY={
+    1:(1,5,True,False), 2:(4,15,True,False), 3:(1,3,True,False), 4:(5,8,True,False),
+    5:(2,3,True,False), 6:(5,8,True,False), 7:(0,None,True,False), 8:(3,None,True,False),
+    9:(0,None,True,False), 10:(2,30,False,True), 11:(0,30,False,True), 12:(0,30,False,True),
+}
+# Commands carry a 15 s deadline (expires_ms); one that cannot leave within 10 s is dropped here.
+for _id in GROUND_TOPICS: POLICY[_id]=(0,10,False,True)
+RETAINED_RESEND=(9,7,8)  # availability, state, capabilities: resent when the link comes back
+
+# Shared zlib dictionary: the keys and values Edge payloads repeat. Part of the protocol (RLS1).
+ZDICT=(b'"availability","online":true,"contract":"1.6","capabilities","remote_","profile":"balanced",'
+       b'"clock":"SYNCED","run":"RUNNING","daq":true,"cfg":"boot":"instance":"why":[],"rev":"clk":1,'
+       b'"temp":"age":"drop":"hs":"OK","hdg":"gs":"FIX","fix":3,"sat":"lat":"lon":"alt":"sog":"cog":'
+       b'"trust":"UNVERIFIED","angle_reference":"RAW","validation_reasons":["SOURCE_UNVERIFIED",'
+       b'"ANGLE_UNVERIFIED","NO_FRESH_DOA","DOA_FILE_NOT_UPDATING","EMPTY_CSV","DAQ_NOT_HEALTHY",'
+       b'"reason":[],"ok":1,"f":433920000,"a":"c":"p":"t":17934,"q":"sid":"v":2,'
+       b'"encoding":"json","timestamp_ms":17934,"frequency_hz":"revision":"vfo":0,"convention":1,'
+       b'"flags":63,"raw_doa_deg":"confidence_native_db":"values":[0.0,1.0,2.0,"status":"APPLIED",'
+       b'"result":{},"id":"op":"source":"doa.xml","observed_timestamp_ms":"source_timestamp_ms":')
+
+def crc16(data: bytes) -> int:
+    """CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF)."""
+    crc=0xFFFF
+    for b in data:
+        crc^=b<<8
+        for _ in range(8):
+            crc=((crc<<1)^0x1021)&0xFFFF if crc&0x8000 else (crc<<1)&0xFFFF
+    return crc
+
+def cobs_encode(data: bytes) -> bytes:
+    out=bytearray(); block=bytearray()
+    for b in data:
+        if b==0:
+            out.append(len(block)+1); out+=block; block.clear()
+        else:
+            block.append(b)
+            if len(block)==254:
+                out.append(255); out+=block; block.clear()
+    out.append(len(block)+1); out+=block
+    return bytes(out)
+
+def cobs_decode(data: bytes) -> bytes:
+    out=bytearray(); i=0
+    while i<len(data):
+        code=data[i]
+        if code==0 or i+code>len(data): raise ValueError('COBS_BAD')
+        out+=data[i+1:i+code]; i+=code
+        if code<255 and i<len(data): out.append(0)
+    return bytes(out)
+
+def compress(payload: bytes):
+    c=zlib.compressobj(9,zlib.DEFLATED,-15,9,zlib.Z_DEFAULT_STRATEGY,ZDICT)
+    packed=c.compress(payload)+c.flush()
+    return (packed,True) if len(packed)<len(payload) else (payload,False)
+
+def decompress(packed: bytes, limit=16384) -> bytes:
+    d=zlib.decompressobj(-15,ZDICT)
+    out=d.decompress(packed,limit)
+    if d.unconsumed_tail or not d.eof: raise ValueError('ZLIB_BAD_OR_TOO_LARGE')
+    return out
+
+def split_message(kind,msg,topic,payload,*,retain=False,qos1=False,frame_max=200):
+    """Unsent frames of one message: (kind, msg, topic, flags, index, count, chunk). The sequence number
+    is given at send time, so frames that are sent later (a heartbeat in between) keep the order."""
+    body,packed=compress(payload) if kind==DATA else (payload,False)
+    flags=(F_RETAIN if retain else 0)|(F_QOS1 if qos1 else 0)|(F_ZLIB if packed else 0)
+    # Worst-case COBS adds one byte per 254, plus the code byte and the 0x00 delimiter.
+    room=frame_max-HEADER.size-CRC_LEN-2-(frame_max//254+1)
+    if room<16: raise ValueError('FRAME_MAX_TOO_SMALL')
+    chunks=[body[i:i+room] for i in range(0,len(body),room)] or [b'']
+    if len(chunks)>255: raise ValueError('MESSAGE_TOO_LARGE')
+    return [(kind,msg,topic,flags,index,len(chunks),chunk) for index,chunk in enumerate(chunks)]
+
+def frame_bytes(seq,part):
+    kind,msg,topic,flags,index,count,chunk=part
+    raw=HEADER.pack(MAGIC,kind,seq&0xFFFF,msg,topic,flags,index,count)+chunk
+    return cobs_encode(raw+struct.pack('!H',crc16(raw)))+b'\x00'
+
+def encode_frames(kind,seq_start,msg,topic,payload,*,retain=False,qos1=False,frame_max=200):
+    """Wire frames (COBS + 0x00) for one message; seq numbers follow seq_start."""
+    return [frame_bytes(seq_start+i,part) for i,part in
+            enumerate(split_message(kind,msg,topic,payload,retain=retain,qos1=qos1,frame_max=frame_max))]
+
+def decode_frame(wire: bytes):
+    """(kind, seq, msg, topic, flags, index, count, chunk) from one frame without its 0x00."""
+    raw=cobs_decode(wire)
+    if len(raw)<HEADER.size+CRC_LEN: raise ValueError('FRAME_SHORT')
+    if struct.unpack('!H',raw[-2:])[0]!=crc16(raw[:-2]): raise ValueError('CRC_MISMATCH')
+    magic,kind,seq,msg,topic,flags,index,count=HEADER.unpack_from(raw)
+    if magic!=MAGIC or kind not in (DATA,HEARTBEAT,TIME) or not count or index>=count: raise ValueError('FRAME_BAD_HEADER')
+    return kind,seq,msg,topic,flags,index,count,raw[HEADER.size:-2]
+
+class Receiver:
+    """Splits the byte stream into frames, checks them and reassembles messages."""
+    def __init__(self):
+        self.buf=bytearray(); self.parts={}; self.recent={}; self.last_seq=None
+        self.stats=dict(frames=0,crc_errors=0,bad_frames=0,lost_frames=0,messages=0,duplicates=0,
+                        incomplete=0,heartbeats=0)
+        self.peer=None; self.time_frames=[]
+    def feed(self,data,now=None):
+        now=time.monotonic() if now is None else now
+        out=[]; self.buf+=data
+        while True:
+            end=self.buf.find(0)
+            if end<0:
+                if len(self.buf)>4096: self.buf.clear(); self.stats['bad_frames']+=1
+                break
+            wire=bytes(self.buf[:end]); del self.buf[:end+1]
+            if not wire: continue
+            try: kind,seq,msg,topic,flags,index,count,chunk=decode_frame(wire)
+            except ValueError as e:
+                self.stats['crc_errors' if str(e)=='CRC_MISMATCH' else 'bad_frames']+=1; continue
+            self.stats['frames']+=1
+            if self.last_seq is not None:
+                gap=(seq-self.last_seq-1)&0xFFFF
+                if 0<gap<1000: self.stats['lost_frames']+=gap
+            self.last_seq=seq
+            if kind==TIME:
+                # Arrival wall clock, as close to the radio as this process gets.
+                self.time_frames.append((chunk,time.time_ns()//1000)); continue
+            if kind==HEARTBEAT:
+                self.stats['heartbeats']+=1
+                if len(chunk)>=20:
+                    up,rx,crc,lost,clock=struct.unpack('!IIHHQ',chunk[:20])
+                    # Peer wall clock minus ours at arrival (includes one-way latency, ~0.1 s).
+                    self.peer=dict(uptime_s=up,rx_frames=rx,crc_errors=crc,lost_frames=lost,
+                                   clock_offset_ms=clock-now_ms(),at=now)
+                continue
+            message=self._assemble(msg,topic,flags,index,count,chunk,now)
+            if message: out.append(message)
+        for key in [k for k,(t,_,_) in self.parts.items() if now-t>REASSEMBLY_S]:
+            del self.parts[key]; self.stats['incomplete']+=1
+        for key in [k for k,t in self.recent.items() if now-t>DEDUP_S]: del self.recent[key]
+        return out
+    def _assemble(self,msg,topic,flags,index,count,chunk,now):
+        key=(msg,topic,count)
+        if key in self.recent: self.stats['duplicates']+=1; return None
+        started,meta,pieces=self.parts.get(key,(now,flags,{}))
+        pieces[index]=chunk; self.parts[key]=(started,meta,pieces)
+        if len(pieces)<count: return None
+        del self.parts[key]; self.recent[key]=now
+        body=b''.join(pieces[i] for i in range(count))
+        try: payload=decompress(body) if flags&F_ZLIB else body
+        except (ValueError,zlib.error): self.stats['bad_frames']+=1; return None
+        self.stats['messages']+=1
+        return topic,payload,bool(flags&F_RETAIN),bool(flags&F_QOS1)
+
+# The copy of a command or ACK leaves this long after the first, so one collision on the half-duplex
+# radio cannot take both.
+REPEAT_GAP_S=0.5
+
+class Pending:
+    __slots__=('topic','payload','retain','qos1','priority','created','repeat','msg','not_before')
+    def __init__(self,topic,payload,retain,qos1,priority,created,repeat,msg=None,not_before=0.0):
+        self.topic=topic; self.payload=payload; self.retain=retain; self.qos1=qos1
+        self.priority=priority; self.created=created; self.repeat=repeat; self.msg=msg; self.not_before=not_before
+
+class Sender:
+    """Per-topic mailbox with priorities and ages, and a byte budget that releases one frame at a time.
+
+    The radio module has a ~1 KB buffer and no flow control, so the bucket holds at most `burst` bytes:
+    a multi-frame message (an Angular curve) leaves frame by frame at `rate` bytes/s, never in one go."""
+    def __init__(self,rate,frame_max,min_interval=None,burst=400):
+        self.rate=rate; self.frame_max=frame_max; self.min_interval=dict(min_interval or {})
+        self.burst=max(burst,frame_max*2)
+        self.lock=threading.Lock(); self.box={}; self.fifo=0; self.seq=0; self.msg=0
+        self.wire=deque(); self.last_sent={}; self.tokens=float(self.burst); self.refilled=time.monotonic()
+        self.stats=dict(queued=0,superseded=0,expired=0,sent_messages=0,sent_frames=0,sent_bytes=0,too_large=0)
+    def offer(self,topic,payload,retain=False,qos1=False,now=None):
+        now=time.monotonic() if now is None else now
+        priority,_,latest,twice=POLICY[topic]
+        with self.lock:
+            if latest:
+                if topic in self.box: self.stats['superseded']+=1
+                key=topic
+            else:
+                self.fifo+=1; key=(topic,self.fifo)
+            self.box[key]=Pending(topic,payload,retain,qos1,priority,now,2 if twice else 1)
+            self.stats['queued']+=1
+    def _expire(self,now):
+        for key,p in list(self.box.items()):
+            age=POLICY[p.topic][1]
+            if age is not None and now-p.created>age:
+                del self.box[key]; self.stats['expired']+=1
+    def _load(self,now):
+        self._expire(now)
+        due=[(p.priority,p.created,order,key) for order,(key,p) in enumerate(self.box.items())
+             if now>=p.not_before and (p.msg is not None or
+                 now-self.last_sent.get(p.topic,-1e9)>=self.min_interval.get(p.topic,0))]
+        if not due: return
+        p=self.box.pop(min(due,key=lambda d:d[:3])[3])
+        if p.msg is None: self.msg=(self.msg+1)&0xFF; msg=self.msg
+        else: msg=p.msg
+        try: parts=split_message(DATA,msg,p.topic,p.payload,retain=p.retain,qos1=p.qos1,frame_max=self.frame_max)
+        except ValueError: self.stats['too_large']+=1; return
+        self.wire.extend(parts)
+        if p.repeat>1:
+            # The copy keeps the message id, so the receiver drops it when the first one arrived.
+            self.fifo+=1
+            self.box[('copy',self.fifo)]=Pending(p.topic,p.payload,p.retain,p.qos1,p.priority,p.created,
+                                                 p.repeat-1,msg,now+REPEAT_GAP_S)
+        if p.msg is None: self.last_sent[p.topic]=now; self.stats['sent_messages']+=1
+    def _take(self,limit):
+        out=[]
+        while self.wire:
+            frame=frame_bytes(self.seq,self.wire[0])
+            if len(frame)>self.tokens or (limit is not None and len(out)>=limit): break
+            self.wire.popleft(); self.seq=(self.seq+1)&0xFFFF; self.tokens-=len(frame); out.append(frame)
+            self.stats['sent_frames']+=1; self.stats['sent_bytes']+=len(frame)
+        return out
+    def next_frames(self,now=None,limit=None):
+        """Frames the budget allows now (possibly part of a message), or []."""
+        now=time.monotonic() if now is None else now
+        with self.lock:
+            self.tokens=min(float(self.burst),self.tokens+max(0.0,now-self.refilled)*self.rate); self.refilled=now
+            if not self.wire: self._load(now)
+            return self._take(limit)
+    def urgent(self,kind,body):
+        """One small control frame (TIME) ahead of everything queued."""
+        with self.lock: self.wire.appendleft(split_message(kind,0,0,body,frame_max=self.frame_max)[0])
+    def heartbeat(self,uptime_s,rx,now=None):
+        """Heartbeat frame ahead of any queued fragment; it still waits for budget."""
+        now=time.monotonic() if now is None else now
+        body=struct.pack('!IIHHQ',int(uptime_s)&0xFFFFFFFF,rx['frames']&0xFFFFFFFF,
+                         min(rx['crc_errors'],0xFFFF),min(rx['lost_frames'],0xFFFF),now_ms())
+        with self.lock:
+            self.wire.appendleft(split_message(HEARTBEAT,0,0,body,frame_max=self.frame_max)[0])
+    def depth(self):
+        with self.lock: return len(self.box)+len(self.wire)
+
+def open_port(path,baud):
+    if termios is None: raise OSError(0,'TERMIOS_UNAVAILABLE')
+    fd=os.open(path,os.O_RDWR|os.O_NOCTTY|os.O_NONBLOCK)
+    try:
+        a=termios.tcgetattr(fd)
+        a[0]=0; a[1]=0; a[2]=termios.CS8|termios.CREAD|termios.CLOCAL; a[3]=0
+        a[4]=a[5]=getattr(termios,f'B{baud}'); a[6][termios.VMIN]=0; a[6][termios.VTIME]=0
+        termios.tcsetattr(fd,termios.TCSANOW,a); termios.tcflush(fd,termios.TCIOFLUSH)
+        try: fcntl.ioctl(fd,termios.TIOCEXCL)
+        except OSError: pass
+    except BaseException:
+        os.close(fd); raise
+    return fd
+
+class Bridge:
+    def __init__(self,*,role,device,baud,mqtt_cfg,node_id,credentials_file=None,demo=False,rate=1000,
+                 frame_max=200,heartbeat_s=5.0,link_timeout_s=15.0,angular_every_s=20.0,detail_every_s=30.0,
+                 status_every_s=5.0,time_every_s=16.0,chrony_sock=None):
+        if role not in ('edge','ground'): raise ValueError('ROLE')
+        self.role=role; self.device=device; self.baud=baud; self.node_id=node_id
+        self.prefix=('sdr/demo/v2/' if demo else 'sdr/v2/')+node_id
+        self.heartbeat_s=heartbeat_s; self.link_timeout_s=link_timeout_s; self.status_every_s=status_every_s
+        intervals={4:angular_every_s,6:angular_every_s,2:detail_every_s} if role=='edge' else {}
+        self.sender=Sender(rate,frame_max,intervals); self.receiver=Receiver()
+        self.started=time.monotonic(); self.last_rx=None; self.link_up=False; self.link_changes=0
+        self.retained={}; self.stop_event=threading.Event(); self.fd=None; self.port_error=None
+        self.mqtt_dropped=0; self.ignored=0; self.lock=threading.Lock(); self.threads=[]
+        # Edge asks Ground for the time (NTP-style t1..t4); the best of the last samples feeds chrony.
+        self.time_every_s=time_every_s; self.time_samples=deque(maxlen=8); self.time_requests=0
+        self.chrony=ChronySock(chrony_sock) if role=='edge' and chrony_sock else None
+        outgoing=EDGE_TOPICS if role=='edge' else GROUND_TOPICS
+        subs=[(self.prefix+'/'+suffix,1,role=='ground') for suffix in outgoing.values()]
+        self.client=Client(cfg=mqtt_cfg,client_id=f'{node_id}-lora-{role}',credentials_file=credentials_file,
+                           subscriptions=subs,on_message=self._from_mqtt,rate=1000000)
+    # ---- MQTT -> radio ----
+    def _from_mqtt(self,topic,payload,retained):
+        suffix=topic[len(self.prefix)+1:] if topic.startswith(self.prefix+'/') else None
+        tid=TOPIC_IDS.get(suffix)
+        allowed=EDGE_TOPICS if self.role=='edge' else GROUND_TOPICS
+        if tid not in allowed: self.ignored+=1; return
+        if self.role=='ground' and retained: self.ignored+=1; return  # never replay a retained command
+        retain=self.role=='edge' and tid in (7,8,9)
+        if retain:
+            with self.lock: self.retained[tid]=payload
+        self.sender.offer(tid,payload,retain=retain,qos1=tid in (7,8,9,10,11,12) or tid>=64)
+    # ---- radio -> MQTT ----
+    def _deliver(self,tid,payload,retain,qos1):
+        incoming=GROUND_TOPICS if self.role=='edge' else EDGE_TOPICS
+        if tid not in incoming: self.ignored+=1; return
+        key=f'lora:{tid}' if POLICY[tid][2] else f'lora:{tid}:{time.monotonic_ns()}'
+        if not self.client.offer(key,self.prefix+'/'+incoming[tid],payload,qos=1 if qos1 else 0,
+                                 retain=retain and self.role=='ground',priority=POLICY[tid][0]):
+            self.mqtt_dropped+=1
+    def _rx_loop(self):
+        while not self.stop_event.is_set():
+            fd=self.fd
+            if fd is None: self.stop_event.wait(.2); continue
+            try:
+                r,_,_=select.select([fd],[],[],.2)
+                if not r: continue
+                data=os.read(fd,1024)
+                if not data: raise OSError(0,'SERIAL_EOF')
+            except (OSError,ValueError) as e:
+                self._port_failed(e); continue
+            now=time.monotonic()
+            messages=self.receiver.feed(data,now)
+            if self.receiver.stats['frames'] or messages:
+                was=self.link_up; self.last_rx=now; self.link_up=True
+                if not was:
+                    self.link_changes+=1
+                    # The other side may have missed every retained topic while the link was down.
+                    if self.role=='edge': self._resend_retained()
+            for m in messages: self._deliver(*m)
+            while self.receiver.time_frames: self._on_time(*self.receiver.time_frames.pop(0))
+    def _on_time(self,chunk,arrival_us):
+        if self.role=='ground' and len(chunk)==TIME_REQ.size and chunk[0]==1:
+            _,t1=TIME_REQ.unpack(chunk)
+            self.sender.urgent(TIME,TIME_RESP.pack(2,t1,arrival_us,time.time_ns()//1000))
+        elif self.role=='edge' and len(chunk)==TIME_RESP.size and chunk[0]==2:
+            _,t1,t2,t3=TIME_RESP.unpack(chunk); t4=arrival_us
+            delay=(t4-t1)-(t3-t2)
+            if not 0<=delay<5_000_000: return  # a stale or mismatched reply
+            offset=((t2-t1)+(t3-t4))/2
+            with self.lock:
+                self.time_samples.append((offset,delay,time.monotonic()))
+                best=min(self.time_samples,key=lambda x:x[1])
+            if self.chrony and best[1]<1_000_000: self.chrony.send(best[0]/1e6)
+    def _time_view(self):
+        with self.lock: samples=list(self.time_samples)
+        if not samples: return None
+        best=min(samples,key=lambda x:x[1]); last=samples[-1]
+        view={'offset_ms':round(best[0]/1000,1),'delay_ms':round(best[1]/1000,1),'samples':len(samples),
+              'last_age_s':round(time.monotonic()-last[2],1),'requests':self.time_requests}
+        if self.chrony: view['chrony']={'sent':self.chrony.sent,'errors':self.chrony.errors,'error':self.chrony.error}
+        return view
+    def _resend_retained(self):
+        with self.lock: saved=dict(self.retained)
+        for tid in RETAINED_RESEND:
+            if tid in saved: self.sender.offer(tid,saved[tid],retain=True,qos1=True)
+    def _write(self,frames):
+        for frame in frames:
+            view=memoryview(frame)
+            while view:
+                if self.stop_event.is_set(): return
+                _,w,_=select.select([],[self.fd],[],1.0)
+                if not w: raise OSError(0,'SERIAL_WRITE_TIMEOUT')
+                n=os.write(self.fd,view); view=view[n:]
+    def _tx_loop(self):
+        last_beat=0.0; last_status=0.0; last_time=-1e9
+        while not self.stop_event.is_set():
+            now=time.monotonic()
+            if self.fd is None:
+                try: self.fd=open_port(self.device,self.baud); self.port_error=None
+                except OSError as e: self.port_error=f'ERRNO_{e.errno}' if e.errno else str(e) or 'OPEN_FAILED'; self.stop_event.wait(2); continue
+            if self.link_up and self.last_rx is not None and now-self.last_rx>self.link_timeout_s:
+                self.link_up=False; self.link_changes+=1
+            try:
+                if now-last_beat>=self.heartbeat_s:
+                    last_beat=now; self.sender.heartbeat(now-self.started,self.receiver.stats,now)
+                if self.role=='edge' and now-last_time>=self.time_every_s:
+                    last_time=now; self.time_requests+=1
+                    self.sender.urgent(TIME,TIME_REQ.pack(1,time.time_ns()//1000))
+                frames=self.sender.next_frames(now)
+                if frames: self._write(frames)
+            except (OSError,ValueError) as e:
+                self._port_failed(e); continue
+            if now-last_status>=self.status_every_s and self.client.connected:
+                last_status=now
+                self.client.offer('lora:status',self.prefix+'/lora/'+self.role,json.dumps(self.status(),separators=(',',':')).encode(),retain=True)
+            self.stop_event.wait(.02 if frames else .05)
+    def _port_failed(self,e):
+        fd,self.fd=self.fd,None
+        self.port_error=f'ERRNO_{e.errno}' if getattr(e,'errno',None) else (str(e) or type(e).__name__)
+        if fd is not None:
+            try: os.close(fd)
+            except OSError: pass
+        self.stop_event.wait(1)
+    def status(self):
+        now=time.monotonic(); peer=self.receiver.peer
+        return {'v':1,'role':self.role,'t':now_ms(),'link':'UP' if self.link_up else 'DOWN',
+                'last_rx_ms':None if self.last_rx is None else round((now-self.last_rx)*1000),
+                'port':'OPEN' if self.fd is not None else 'ERROR','port_error':self.port_error,
+                'mqtt':'CONNECTED' if self.client.connected else 'DISCONNECTED',
+                'rx':dict(self.receiver.stats),'tx':dict(self.sender.stats),'queue':self.sender.depth(),
+                'peer':None if not peer else {k:v for k,v in peer.items() if k!='at'},
+                'mqtt_dropped':self.mqtt_dropped,'ignored':self.ignored,'link_changes':self.link_changes,
+                'time':self._time_view() if self.role=='edge' else None}
+    def start(self):
+        self.client.start()
+        for fn,name in ((self._rx_loop,'lora-rx'),(self._tx_loop,'lora-tx')):
+            t=threading.Thread(target=fn,name=name,daemon=True); t.start(); self.threads.append(t)
+    def stop(self):
+        self.stop_event.set()
+        for t in self.threads: t.join(3)
+        self.client.stop()
+        if self.chrony: self.chrony.close()
+        if self.fd is not None:
+            try: os.close(self.fd)
+            except OSError: pass
+            self.fd=None

@@ -23,6 +23,18 @@ Contract `1.6` (additive): `telemetry/health` can carry optional compass and GPS
   and the track. A bad nav field is counted as a reject and never costs the health message.
 - `rdf-edge.service` gains `SupplementaryGroups=dialout`; `deploy/examples/nav/99-rdf-nav.rules` sets
   stable symlinks and keeps ModemManager off the sensor ports.
+- LoRa serial bridge (RLS1, `run.py lora-bridge --role edge|ground`, docs/LORA_SERIAL.md): carries the
+  MQTT topics over a transparent LoRa UART without PPP or TCP/IP. Each side talks to its local broker;
+  Ground gets byte-identical payloads and retain flags, commands go the other way. Frames are COBS +
+  CRC-16, zlib with a shared dictionary, at most 200 B, released one by one under a 1000 B/s budget with
+  a 400 B burst (the module buffer is ~1 KB without flow control). Per-topic priority and maximum age
+  keep data inside Ground's freshness windows; commands and ACKs go twice, retained topics are resent
+  when the link returns. Heartbeats carry link counters and wall clock; status is published retained on
+  `sdr/v2/<node>/lora/edge|ground`. Example units in `deploy/examples/lora/`.
+- Clock sync without IP: the edge bridge exchanges NTP-style TIME frames with the ground bridge and feeds
+  the best sample to chrony (`--chrony-sock`, `refclock SOCK`); the GPS reader can feed RMC time of a
+  valid fix to chrony too (`nav.gps.chrony_sock`). `run.py lora-test` measures LoRa throughput, loss and
+  latency with RLS1 TEST frames (rx, tx sweep, echo).
 
 ## 1.5.0 - Unreleased
 

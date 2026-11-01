@@ -155,6 +155,9 @@ def validate_nav_config(n: dict, link_port: str | None = None) -> None:
     finite(offset, -360, 360)
     if type(n['gps']['publish_position']) is not bool:
         raise ValueError('BOOLEAN_REQUIRED')
+    sock = n['gps']['chrony_sock']
+    if sock is not None and (not isinstance(sock, str) or not Path(sock).is_absolute()):
+        raise ValueError('ABSOLUTE_PATH_REQUIRED')
     # The T900 link port belongs to pppd; two sensors cannot share one port.
     devices = [n[name]['device'] for name in ('compass', 'gps') if n[name]['enabled']]
     if len(set(devices)) != len(devices) or (link_port and link_port in devices):
