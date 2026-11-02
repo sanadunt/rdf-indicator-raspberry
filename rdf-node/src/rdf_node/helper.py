@@ -17,7 +17,7 @@ import threading
 import time
 import yaml
 from .util import atomic_write, compact, digest, strict_json, finite, integer, read_boot_id
-from .source import FIELD_MAP
+from .source import FIELD_MAP, STRING_FIELDS
 
 DEFAULT_POLICY={
     'allowed_user':'rdf-edge', 'socket':'/run/rdf-node-control/control.sock',
@@ -46,7 +46,11 @@ def validate_changes(changes,policy):
             val=finite(val,-10,100)
             if not any(abs(val-g)<0.001 for g in policy['gain_values_db']): raise HelperError('GAIN_NOT_IN_APPROVED_TABLE')
             out[key]=val
-        elif key=='vfo0_squelch_db': out[key]=finite(val,-200,50)
+        # rdfsdr reads the squelch with int(): write whole dB so the file says what it runs.
+        elif key=='vfo0_squelch_db': out[key]=int(round(finite(val,-200,50)))
+        elif key in STRING_FIELDS:
+            if not isinstance(val,str) or val not in STRING_FIELDS[key]: raise HelperError('SQUELCH_MODE_INVALID')
+            out[key]=val
         elif key=='ant_spacing_m': out[key]=round(finite(val,0.05,1.0),4)
     return out
 

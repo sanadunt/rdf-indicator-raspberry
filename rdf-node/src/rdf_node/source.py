@@ -17,7 +17,21 @@ FIELD_MAP = {
     # UCA radius (adjacent-element spacing for ULA), metres. The engine's own band rule sets 0.3 m in
     # VHF and 0.128 m in UHF on every retune and at start; outside those bands it keeps this value.
     'ant_spacing_m': ('ant_spacing_meters', 1),
+    # rdfsdr computes DoA only while the VFO's peak exceeds its squelch. Manual uses vfo0_squelch_db; Auto is the
+    # mean of the whole spectrum + 5 dB, Auto Channel the mean around the VFO + 3 dB; Default follows
+    # vfo_default_squelch_mode.
+    'vfo0_squelch_mode': ('vfo_squelch_mode_0', 1),
 }
+# Fields carried as text, with the values the engine knows.
+SQUELCH_MODES = ('Manual', 'Auto', 'Auto Channel', 'Default')
+STRING_FIELDS = {'vfo0_squelch_mode': SQUELCH_MODES}
+
+def squelch_is_auto(safe:dict) -> bool:
+    """True when rdfsdr sets VFO0's squelch itself (its own rule, Default resolved). Missing keys take rdfsdr's
+    defaults: vfo_squelch_mode_0 'Default', vfo_default_squelch_mode 'Auto'."""
+    mode=safe.get('vfo0_squelch_mode','Default')
+    if mode=='Default': mode=safe.get('vfo_default_squelch_mode','Auto')
+    return mode in ('Auto','Auto Channel')
 
 def safe_settings(data:dict, invalid:list|None=None) -> dict:
     """Safe subset of native settings. A field that does not parse is left out (and named in
@@ -26,13 +40,18 @@ def safe_settings(data:dict, invalid:list|None=None) -> dict:
         raise ValueError('SETTINGS_OBJECT_REQUIRED')
     result={}
     for name,(key,scale) in FIELD_MAP.items():
+        if name in STRING_FIELDS:
+            if key in data:
+                if data[key] in STRING_FIELDS[name]: result[name]=data[key]
+                elif invalid is not None: invalid.append(name)
+            continue
         if key in data:
             try: n=finite(data[key],-1e6,5e9)*scale
             except (ValueError,TypeError,OverflowError):
                 if invalid is not None: invalid.append(name)
                 continue
             result[name]=int(round(n)) if name.endswith('_hz') else n
-    for key in ('ant_arrangement','doa_method','active_vfos','output_vfo','en_doa'):
+    for key in ('ant_arrangement','doa_method','active_vfos','output_vfo','en_doa','vfo_default_squelch_mode'):
         val=data.get(key)
         if isinstance(val,(str,int,bool)) and len(str(val))<64:
             result[key]=val

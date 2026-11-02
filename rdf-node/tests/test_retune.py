@@ -15,7 +15,7 @@ class FakeEngine:
         self.start_healthy=start_healthy; self.digest=1; self.status_ts=now_ms()
         self.safe={'center_frequency_hz':105900000,'vfo0_frequency_hz':105900000,'gain_db':12.5,
                    'vfo0_bandwidth_hz':12500,'vfo0_squelch_db':-100.0,'ant_spacing_m':0.3,
-                   'ant_arrangement':'UCA'}
+                   'ant_arrangement':'UCA','vfo0_squelch_mode':'Manual','vfo_default_squelch_mode':'Auto'}
         self.calls=[]; self.writes_while_running=0; self.revision=1
     # ---- what CommandManager reads ----
     @property
@@ -44,6 +44,12 @@ class FakeEngine:
                 self.writes_while_running+=1
                 if self.live=='override_gain': threading.Timer(.3,self._override,args=('gain_db',25.4)).start()
                 elif self.live=='crash': threading.Timer(.3,self._crash).start()
+                elif self.live=='manual_int_save' and 'center_frequency_hz' in r['changes']:
+                    # rdfsdr's retune saves the Manual level it runs: int() of the file's value.
+                    threading.Timer(.3,self._override,args=('vfo0_squelch_db',int(self.safe['vfo0_squelch_db']))).start()
+                elif self.live=='auto_squelch_save' and 'center_frequency_hz' in r['changes']:
+                    # rdfsdr's retune saves the computed auto squelch level back into settings.json.
+                    threading.Timer(.3,self._override,args=('vfo0_squelch_db',-93.27)).start()
                 elif self.live=='band_spacing' and 'center_frequency_hz' in r['changes']:
                     # rdfsdr's retune: band radius 0.3 m in VHF, saved back into settings.json.
                     threading.Timer(.3,self._override,args=('ant_spacing_m',0.3)).start()
@@ -154,6 +160,36 @@ class RetuneTests(unittest.TestCase):
         e=FakeEngine();e.safe['ant_arrangement']='ULA'
         stage,result,_,_=self.run_patch(e,{'ant_spacing_m':0.2})
         self.assertEqual((stage,result['method']),('APPLIED','LIVE'));self.assertEqual(e.safe['ant_spacing_m'],0.2)
+    def test_squelch_level_is_whole_db_and_applies_live(self):
+        e=FakeEngine()
+        stage,result,_,_=self.run_patch(e,{'vfo0_squelch_db':-70.4})
+        self.assertEqual((stage,result['method']),('APPLIED','LIVE'));self.assertEqual(e.safe['vfo0_squelch_db'],-70)
+        self.assertNotIn('squelch_mode',result)
+    def test_squelch_level_switches_an_automatic_squelch_to_manual(self):
+        e=FakeEngine();e.safe['vfo0_squelch_mode']='Auto Channel'
+        stage,result,_,_=self.run_patch(e,{'vfo0_squelch_db':-70})
+        self.assertEqual((stage,result['squelch_mode']),('APPLIED','Manual'))
+        self.assertEqual((e.safe['vfo0_squelch_mode'],e.safe['vfo0_squelch_db']),('Manual',-70))
+    def test_auto_squelch_mode_applies_live_and_engine_level_is_not_an_override(self):
+        e=FakeEngine(live='auto_squelch_save')
+        stage,result,_,_=self.run_patch(e,{'vfo0_squelch_mode':'Auto Channel'})
+        self.assertEqual((stage,result['method']),('APPLIED','LIVE'))
+        stage,result,_,_=self.run_patch(e,{'center_frequency_hz':103100000,'vfo0_frequency_hz':103100000})
+        self.assertEqual((stage,result['method']),('APPLIED','LIVE'));self.assertEqual(self.lifecycle(e),[])
+        self.assertEqual(e.safe['vfo0_squelch_db'],-93.27)
+    def test_leaving_auto_writes_the_level_the_engine_runs_so_a_retune_stays_live(self):
+        e=FakeEngine(live='manual_int_save');e.safe.update(vfo0_squelch_mode='Auto',vfo0_squelch_db=-93.27)
+        stage,result,_,_=self.run_patch(e,{'vfo0_squelch_mode':'Manual'})
+        self.assertEqual((stage,e.safe['vfo0_squelch_db']),('APPLIED',-93))
+        stage,result,_,_=self.run_patch(e,{'center_frequency_hz':103100000,'vfo0_frequency_hz':103100000})
+        self.assertEqual((stage,result['method']),('APPLIED','LIVE'));self.assertEqual(self.lifecycle(e),[])
+    def test_missing_mode_keys_mean_default_auto_like_the_engine(self):
+        e=FakeEngine();del e.safe['vfo0_squelch_mode'];del e.safe['vfo_default_squelch_mode']
+        stage,result,_,_=self.run_patch(e,{'vfo0_squelch_db':-50})
+        self.assertEqual((stage,result['squelch_mode']),('APPLIED','Manual'))
+    def test_unknown_squelch_mode_is_refused(self):
+        stage,result,_,_=self.run_patch(FakeEngine(),{'vfo0_squelch_mode':'Loud'})
+        self.assertEqual((stage,result['error']),('FAILED','SQUELCH_MODE_INVALID'))
     def test_stopped_engine_only_gets_the_file(self):
         e=FakeEngine(running=False)
         stage,result,_,_=self.run_patch(e,{'gain_db':7.7})
@@ -184,6 +220,14 @@ class RfStatePayloadTests(unittest.TestCase):
         self.assertEqual(set(state['rf']),{'f','vfo','g','bw','sq'}&set(state['rf']))
         self.assertEqual(state['rf']['f'],a.source.safe['center_frequency_hz'])
         self.assertEqual(contract.errors(state,contract.schema_for('state')),[])
+    def test_state_carries_squelch_mode_and_hides_the_level_when_automatic(self):
+        import validate as contract
+        a=self.a
+        a.source.safe={**a.source.safe,'vfo0_squelch_mode':'Manual','vfo0_squelch_db':-80.0}
+        rf=a._state(a.snapshot())['rf'];self.assertEqual((rf['sqm'],rf['sq']),('Manual',-80.0))
+        a.source.safe={**a.source.safe,'vfo0_squelch_mode':'Default','vfo_default_squelch_mode':'Auto'}
+        state=a._state(a.snapshot());self.assertEqual(state['rf']['sqm'],'Default');self.assertNotIn('sq',state['rf'])
+        self.assertEqual(contract.errors(state,contract.schema_for('state')),[])
     def test_detail_carries_adc_overdrive(self):
         import json,validate as contract
         from rdf_node.mqtt import Client
@@ -203,6 +247,17 @@ class SpacingFieldTests(unittest.TestCase):
         self.assertEqual(validate_changes({'ant_spacing_m':0.3},DEFAULT_POLICY),{'ant_spacing_m':0.3})
         for bad in (0.01,1.5,float('nan'),True,None):
             with self.assertRaises((HelperError,ValueError,TypeError)): validate_changes({'ant_spacing_m':bad},DEFAULT_POLICY)
+    def test_helper_squelch_fields(self):
+        from rdf_node.helper import validate_changes,HelperError,DEFAULT_POLICY
+        self.assertEqual(validate_changes({'vfo0_squelch_db':-70.6,'vfo0_squelch_mode':'Auto Channel'},DEFAULT_POLICY),
+                         {'vfo0_squelch_db':-71,'vfo0_squelch_mode':'Auto Channel'})
+        for bad in ('auto',3,None):
+            with self.assertRaises((HelperError,ValueError,TypeError)): validate_changes({'vfo0_squelch_mode':bad},DEFAULT_POLICY)
+    def test_safe_settings_reads_squelch_mode_and_drops_unknown(self):
+        from rdf_node.source import safe_settings
+        bad=[]
+        self.assertEqual(safe_settings({'vfo_squelch_mode_0':'Manual','vfo_default_squelch_mode':'Auto'})['vfo0_squelch_mode'],'Manual')
+        self.assertNotIn('vfo0_squelch_mode',safe_settings({'vfo_squelch_mode_0':'Weird'},bad));self.assertEqual(bad,['vfo0_squelch_mode'])
     def test_safe_settings_and_capabilities_list_it(self):
         from rdf_node.source import safe_settings,FIELD_MAP
         self.assertEqual(safe_settings({'ant_spacing_meters':0.128})['ant_spacing_m'],0.128)

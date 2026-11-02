@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.9.0 - Unreleased
+
+Contract `1.9` (additive).
+
+- config.patch accepts `vfo0_squelch_mode` (`Manual`, `Auto`, `Auto Channel`, `Default`) for `vfo_squelch_mode_0`.
+  rdfsdr computes DoA only while the VFO's peak is above its squelch: Manual uses `vfo0_squelch_db`, Auto the
+  mean of the whole spectrum + 5 dB, Auto Channel the mean around the VFO + 3 dB (an automatic squelch just
+  under any signal above the noise), Default follows `vfo_default_squelch_mode`. Applied live (no retune).
+- `vfo0_squelch_db` is written in whole dB (rdfsdr reads it with `int()`). Setting a level while the squelch is
+  automatic also switches it to Manual (result `squelch_mode: Manual`).
+- With an automatic squelch the engine saves its computed level into settings.json on a retune; that is no
+  longer taken for an override (no needless restart), and `state.rf` then leaves `sq` out. In Manual a
+  fractional level left in the file (from Auto or an older Edge) is rewritten as the whole dB the engine runs
+  (`int()`), so a later retune is not mistaken for an override. Missing mode keys mean what rdfsdr reads:
+  `Default` -> `Auto`. The built-in Ground page asks for the squelch in whole dB, so its settings form matches
+  what Edge writes.
+- `state.rf.sqm`: the squelch mode. `capabilities.config_fields` lists `vfo0_squelch_mode`.
+
 ## 1.8.0 - Unreleased
 
 Contract `1.8` (additive).

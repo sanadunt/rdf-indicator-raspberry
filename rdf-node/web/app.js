@@ -319,7 +319,7 @@ const OP_LABELS={'config.get':'Baca config','config.patch':'Ubah config RF','pro
 const ORIGINS={local:{letter:'L',name:'Lokal',upper:'LOKAL'},ground:{letter:'G',name:'Ground',upper:'GROUND'},backup:{letter:'C',name:'Cadangan',upper:'CADANGAN'}};
 const PROFILE_NAMES={control:'CONTROL',balanced:'BALANCED',graph_u8:'GRAPH'};
 // [label, divisor, decimals, unit]; the order is the display order.
-const CONFIG_FIELDS={vfo0_frequency_hz:['Frekuensi VFO',1e6,3,'MHz'],center_frequency_hz:['Frekuensi center',1e6,3,'MHz'],vfo0_bandwidth_hz:['Bandwidth VFO',1e3,1,'kHz'],gain_db:['Gain',1,1,'dB'],vfo0_squelch_db:['Squelch VFO',1,1,'dB'],ant_spacing_m:['Jarak UCA',1,3,'m']};
+const CONFIG_FIELDS={vfo0_frequency_hz:['Frekuensi VFO',1e6,3,'MHz'],center_frequency_hz:['Frekuensi center',1e6,3,'MHz'],vfo0_bandwidth_hz:['Bandwidth VFO',1e3,1,'kHz'],gain_db:['Gain',1,1,'dB'],vfo0_squelch_db:['Squelch VFO',1,1,'dB'],ant_spacing_m:['Jarak UCA',1,3,'m'],vfo0_squelch_mode:['Mode squelch VFO',1,null,'']};
 // Short Indonesian hints; the raw code stays available (title / Riwayat) for troubleshooting.
 const REASONS={
  PPP_RECOVERY_TIMEOUT:'PPP/Ground belum pulih',PPP_CYCLE_NOT_OBSERVED:'PPP tidak terlihat restart',
@@ -337,6 +337,7 @@ const REASONS={
  HELPER_UNAVAILABLE:'helper kontrol tidak berjalan; tidak dijalankan',HELPER_ACCESS_DENIED:'tidak ada izin ke socket helper',
  HELPER_TIMEOUT:'helper tidak menjawab (timeout)',HELPER_CONNECTION_LOST:'koneksi helper terputus',HELPER_INTERNAL_ERROR:'error di helper kontrol',
  INTERNAL_ERROR:'error internal Edge',INVALID_COMMAND_FIELD:'field perintah tidak valid',JOURNAL_UNAVAILABLE:'journal perintah tidak bisa ditulis',
+ SQUELCH_MODE_INVALID:'mode squelch tidak dikenal',
  SPACING_SET_BY_ENGINE_BAND:'jarak UCA di band ini diatur KrakenSDR (VHF 0,3 m, UHF 0,128 m)',
  COMMAND_TOO_LARGE:'perintah terlalu besar (>4 KB)',COMMAND_NOT_JSON:'perintah bukan JSON',COMMAND_QUEUE_FULL:'antrean perintah penuh'
 };

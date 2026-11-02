@@ -63,7 +63,7 @@
     },
     "rf": {
       "type": "object",
-      "description": "Setelan SDR dari settings.json (revisi `cfg`), bukan bukti runtime: `f` frekuensi tengah Hz, `vfo` frekuensi VFO0 Hz, `g` gain dB, `bw` bandwidth VFO0 Hz, `sq` squelch VFO0 dB, `uca` jarak antena (radius UCA) meter sejak kontrak 1.8. Sejak kontrak 1.7; field boleh tidak ada.",
+      "description": "Setelan SDR dari settings.json (revisi `cfg`), bukan bukti runtime: `f` frekuensi tengah Hz, `vfo` frekuensi VFO0 Hz, `g` gain dB, `bw` bandwidth VFO0 Hz, `sq` squelch VFO0 dB, `uca` jarak antena (radius UCA) meter sejak kontrak 1.8, `sqm` mode squelch VFO0 (Manual/Auto/Auto Channel/Default) sejak kontrak 1.9; `sq` tidak dikirim saat squelch otomatis. Sejak kontrak 1.7; field boleh tidak ada.",
       "properties": {
         "f": {
           "type": "integer",
@@ -86,6 +86,9 @@
         "uca": {
           "type": "number",
           "minimum": 0
+        },
+        "sqm": {
+          "type": "string"
         }
       },
       "additionalProperties": true

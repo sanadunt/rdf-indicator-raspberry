@@ -12,7 +12,7 @@ from . import __version__, CONTRACT
 from .util import now_ms, compact, strict_json, read_boot_id, atomic_write, stable_read
 from .config import PROFILES
 from .journal import Journal
-from .source import Source, FIELD_MAP
+from .source import Source, FIELD_MAP, squelch_is_auto
 from .monitor import Monitor
 from .nav import Nav
 from .control import CommandManager, OPS, READ_OPS
@@ -751,7 +751,7 @@ class Agent:
             return bool(self.backup_client and (active['tls'] or active['settings_report_plaintext']))
         return True
     RF_KEYS=(('f','center_frequency_hz'),('vfo','vfo0_frequency_hz'),('g','gain_db'),('bw','vfo0_bandwidth_hz'),
-             ('sq','vfo0_squelch_db'),('uca','ant_spacing_m'))
+             ('sq','vfo0_squelch_db'),('uca','ant_spacing_m'),('sqm','vfo0_squelch_mode'))
     def _state(self,s):
         state={'v':2,'sid':self.sid,'contract':CONTRACT,'boot':self.boot,'instance':self.instance,'t':now_ms(),
                'run':s.get('processing',{}).get('observed','UNKNOWN'),'daq':s.get('daq',{}).get('healthy',False),
@@ -759,7 +759,10 @@ class Agent:
         # What the SDR is set to (settings.json, revision cfg). Ground needs it without Data Out; it is the
         # setting, not proof of what the radio runs (that is DoA `f` and config.patch APPLIED).
         safe=self.source.safe or {}
-        rf={short:safe[key] for short,key in self.RF_KEYS if isinstance(safe.get(key),(int,float)) and not isinstance(safe.get(key),bool)}
+        rf={short:safe[key] for short,key in self.RF_KEYS
+            if (isinstance(safe.get(key),(int,float)) and not isinstance(safe.get(key),bool)) or (short=='sqm' and isinstance(safe.get(key),str))}
+        # With an automatic squelch the file's level is not what decides detection: leave it out.
+        if squelch_is_auto(safe): rf.pop('sq',None)
         if rf: state['rf']=rf
         return state
     def _publish_failed(self,topic,error):

@@ -8,6 +8,7 @@ from .util import digest, now_ms, finite, integer, compact
 from .journal import TERMINAL
 from .helper import call_helper,HelperUnavailable
 from .config import PROFILES
+from .source import SQUELCH_MODES, squelch_is_auto
 
 OPS={
     'config.get':'cmd/config/get', 'config.patch':'cmd/config/patch',
@@ -46,6 +47,7 @@ ERROR_MESSAGES={
     'CENTER_CHANGE_REQUIRES_VFO0_TARGET':'Frekuensi center harus dikirim bersama frekuensi VFO0.',
     'MVP_CENTER_MUST_EQUAL_VFO0':'Frekuensi center dan VFO0 harus sama.',
     'INTEGER_OUT_OF_RANGE':'Nilai bilangan bulat di luar rentang yang diizinkan.',
+    'SQUELCH_MODE_INVALID':'Mode squelch harus Manual, Auto, Auto Channel, atau Default.',
     'JOURNAL_UNAVAILABLE':'Journal perintah di Edge tidak bisa ditulis; perintah tidak dijalankan.',
     'COMMAND_TOO_LARGE':'Perintah lebih besar dari 4.096 byte dan tidak diproses.',
     'COMMAND_NOT_JSON':'Isi perintah bukan JSON yang sah, jadi tidak bisa dijawab per ID.',
@@ -265,15 +267,19 @@ class CommandManager:
                     if op=='processing.set' and request.get('desired') not in ('RUNNING','STOPPED'): raise ValueError('INVALID_DESIRED_STATE')
                     if op=='config.patch':
                         from .helper import FIELD_MAP
+                        from .source import STRING_FIELDS
                         changes=request.get('changes')
                         if not isinstance(changes,dict) or not changes or set(changes)-set(FIELD_MAP): raise ValueError('INVALID_PATCH')
-                        for v in changes.values(): finite(v,-200,5e9)
+                        for k,v in changes.items():
+                            if k not in STRING_FIELDS: finite(v,-200,5e9)
                 if op=='processing.set' and request.get('desired') not in ('RUNNING','STOPPED'): raise ValueError('INVALID_DESIRED_STATE')
                 if op=='config.patch':
                     from .helper import FIELD_MAP
+                    from .source import STRING_FIELDS
                     changes=request.get('changes')
                     if not isinstance(changes,dict) or not changes or set(changes)-set(FIELD_MAP): raise ValueError('INVALID_PATCH')
-                    for v in changes.values(): finite(v,-200,5e9)
+                    for k,v in changes.items():
+                        if k not in STRING_FIELDS: finite(v,-200,5e9)
             if op in HELPER_OPS: self._require_helper()
             meta=self._before(op,request)
             if op=='ppp.restart':
@@ -424,7 +430,8 @@ class CommandManager:
             return 'OUTCOME_UNKNOWN',{'method':'RESTART','reason':reason,'persisted':True,
                                       'error':'DAQ_NOT_HEALTHY_AFTER_RESTART','revision':a.source.revision}
         self.stop_event.wait(1.0)
-        moved=sorted(k for k,v in intended.items() if a.source.safe.get(k)!=v)
+        moved=sorted(k for k,v in intended.items() if a.source.safe.get(k)!=v
+                     and not (k=='vfo0_squelch_db' and squelch_is_auto(a.source.safe)))
         if moved:
             return 'PERSISTED_UNVERIFIED',{'method':'RESTART','reason':reason,'persisted':True,'revision':a.source.revision,
                                            'error':'ENGINE_OVERRODE_AT_START','fields':moved}
@@ -449,6 +456,8 @@ class CommandManager:
             if 'center_frequency_hz' in changes and changes['center_frequency_hz']!=changes.get('vfo0_frequency_hz'):
                 raise ValueError('MVP_CENTER_MUST_EQUAL_VFO0' if 'vfo0_frequency_hz' in changes else 'CENTER_CHANGE_REQUIRES_VFO0_TARGET')
             if 'ant_spacing_m' in changes: changes['ant_spacing_m']=round(finite(changes['ant_spacing_m'],0.05,1.0),4)
+            if 'vfo0_squelch_db' in changes: changes['vfo0_squelch_db']=int(round(finite(changes['vfo0_squelch_db'],-200,50)))
+            if 'vfo0_squelch_mode' in changes and changes['vfo0_squelch_mode'] not in SQUELCH_MODES: raise ValueError('SQUELCH_MODE_INVALID')
         except (ValueError,TypeError) as e:
             code=str(e) if str(e) in ERROR_MESSAGES else 'INVALID_COMMAND_FIELD'
             return 'FAILED',{**error_result(code),'persisted':False}
@@ -464,8 +473,19 @@ class CommandManager:
                 # Any write makes the engine reload the file's spacing live: write the band radius too, so
                 # settings.json (and state.rf.uca) says what the engine runs and an old radius never returns.
                 changes['ant_spacing_m']=band; added=True
+        # A squelch level only counts in Manual: setting one switches an automatic squelch to Manual.
+        manual=False
+        if 'vfo0_squelch_db' in changes and 'vfo0_squelch_mode' not in changes and squelch_is_auto(before):
+            changes['vfo0_squelch_mode']='Manual'; manual=True
+        # A Manual squelch runs int(level): a fractional level left in the file (an automatic squelch's saved
+        # level, or an older Edge) is written as the engine runs it, so a later retune does not look like an override.
+        level=before.get('vfo0_squelch_db')
+        if ('vfo0_squelch_db' not in changes and not squelch_is_auto({**before,**changes})
+                and isinstance(level,float) and level!=int(level)):
+            changes['vfo0_squelch_db']=int(level)
         stage,result=self._config_patch_apply(r,actor,progress,changes,before,running)
         if added: result['band_spacing_m']=band
+        if manual: result['squelch_mode']='Manual'
         return stage,result
     def _config_patch_apply(self,r,actor,progress,changes,before,running):
         a=self.agent; c=self.cfg['control']
@@ -488,16 +508,20 @@ class CommandManager:
         # Values that must survive the retune: everything we did not change (gain above all). Not the
         # antenna spacing: the engine sets its band value (0.3 m VHF, 0.128 m UHF) on a retune by design;
         # it is checked only when the patch asks for a spacing.
+        # An automatic squelch is the engine's to change (it saves its computed level on a retune).
+        auto_sq=squelch_is_auto({**before,**changes})
         keep={k:v for k,v in before.items() if k in ('center_frequency_hz','gain_db','vfo0_frequency_hz',
-                                                      'vfo0_bandwidth_hz','vfo0_squelch_db') and k not in changes}
+                                                      'vfo0_bandwidth_hz','vfo0_squelch_db','vfo0_squelch_mode')
+              and k not in changes and not (auto_sq and k=='vfo0_squelch_db')}
+        expect={k:v for k,v in changes.items() if not (auto_sq and k=='vfo0_squelch_db')}
         deadline=time.monotonic()+c['retune_live_window_seconds']; healthy_since=None; why='DAQ_NOT_HEALTHY_AFTER_RETUNE'
         while time.monotonic()<deadline and not self.stop_event.is_set():
             safe=a.source.safe
             if a.source.raw_digest!=old_digest:
                 # Our write is visible; any field now off its intended value was rewritten by the engine.
-                overrode=sorted(k for k,v in {**keep,**changes}.items() if safe.get(k)!=v)
+                overrode=sorted(k for k,v in {**keep,**expect}.items() if safe.get(k)!=v)
                 if overrode: why='ENGINE_OVERRODE:'+','.join(overrode); break
-            if all(safe.get(k)==v for k,v in changes.items()) and self._daq_healthy_since(started):
+            if all(safe.get(k)==v for k,v in expect.items()) and self._daq_healthy_since(started):
                 healthy_since=healthy_since or time.monotonic()
                 # Healthy for a few seconds in a row, not just the status written before the retune settled.
                 if time.monotonic()-healthy_since>=c['retune_settle_seconds']:
