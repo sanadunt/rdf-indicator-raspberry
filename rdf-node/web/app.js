@@ -105,7 +105,7 @@ const mqttTopics=[
   ['cmd/config/patch','QoS 1','Safe-field patch to the fixed settings target; no per-command root approval, but single-writer and digest checks remain.'],
   ['cmd/processing/set','QoS 1','Start/stop the audited SDR unit; no per-command Ground root approval.'],
   ['cmd/service/restart','QoS 1','Restart the audited SDR unit; no per-command Ground root approval.'],
-  ['cmd/service/ppp/restart','QoS 1','Legacy T900/PPP restart. The T900 is retired; on a LoRa node the helper has no --ppp-restart approval, so it is refused.'],
+  ['cmd/service/ppp/restart','QoS 1','Legacy T900/PPP restart. The T900 is retired and t900-ppp.service is disabled, so a request ends FAILED (PPP_SERVICE_NOT_ACTIVE or PPP_SERVICE_NOT_LOADED).'],
   ['cmd/system/reboot/prepare','QoS 1','Ground prepare needs no root grant; execute retains one-use challenge and operator confirmation.'],
   ['cmd/system/reboot/execute','QoS 1','Execute uses one-use challenge; no Ground root grant or per-action approval.'],
   ['cmd/system/shutdown/prepare','QoS 1','Prepare needs no root approval; Ground UI retains operator confirmation.'],
