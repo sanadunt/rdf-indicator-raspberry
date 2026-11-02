@@ -13,6 +13,9 @@ Contract `1.8` (additive).
   settings.json and `state.rf.uca` say what the engine runs and a settings reload never brings an old radius
   back. Outside those bands (or with a ULA) the spacing is free and applies live. Out of range: `NUMBER_OUT_OF_RANGE`.
   The engine moving the radius to its band value on a retune is not an override.
+- LoRa bridge (Edge side): availability, state and capabilities are also resent every 2 min while the link is
+  up, not only when it comes back. Capabilities is published once at connect and spans ~4 radio frames; one
+  lost frame (~2.5 % Edge->Ground) left Ground with the previous version until the next link drop.
 - `state.rf.uca` (metres) and `capabilities.config_fields` (the fields config.patch accepts), so Ground sends
   `ant_spacing_m` only to an Edge that takes it. The panel labels it "Jarak UCA".
 

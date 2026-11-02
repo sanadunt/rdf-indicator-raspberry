@@ -331,6 +331,18 @@ class BridgeTests(unittest.TestCase):
         # Over the radio the edge gets NTP-style samples; both clocks are this host's, so ~0 offset.
         self.assertTrue(wait(lambda:self.edge.status()['time'],5))
         t=self.edge.status()['time'];self.assertLess(abs(t['offset_ms']),200);self.assertGreater(t['delay_ms'],0)
+    def test_retained_topics_are_refreshed_while_the_link_stays_up(self):
+        # Edge publishes capabilities once; a lost fragment must not lose it until the next link change.
+        from unittest import mock
+        from rdf_node import lora
+        caps=b'{"v":2,"sid":"7a8b9c0d","version":"1.8.0","contract":"1.8"}'
+        self.edge_pub.offer('c','sdr/v2/uav-01/capabilities',caps,qos=1,retain=True)
+        self.assertTrue(wait(lambda:self.published(self.ground_broker,'capabilities'),5),self.edge.status())
+        before=len(self.published(self.ground_broker,'capabilities'))
+        with mock.patch.object(lora,'RETAINED_REFRESH_S',0.5):
+            self.assertTrue(wait(lambda:len(self.published(self.ground_broker,'capabilities'))>before,8),self.edge.status())
+        self.assertEqual(self.ground.status()['link_changes'],1)
+        self.assertEqual(self.published(self.ground_broker,'capabilities')[-1]['payload'],caps)
     def test_retained_command_on_ground_is_not_replayed(self):
         self.ground_pub.offer('c','sdr/v2/uav-01/cmd/stream/set',b'{"old":1}',qos=1,retain=True)
         time.sleep(1)

@@ -77,6 +77,9 @@ POLICY={
 # Commands carry a 15 s deadline (expires_ms); one that cannot leave within 10 s is dropped here.
 for _id in GROUND_TOPICS: POLICY[_id]=(0,10,False,True)
 RETAINED_RESEND=(9,7,8)  # availability, state, capabilities: resent when the link comes back
+# ...and every few minutes: a retained topic Edge publishes once (capabilities at connect) is lost for good
+# when one of its frames is, and a few hundred bytes every 2 min cost nothing on the link.
+RETAINED_REFRESH_S=120.0
 
 # Shared zlib dictionary: the keys and values Edge payloads repeat. Part of the protocol (RLS1).
 ZDICT=(b'"availability","online":true,"contract":"1.6","capabilities","remote_","profile":"balanced",'
@@ -431,7 +434,7 @@ class Bridge:
                 if not w: raise OSError(0,'SERIAL_WRITE_TIMEOUT')
                 n=os.write(self.fd,view); view=view[n:]
     def _tx_loop(self):
-        last_beat=0.0; last_status=0.0; last_time=-1e9
+        last_beat=0.0; last_status=0.0; last_time=-1e9; last_refresh=time.monotonic()
         while not self.stop_event.is_set():
             now=time.monotonic()
             if self.fd is None:
@@ -458,6 +461,9 @@ class Bridge:
                 if frames: self._write(frames)
             except (OSError,ValueError) as e:
                 self._port_failed(e); continue
+            if self.role=='edge' and now-last_refresh>=RETAINED_REFRESH_S:
+                last_refresh=now
+                if self.link_up: self._resend_retained()
             if now-last_status>=self.status_every_s and self.client.connected:
                 last_status=now
                 self.client.offer('lora:status',self.prefix+'/lora/'+self.role,json.dumps(self.status(),separators=(',',':')).encode(),retain=True)
