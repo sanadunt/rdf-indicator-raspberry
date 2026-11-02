@@ -340,3 +340,47 @@ class Nav:
     def start(self): self.compass.start(); self.gps.start()
     def stop(self): self.compass.stop(); self.gps.stop()
     def snapshot(self): return {'compass':self.compass.snapshot(),'gps':self.gps.snapshot()}
+
+def bearing_deg(heading,relative,angle_mode):
+    """Bearing from north (clockwise) of a valid DoA `a` seen with the array reference at `heading`.
+    theta_mirror undoes DOA_value.html's 360 - theta_0, so `a` is theta_0: counter-clockwise from the
+    reference. csv_native keeps the file's value, which already runs clockwise."""
+    turn=-relative if angle_mode=='theta_mirror' else relative
+    return round(heading+turn,1)%360
+
+# Wire codes of the heading sources (telemetry/doa hsrc).
+HEADING_CODES={'compass':'C','gps':'G','hold':'H'}
+HEADING_ORDER={'compass':('compass','gps','hold'),'gps':('gps','hold','compass'),'auto':('gps','compass','hold')}
+
+class Heading:
+    """Picks the array heading a DoA sample turns into a bearing: the compass (already offset to the array
+    reference), or the GPS course while the node moves steadily, held for a while after it slows down."""
+    def __init__(self,cfg):
+        self.cfg=cfg; self.lock=threading.Lock()
+        self.moving_since=None; self.course=None; self.course_mono=None; self.last=None
+    def select(self,nav,now=None):
+        now=time.monotonic() if now is None else now
+        c=nav.get('compass') or {}; g=nav.get('gps') or {}
+        compass=c.get('heading_deg') if c.get('state')=='OK' else None
+        speed=g.get('speed_mps'); course=g.get('course_deg')
+        moving=(g.get('state')=='FIX' and isinstance(speed,(int,float)) and isinstance(course,(int,float))
+                and speed>=self.cfg['gps_min_speed_mps'])
+        with self.lock:
+            if not moving: self.moving_since=None
+            elif self.moving_since is None: self.moving_since=now
+            gps=None
+            # A short burst of speed (or a GPS jump) is not a direction of travel yet.
+            if moving and now-self.moving_since>=self.cfg['gps_min_seconds']:
+                gps=(course+self.cfg['travel_offset_deg'])%360
+                self.course=gps; self.course_mono=now
+            held=(self.course if self.course_mono is not None and now-self.course_mono<=self.cfg['hold_seconds']
+                  else None)
+            values={'compass':compass,'gps':gps,'hold':held}
+            self.last=None
+            for name in HEADING_ORDER[self.cfg['source']]:
+                if values[name] is not None:
+                    self.last={'heading_deg':round(values[name],1)%360,'source':name}
+                    break
+            return self.last
+    def snapshot(self):
+        with self.lock: return dict(self.last) if self.last else None

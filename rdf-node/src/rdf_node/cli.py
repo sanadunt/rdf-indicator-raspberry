@@ -305,6 +305,9 @@ def main():
     s.add_argument('--gap',type=float,default=3.0,help='tx: jeda antar langkah')
     s.add_argument('--expect-echo',action='store_true',help='tx: ukur RTT dari sisi echo')
     s.add_argument('--run',type=int,default=0);s.add_argument('--idle',type=float,default=20.0,help='rx/echo: berhenti setelah diam N detik')
+    s=sub.add_parser('nav-calibrate',help='bandingkan bearing DoA dengan pemancar yang lokasinya diketahui; sarankan offset heading')
+    s.add_argument('--tx-lat',type=float,required=True);s.add_argument('--tx-lon',type=float,required=True)
+    s.add_argument('--seconds',type=float,default=60.0);s.add_argument('--port',type=int,default=8790)
     a=p.parse_args()
     if a.command in ('edge','ground','demo'): serve(a,ground=a.command=='ground',demo=a.command=='demo')
     elif a.command=='demo-source':
@@ -317,6 +320,9 @@ def main():
         from .helper import serve as helper_serve
         helper_serve(a.policy)
     elif a.command=='lora-bridge': lora_bridge(a)
+    elif a.command=='nav-calibrate':
+        from .calibrate import run as calibrate
+        sys.exit(calibrate(a))
     elif a.command=='lora-test':
         from .lora_test import main as lora_test_main
         lora_test_main(a)

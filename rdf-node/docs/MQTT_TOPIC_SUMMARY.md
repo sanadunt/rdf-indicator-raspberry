@@ -288,6 +288,9 @@ lama. Kode alasan dan cara membacanya: [PROTOCOL.md](PROTOCOL.md#kode-alasan-doa
 | `a` | `ok=1`: sudut relatif menurut konfigurasi angle, bukan otomatis true north. `ok=0`: raw source degree; tafsirkan RAW hanya dengan `angle_reference="RAW"`. |
 | `c` | Confidence/PAPR native dB, bukan probabilitas atau persen. |
 | `p` | Power native bertanda, bukan level absolut terkalibrasi. |
+| `h`, `hsrc` | Sejak 1.10, hanya bila kompas/GPS dikonfigurasi: heading referensi array saat kirim (derajat dari utara searah jarum jam, `null` bila tidak ada) dan sumbernya (`C` kompas, `G` course GPS, `H` course GPS yang ditahan). |
+| `b` | Sejak 1.10: bearing ke pemancar dari utara searah jarum jam: (`h` − `a`) mod 360 dengan `capabilities.angle` = `theta_mirror` (`a` = theta_0, berlawanan jarum jam dari referensi array), (`h` + `a`) mod 360 dengan `csv_native`. Hanya pada `ok=1` dengan `h`. |
+| `lat`, `lon` | Sejak 1.10: posisi saat sampel dikirim, 5 desimal; hanya dengan fix GPS dan `nav.gps.publish_position`. |
 | `rev` | Revision konfigurasi aman saat sampel dibaca; `null` bila sampel belum teratribusi ke settings. |
 | `ok` | `1` menandakan DoA lolos semua gate source Edge; `0` menandakan sampel berlabel. |
 | `clk` | `1` jam Edge tersinkron, `0` tidak. `ok=1` dengan `clk=0` hanya terjadi dengan jam uji (`state.clock="TEST"`). |

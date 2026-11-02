@@ -14,7 +14,7 @@ from .config import PROFILES
 from .journal import Journal
 from .source import Source, FIELD_MAP, squelch_is_auto
 from .monitor import Monitor
-from .nav import Nav
+from .nav import Nav, Heading, HEADING_CODES, bearing_deg
 from .control import CommandManager, OPS, READ_OPS
 from .helper import call_helper
 from .mqtt import Client
@@ -25,8 +25,9 @@ UNVERIFIED_REASONS=frozenset(('SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'))
 # makes new DoA samples (valid or labelled); the smaller one once it has gone stale.
 ANGULAR_CONTROL_BASELINE_VALID=800
 ANGULAR_CONTROL_BASELINE_INVALID=510
-# Extra Control cost-byte/s of the nav fields in telemetry/health (compass + GPS fix with position).
-NAV_CONTROL_RESERVE=110
+# Extra Control cost-byte/s of the nav fields in telemetry/health (compass + GPS fix with position)
+# plus the heading, bearing and position stamped on each telemetry/doa sample.
+NAV_CONTROL_RESERVE=170
 # Bulk yields the shared PPP link while a Control PUBACK is this late or this many Bulk bytes are unACKed.
 BULK_YIELD_PENDING_MS=1000
 DIAGNOSTIC_ANGULAR_MIN_GAP_S=6
@@ -42,7 +43,7 @@ class Agent:
         self.cfg=cfg; self.demo=demo; self.boot=read_boot_id(); self.instance=str(uuid.uuid4()); self.sid=uuid.uuid4().hex[:8]
         self.prefix=('sdr/demo/v2/' if demo else 'sdr/v2/')+cfg['node_id']
         self.journal=Journal(Path(cfg['state_dir'])/'state.sqlite3'); self.journal.recover(self.boot)
-        self.source=Source(cfg,self.journal); self.monitor=Monitor(cfg); self.nav=Nav(cfg['nav'],cfg['link']); self.commands=CommandManager(self)
+        self.source=Source(cfg,self.journal); self.monitor=Monitor(cfg); self.nav=Nav(cfg['nav'],cfg['link']); self.heading=Heading(cfg['nav']['heading']); self.commands=CommandManager(self)
         self.nav_enabled=cfg['nav']['compass']['enabled'] or cfg['nav']['gps']['enabled']
         self.profile=self.journal.get('profile',cfg['telemetry']['profile'])
         if self.profile not in PROFILES: self.profile=cfg['telemetry']['profile']
@@ -541,6 +542,8 @@ class Agent:
         except Exception as e:
             # A sensor bug must not freeze the snapshot (and with it health and DoA).
             nav={name:{'state':'ERROR','error':type(e).__name__.upper()[:64]} for name in ('compass','gps')}
+        # The heading the last DoA sample went out with (chosen by the scheduler, not here).
+        nav['array_heading']=self.heading.snapshot() if self.nav_enabled else None
         lora=self._lora_view()
         alerts=[]
         if self.demo: alerts.append({'severity':'warning','code':'DEMO','text':'DEMO - bukan data perangkat'})
@@ -598,7 +601,8 @@ class Agent:
                 'remote_commands':remote,
                 # Sensors this node reads for telemetry/nav; position is sent only when publish_position is on.
                 'nav':{'compass':self.cfg['nav']['compass']['enabled'],'gps':self.cfg['nav']['gps']['enabled'],
-                       'position':self.cfg['nav']['gps']['enabled'] and self.cfg['nav']['gps']['publish_position']},
+                       'position':self.cfg['nav']['gps']['enabled'] and self.cfg['nav']['gps']['publish_position'],
+                       'heading':self.cfg['nav']['heading']['source'] if self.nav_enabled else None},
                 'remote_config_patch':remote and settings_target,
                 # Fields config.patch accepts (since contract 1.8); Ground sends only what is listed.
                 'config_fields':sorted(FIELD_MAP),
@@ -783,7 +787,29 @@ class Agent:
             # every other case carries the list once, in reason (T900 budget).
             if all(reason in UNVERIFIED_REASONS for reason in d['reasons']):
                 payload['validation_reasons']=list(d['reasons'])
+        if self.nav_enabled:
+            # A nav problem only drops the nav fields, never the DoA sample.
+            try: payload.update(self._nav_doa_fields(self.nav.snapshot(),payload['a'] if d['valid'] else None))
+            except Exception as e: self._publish_failed('telemetry/doa:nav',e)
+            else: self._publish_ok('telemetry/doa:nav')
         return payload
+    def _nav_doa_fields(self,nav,relative):
+        # The array heading at send time (h, hsrc) and, for a valid sample, the bearing it makes
+        # (b, clockwise from north); where the sample was taken only with publish_position.
+        sel=self.heading.select(nav)
+        out={'h':sel['heading_deg'] if sel else None,'hsrc':HEADING_CODES[sel['source']] if sel else None}
+        if sel and relative is not None: out['b']=bearing_deg(sel['heading_deg'],relative,self.cfg['source']['angle_mode'])
+        g=nav.get('gps') or {}
+        lat=g.get('lat'); lon=g.get('lon')
+        if (self.cfg['nav']['gps']['enabled'] and self.cfg['nav']['gps']['publish_position'] and g.get('state')=='FIX'
+                and isinstance(lat,(int,float)) and isinstance(lon,(int,float))
+                and math.isfinite(lat) and math.isfinite(lon) and -90<=lat<=90 and -180<=lon<=180):
+            out.update(lat=round(lat,5),lon=round(lon,5))
+        return out
+    def _nav_angular_fields(self):
+        # The heading the latest DoA sample went out with, so Ground can turn every bin into a bearing.
+        sel=self.heading.snapshot() if self.nav_enabled else None
+        return {'heading_deg':sel['heading_deg'],'heading_source':HEADING_CODES[sel['source']]} if sel else {}
     def _nav_health_fields(self,nav):
         # Optional telemetry/health fields, only for configured sensors (health stays byte-identical without).
         # A sensor that is silent or stale sends its state and no number.
@@ -824,7 +850,7 @@ class Agent:
             'timestamp_ms':r['timestamp_ms'],'frequency_hz':r['frequency_hz'],
             'revision':d['revision'],'vfo':self.cfg['source']['output_vfo'],
             'convention':1,'flags':self._angular_flags(d,r,h,daq),'raw_doa_deg':r['raw_doa_deg'],
-            'confidence_native_db':r['confidence_native_db'],'values':r['values']})
+            'confidence_native_db':r['confidence_native_db'],**self._nav_angular_fields(),'values':r['values']})
     def _diagnostic_angular(self,d,r,h,daq):
         self.diagnostic_angular_q+=1
         if self.diagnostic_angular_q>0xffffffff:
@@ -834,7 +860,7 @@ class Agent:
             'revision':d['revision'] if d['config_attributed'] else None,
             'vfo':self.cfg['source']['output_vfo'],'convention':1,'flags':self._angular_flags(d,r,h,daq),
             'raw_doa_deg':r['raw_doa_deg'],'confidence_native_db':r['confidence_native_db'],
-            'values':r['values']})
+            **self._nav_angular_fields(),'values':r['values']})
     def _schedule(self):
         due={}
         while not self.stop_event.is_set():

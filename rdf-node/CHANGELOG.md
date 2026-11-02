@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.10.0 - Unreleased
+
+Contract `1.10` (additive).
+
+- Every `telemetry/doa` sample of a node with a compass or GPS carries the array heading at send time: `h`
+  (where DoA 0° points, degrees clockwise from north, null when there is none) and `hsrc` (`C` compass, `G` GPS
+  course, `H` held GPS course). A valid sample (`ok=1`) also carries `b`, the bearing to the transmitter from
+  north: (`h` - `a`) mod 360 with `theta_mirror` (`a` is theta_0, counter-clockwise from the array reference),
+  (`h` + `a`) mod 360 with `csv_native`, and with `nav.gps.publish_position` the position it was taken at (`lat`, `lon`).
+  Ground no longer has to pair a DoA sample with a heading from a health message up to 2 s older.
+- `nav.heading` picks the source: `compass` (default; GPS course when the compass has nothing), `gps` (course
+  while moving at `gps_min_speed_mps` or faster for `gps_min_seconds`, then held for `hold_seconds`, else the
+  compass) or `auto` (course while moving, else the compass, else the held course). `travel_offset_deg` turns
+  the direction of travel into the array reference, as `nav.compass.offset_deg` does for the compass.
+- `telemetry/angular` and `telemetry/diagnostic/angular` carry `heading_deg` and `heading_source` (the heading of
+  the latest DoA sample): bin theta points at (`heading_deg` + 360 - theta) mod 360.
+- Ground receiver: `detection` adds `bearing_deg`, `array_heading_deg`, `heading_source`, `lat`, `lon`; a bad stamp
+  is dropped (`nav_rejected`) and the sample still counts. `capabilities.nav.heading` names the source; the Edge
+  snapshot shows the last choice in `nav.array_heading`.
+- `run.py nav-calibrate --tx-lat .. --tx-lon ..`: compares the bearing with the true bearing to a transmitter at
+  a known place and suggests the change to `nav.compass.offset_deg` or `nav.heading.travel_offset_deg`.
+  It never writes the configuration.
+
 ## 1.9.0 - Unreleased
 
 Contract `1.9` (additive).

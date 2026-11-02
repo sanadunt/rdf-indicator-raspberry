@@ -157,6 +157,14 @@ def validate_nav_config(n: dict, link_port: str | None = None) -> None:
     finite(offset, -360, 360)
     if type(n['gps']['publish_position']) is not bool:
         raise ValueError('BOOLEAN_REQUIRED')
+    hd = n['heading']
+    if hd['source'] not in ('compass', 'gps', 'auto'):
+        raise ValueError('INVALID_HEADING_SOURCE')
+    for key, lo, hi in (('gps_min_speed_mps', 0.1, 50), ('gps_min_seconds', 0, 60), ('hold_seconds', 0, 600),
+                        ('travel_offset_deg', -360, 360)):
+        if isinstance(hd[key], bool) or type(hd[key]) not in (int, float):
+            raise ValueError('NUMBER_REQUIRED')
+        finite(hd[key], lo, hi)
     sock = n['gps']['chrony_sock']
     if sock is not None and (not isinstance(sock, str) or not Path(sock).is_absolute()):
         raise ValueError('ABSOLUTE_PATH_REQUIRED')

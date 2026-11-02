@@ -2,7 +2,7 @@ import json,os,sys,tempfile,threading,time,unittest
 from pathlib import Path
 from unittest import mock
 from rdf_node import nav
-from rdf_node.nav import parse_gy26,find_gy26_frame,parse_nmea,NmeaState,Compass,Gps,open_serial,SensorFault,is_link_port
+from rdf_node.nav import parse_gy26,find_gy26_frame,parse_nmea,NmeaState,Compass,Gps,open_serial,SensorFault,is_link_port,Heading
 from rdf_node.config import load_config,validate_config
 from rdf_node.ground import Ground
 from rdf_node.util import compact,now_ms
@@ -357,7 +357,121 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(snap['nav']['compass']['state'],'ERROR')
     def test_capabilities_advertise_nav(self):
         a=self.agent(compass={'enabled':True,'device':'/dev/ttyUSB1'},gps={'enabled':True,'device':'/dev/ttyACM0'})
-        self.assertEqual(a.capabilities()['nav'],{'compass':True,'gps':True,'position':False})
+        self.assertEqual(a.capabilities()['nav'],{'compass':True,'gps':True,'position':False,'heading':'compass'})
+    def doa(self,a,nav_snapshot,valid=True):
+        s=a.snapshot();d=dict(s['detection'])
+        if not valid: d.update(valid=False,relative_doa_deg=None,reasons=['DAQ_NOT_HEALTHY'])
+        a.nav.snapshot=lambda:nav_snapshot
+        return a._doa_payload(d,s['host'])
+    def test_doa_unchanged_without_nav(self):
+        payload=self.doa(self.agent(),self.nav_snapshot())
+        self.assertFalse({'h','hsrc','b','lat','lon'}&set(payload))
+    def test_doa_carries_heading_bearing_and_position(self):
+        a=self.agent(compass={'enabled':True,'device':'/dev/ttyUSB1'},gps={'enabled':True,'device':'/dev/ttyACM0','publish_position':True})
+        p=self.doa(a,self.nav_snapshot(heading=350.0))
+        self.assertEqual((p['h'],p['hsrc'],p['lat'],p['lon']),(350.0,'C',-6.20576,106.81))
+        # theta_mirror: a is theta_0, counter-clockwise from the array reference.
+        self.assertEqual(p['b'],round((350.0-p['a'])%360,1))
+        self.assertEqual(contract.errors(json.loads(compact(p)),contract.schema_for('telemetry/doa')),[])
+        self.assertEqual(a.snapshot()['nav']['array_heading'],None)  # the collector shows the scheduler's last choice
+        a._snapshot();self.assertEqual(a.snapshot()['nav']['array_heading'],{'heading_deg':350.0,'source':'compass'})
+    def test_labelled_doa_has_heading_but_no_bearing(self):
+        a=self.agent(compass={'enabled':True,'device':'/dev/ttyUSB1'})
+        p=self.doa(a,self.nav_snapshot(heading=10.0),valid=False)
+        self.assertEqual((p['ok'],p['h'],p['hsrc']),(0,10.0,'C'));self.assertNotIn('b',p);self.assertNotIn('lat',p)
+        self.assertEqual(contract.errors(json.loads(compact(p)),contract.schema_for('telemetry/doa')),[])
+    def test_doa_without_any_heading_says_so(self):
+        a=self.agent(compass={'enabled':True,'device':'/dev/ttyUSB1'})
+        p=self.doa(a,self.nav_snapshot(heading=None,state='NO_FIX'))
+        self.assertEqual((p['h'],p['hsrc']),(None,None));self.assertNotIn('b',p)
+        self.assertEqual(contract.errors(json.loads(compact(p)),contract.schema_for('telemetry/doa')),[])
+    def test_nav_failure_never_costs_the_doa_sample(self):
+        a=self.agent(compass={'enabled':True,'device':'/dev/ttyUSB1'})
+        s=a.snapshot();a.nav.snapshot=mock.Mock(side_effect=RuntimeError('boom'))
+        p=a._doa_payload(s['detection'],s['host'])
+        self.assertEqual(p['ok'],1);self.assertNotIn('h',p)
+        self.assertEqual(a.publish_errors['telemetry/doa:nav'],'RUNTIMEERROR')
+    def test_angular_carries_the_heading_of_the_last_doa(self):
+        a=self.agent(compass={'enabled':True,'device':'/dev/ttyUSB1'})
+        self.doa(a,self.nav_snapshot(heading=45.5))
+        s=a.snapshot();r=a.source.record
+        frame=json.loads(a._live_angular(s['detection'],r,s['host'],s['daq']))
+        self.assertEqual((frame['heading_deg'],frame['heading_source']),(45.5,'C'))
+        self.assertEqual(contract.errors(frame,contract.schema_for('telemetry/angular')),[])
+
+class CalibrateTests(unittest.TestCase):
+    def test_true_bearing_and_offset_suggestion(self):
+        from rdf_node.calibrate import true_bearing,sample,summarize
+        self.assertAlmostEqual(true_bearing(0,0,0,1),90.0,3);self.assertAlmostEqual(true_bearing(0,0,1,0),0.0,3)
+        self.assertAlmostEqual(true_bearing(0,0,0,-1),270.0,3)
+        tx=(0.0,0.01)  # due east of the node
+        def snap(q,heading,relative,source='compass'):
+            return {'capabilities':{'angle':'theta_mirror'},'detection':{'valid':True,'q':q,'relative_doa_deg':relative},
+                    'nav':{'array_heading':{'heading_deg':heading,'source':source},'gps':{'state':'FIX','lat':0.0,'lon':0.0}}}
+        # Compass reads 10° short: every sample comes out 10° left of the truth.
+        xs=[sample(snap(q,350.0+d,270.0+d),*tx)[0] for q,d in enumerate((-4,0,4),1)]
+        self.assertEqual([round(x['measured'],1) for x in xs],[80.0,80.0,80.0])
+        r=summarize(xs);self.assertEqual((r['n'],r['mean_error'],r['spread'],r['sources']),(3,10.0,0.0,{'compass':3}))
+        self.assertAlmostEqual(r['distance_m'],1112,delta=2)
+        self.assertEqual(sample(dict(snap(1,0,0),detection={'valid':False}),*tx),(None,'DOA_NOT_VALID'))
+        self.assertEqual(sample({'detection':{'valid':True,'relative_doa_deg':1},'nav':{}},*tx),(None,'NO_ARRAY_HEADING'))
+        self.assertEqual(sample(dict(snap(1,0,0),capabilities={}),*tx),(None,'ANGLE_CONVENTION_UNKNOWN'))
+        # Errors either side of ±180 average to 180, not 0.
+        self.assertEqual(abs(summarize([{'error':179,'source':'gps','distance_m':1},{'error':-179,'source':'gps','distance_m':1}])['mean_error']),180.0)
+
+class BearingTests(unittest.TestCase):
+    def test_bearing_follows_the_angle_convention(self):
+        from rdf_node.nav import bearing_deg
+        # theta_0 = 90 is a quarter turn counter-clockwise: with the reference north the source is west.
+        self.assertEqual(bearing_deg(0.0,90.0,'theta_mirror'),270.0)
+        self.assertEqual(bearing_deg(84.3,150.0,'theta_mirror'),294.3)
+        # csv_native carries DOA_value.html's 360 - theta_0, which already runs clockwise.
+        self.assertEqual(bearing_deg(0.0,270.0,'csv_native'),270.0)
+        self.assertEqual(bearing_deg(359.96,0.0,'theta_mirror'),0.0)
+
+class HeadingTests(unittest.TestCase):
+    CFG={'source':'compass','gps_min_speed_mps':2.0,'gps_min_seconds':3,'hold_seconds':30,'travel_offset_deg':0.0}
+    def nav(self,compass=None,speed=None,course=None,gps='FIX'):
+        return {'compass':{'state':'OK' if compass is not None else 'NO_REPLY','heading_deg':compass},
+                'gps':{'state':gps,'speed_mps':speed,'course_deg':course}}
+    def heading(self,**over):
+        return Heading(dict(self.CFG,**over))
+    def test_compass_first_gps_course_when_compass_is_silent(self):
+        h=self.heading()
+        self.assertEqual(h.select(self.nav(compass=120.0,speed=10,course=200),now=0),{'heading_deg':120.0,'source':'compass'})
+        # Moving, but not for gps_min_seconds yet: nothing to fall back on.
+        self.assertIsNone(h.select(self.nav(speed=10,course=200),now=1))
+        self.assertEqual(h.select(self.nav(speed=10,course=200),now=3.5),{'heading_deg':200.0,'source':'gps'})
+        # Stopped: the last course is held until hold_seconds have passed.
+        self.assertEqual(h.select(self.nav(speed=0.2,course=None),now=20),{'heading_deg':200.0,'source':'hold'})
+        self.assertIsNone(h.select(self.nav(speed=0.2,course=None),now=34))
+    def test_gps_source_prefers_course_then_hold_then_compass(self):
+        h=self.heading(source='gps')
+        self.assertEqual(h.select(self.nav(compass=10.0,speed=5,course=90),now=0)['source'],'compass')
+        self.assertEqual(h.select(self.nav(compass=10.0,speed=5,course=90),now=4),{'heading_deg':90.0,'source':'gps'})
+        self.assertEqual(h.select(self.nav(compass=10.0,speed=0,course=None),now=10),{'heading_deg':90.0,'source':'hold'})
+        self.assertEqual(h.select(self.nav(compass=10.0,speed=0,course=None),now=40)['source'],'compass')
+    def test_auto_uses_compass_once_stopped(self):
+        h=self.heading(source='auto')
+        h.select(self.nav(compass=10.0,speed=5,course=90),now=0)
+        self.assertEqual(h.select(self.nav(compass=10.0,speed=5,course=90),now=3)['source'],'gps')
+        self.assertEqual(h.select(self.nav(compass=10.0,speed=0,course=None),now=5),{'heading_deg':10.0,'source':'compass'})
+        self.assertEqual(h.select(self.nav(speed=0,course=None),now=6)['source'],'hold')
+    def test_a_break_in_motion_restarts_the_wait(self):
+        h=self.heading(source='gps')
+        h.select(self.nav(speed=5,course=90),now=0);h.select(self.nav(speed=1,course=90),now=2)
+        self.assertIsNone(h.select(self.nav(speed=5,course=90),now=4))
+        self.assertEqual(h.select(self.nav(speed=5,course=90),now=7)['source'],'gps')
+    def test_travel_offset_and_no_fix(self):
+        h=self.heading(source='gps',gps_min_seconds=0,travel_offset_deg=-90)
+        self.assertEqual(h.select(self.nav(speed=5,course=45),now=0)['heading_deg'],315.0)
+        self.assertIsNone(self.heading(source='gps',gps_min_seconds=0).select(self.nav(speed=5,course=45,gps='NO_FIX'),now=0))
+    def test_heading_validation(self):
+        for over in ({'source':'magnet'},{'gps_min_speed_mps':0},{'hold_seconds':-1},{'travel_offset_deg':True},
+                     {'gps_min_seconds':'3'}):
+            c=load_config();c['nav']['heading'].update(over)
+            with self.assertRaises(ValueError,msg=over): validate_config(c)
+        self.assertEqual(load_config()['nav']['heading']['source'],'compass')
 
 class GroundNavTests(unittest.TestCase):
     def setUp(self):
@@ -411,6 +525,25 @@ class GroundNavTests(unittest.TestCase):
         nav=self.g.snapshot()['nav']
         self.assertFalse(nav['fresh']);self.assertIsNone(nav['hdg']);self.assertIsNone(nav['lat'])
         self.assertEqual(nav['hs'],'OK')
+    def doa(self,**extra):
+        body={'v':2,'sid':self.sid,'q':self.q+1,'t':now_ms(),'f':433000000,'a':30.0,'c':5.0,'p':-60.0,'rev':1,
+              'ok':1,'clk':1,'age':100,'reason':[]}
+        body.update(extra);self.g.receive(self.g.prefix+'/telemetry/doa',compact(body))
+        return self.g.snapshot()['detection']
+    def test_doa_bearing_heading_and_position(self):
+        self.health()
+        det=self.doa(h=350.0,hsrc='G',b=20.0,lat=-6.2,lon=106.8)
+        self.assertEqual((det['valid'],det['relative_doa_deg'],det['bearing_deg'],det['array_heading_deg'],
+                          det['heading_source'],det['lat'],det['lon']),(True,30.0,20.0,350.0,'GPS',-6.2,106.8))
+    def test_old_edge_doa_has_no_bearing(self):
+        self.health();det=self.doa()
+        self.assertTrue(det['valid']);self.assertNotIn('bearing_deg',det)
+    def test_bad_doa_stamp_keeps_the_sample(self):
+        self.health();det=self.doa(h=900,b=20.0)
+        self.assertTrue(det['valid']);self.assertEqual(det['relative_doa_deg'],30.0)
+        self.assertTrue(det['nav_rejected']);self.assertNotIn('bearing_deg',det)
+        det=self.doa(q=3,h=10.0,hsrc='X')
+        self.assertTrue(det['nav_rejected'])
     def test_track_api(self):
         from rdf_node.api import Server
         import http.client

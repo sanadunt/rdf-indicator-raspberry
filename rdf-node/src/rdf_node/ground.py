@@ -27,6 +27,24 @@ def _nav_number(j,key,lo,hi,digits):
     v=j.get(key)
     return None if v is None else round(finite(v,lo,hi),digits)
 
+HEADING_SOURCES={'C':'COMPASS','G':'GPS','H':'HOLD'}
+
+def doa_nav(j):
+    # The heading, bearing and position an Edge 1.10+ stamps on a DoA sample. A bad stamp is
+    # dropped as a whole (the sample itself still counts); an older Edge sends none.
+    if 'h' not in j and 'b' not in j: return {}
+    try:
+        out={'array_heading_deg':_nav_number(j,'h',0,360,1),'heading_source':None,
+             'bearing_deg':_nav_number(j,'b',0,360,1),'lat':_nav_number(j,'lat',-90,90,5),
+             'lon':_nav_number(j,'lon',-180,180,5)}
+        if j.get('hsrc') is not None:
+            if j['hsrc'] not in HEADING_SOURCES: raise ValueError('BAD_HEADING_SOURCE')
+            out['heading_source']=HEADING_SOURCES[j['hsrc']]
+        if (out['lat'] is None)!=(out['lon'] is None): raise ValueError('BAD_NAV_POSITION')
+        if out['bearing_deg'] is not None and out['array_heading_deg'] is None: raise ValueError('BAD_BEARING')
+    except (ValueError,TypeError): return {'nav_rejected':True}
+    return out
+
 def nav_distance_m(a,b):
     # Equirectangular approximation; good to well under 1% over the few km a track spans.
     lat=math.radians((a[0]+b[0])/2)
@@ -309,7 +327,10 @@ class Ground:
                     'health_time_ok':self._health_clock_ok(),
                     'detection':{'valid':doa_valid,'relative_doa_deg':self.doa.get('a') if doa_valid else None,
                                  'frequency_hz':self.doa.get('f'),'source_timestamp_ms':self.doa.get('t'),'confidence_native_db':self.doa.get('c'),
-                                 'power_native_db':self.doa.get('p'),'received_age_ms':da},
+                                 'power_native_db':self.doa.get('p'),'received_age_ms':da,
+                                 # Edge 1.10+: north-clockwise bearing = array heading + relative DoA.
+                                 **({key:(value if doa_valid else None) for key,value in doa_nav(self.doa).items()}
+                                    if self.doa else {})},
                     'diagnostic_doa':diagnostic,
                     'nav':self._nav_view(now),
                     'config':self.config_view(),'link':{'mqtt_control':self.client.status(),'rejected':self.rejected,

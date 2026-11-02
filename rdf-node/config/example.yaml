@@ -96,6 +96,19 @@ nav:
     publish_position: false
     # GPS time to chrony (`refclock SOCK <path> refid GPS offset 0.2`), e.g. /run/chrony.gps.sock.
     chrony_sock: null
+  # Array heading stamped on every DoA sample (telemetry/doa h, b): where the array reference
+  # (DoA 0°) points, clockwise from north. compass: the compass (offset_deg turns it into the array
+  # reference), GPS course when the compass has nothing; gps: GPS course while moving, held after a
+  # stop, the compass when neither; auto: GPS course while moving, else the compass, else the held course.
+  heading:
+    source: compass
+    # GPS course counts only at or above this speed, for this long without a break.
+    gps_min_speed_mps: 2.0
+    gps_min_seconds: 3
+    # How long the last GPS course stays usable after the node slows down or stops.
+    hold_seconds: 30
+    # Array reference relative to the direction of travel (0 = DoA 0° points where the vehicle goes).
+    travel_offset_deg: 0.0
 testing:
   # Laptop/macOS testing only. `system` uses the OS clock as the data clock instead of timedatectl;
   # it is labelled TEST (state.clock), clk stays 0, and helper-backed commands stay CLOCK_UNTRUSTED.
