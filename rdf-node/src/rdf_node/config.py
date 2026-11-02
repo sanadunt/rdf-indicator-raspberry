@@ -65,7 +65,9 @@ def validate_config(c: dict) -> None:
                              (c['telemetry'],'control_budget_bytes_s',500,1250),
                              (c['telemetry'],'bulk_budget_bytes_s',200,500),
                              (c['telemetry'],'resume_stable_seconds',0,120),
-                             (c['control'],'verify_seconds',1,60),(c['control'],'start_timeout_seconds',5,600)]:
+                             (c['control'],'verify_seconds',1,60),(c['control'],'start_timeout_seconds',5,600),
+                             (c['control'],'retune_live_max_hz',0,2000000000),(c['control'],'retune_live_window_seconds',3,120),
+                             (c['control'],'retune_settle_seconds',1,60)]:
         finite(obj[key],lo,hi)
     validate_mqtt_host(c['mqtt']['host'])
     if c['mqtt']['transport'] not in ('tcp','websocket'): raise ValueError('INVALID_MQTT_TRANSPORT')

@@ -60,6 +60,31 @@
       "type": "string",
       "pattern": "^[A-Z_]{1,32}$",
       "description": "SYNCED, UNTRUSTED, DEMO, atau TEST."
+    },
+    "rf": {
+      "type": "object",
+      "description": "Setelan SDR dari settings.json (revisi `cfg`), bukan bukti runtime: `f` frekuensi tengah Hz, `vfo` frekuensi VFO0 Hz, `g` gain dB, `bw` bandwidth VFO0 Hz, `sq` squelch VFO0 dB. Sejak kontrak 1.7; field boleh tidak ada.",
+      "properties": {
+        "f": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "vfo": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "g": {
+          "type": "number"
+        },
+        "bw": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sq": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": true
     }
   },
   "required": [

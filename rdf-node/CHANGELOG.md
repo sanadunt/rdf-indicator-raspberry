@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.7.0 - Unreleased
+
+Contract `1.7` (additive).
+
+- config.patch on a running SDR engine tries the change live and falls back to an engine restart
+  (stop -> write -> start) when needed. A gain change or a frequency jump above
+  `control.retune_live_max_hz` (20 MHz) restarts directly: the rdfsdr engine re-applies its own band gain
+  on a live retune (25.4 dB in VHF) and lost DAQ sync, while at start it takes settings.json as written.
+  A live change the engine overrides (any field, also one not in the patch) or that leaves the DAQ
+  unhealthy for `retune_live_window_seconds` falls back to the restart with every intended value. Ground
+  follows it through intermediate ACKs (`VERIFYING` with `method: LIVE`, `APPLYING` with
+  `method: RESTART` and `reason`); APPLIED carries `method` and runtime proof (fresh healthy DAQ held for
+  `retune_settle_seconds`, values intact). A stopped engine only gets the file (`ENGINE_NOT_RUNNING`).
+- `state.rf`: what the SDR is set to (`f`, `vfo`, `g`, `bw`, `sq`), resent with every config revision, so
+  Ground shows frequency, gain and squelch without Data Out. `telemetry/health/detail.ovr`: ADC overdrive.
+- Panel: the Config tab fits 480x320 again (five rows + buttons were 267 px in a 244 px page, so the buttons
+  slid under the nav and its border line crossed "Riwayat"). A Ground command banner that ends
+  "tersimpan, belum terbukti" hides after 30 s instead of covering the rows until closed (it stays in
+  Riwayat). config.patch stages show the route: "retune langsung", "restart SDR", "diterapkan (restart SDR)".
+
 ## 1.6.1 - Unreleased
 
 Contract `1.6` (unchanged).

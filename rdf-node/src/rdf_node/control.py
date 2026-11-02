@@ -356,7 +356,10 @@ class CommandManager:
             except queue.Empty: continue
             try:
                 self._stage(r,'APPLYING')
-                stage,result=self._execute(r,actor)
+                def progress(stage,result,r=r,link=link):
+                    # An intermediate ACK, so Ground can follow a long operation (live retune, fallback).
+                    self._stage(r,stage,result); self._send(r['id'],r['op'],stage,result,link=link)
+                stage,result=self._execute(r,actor,progress)
                 self._stage(r,stage,result)
                 self._send(r['id'],r['op'],stage,result,link=link)
             except Exception as e:
@@ -369,7 +372,109 @@ class CommandManager:
                 with self.lock: self.busy=False; self.active_id=None
                 self.agent.bulk_resume_after=time.monotonic()+self.cfg['telemetry']['resume_stable_seconds']
                 self.queue.task_done()
-    def _execute(self,r,actor):
+    # ---- config.patch: live retune first, engine restart when it is needed or the live one fails ----
+    # Some SDR engines re-apply their own band gain on a live retune (rdfsdr: 25.4 dB in VHF) and can lose
+    # DAQ sync; at start they take settings.json as written. So a gain change or a large frequency jump goes
+    # straight to stop -> write -> start, and a live change that the engine overrides or that leaves the DAQ
+    # unhealthy falls back to the same restart. Ground follows each step through intermediate ACKs.
+    def _settled_digest(self,timeout=4.0):
+        a=self.agent; end=time.monotonic()+timeout; last=None; stable=0
+        while time.monotonic()<end and not self.stop_event.is_set():
+            d=a.source.raw_digest
+            if d and d==last: stable+=1
+            else: stable=0; last=d
+            if stable>=4: return d
+            self.stop_event.wait(0.25)
+        return a.source.raw_digest
+    def _write_settings(self,actor,changes):
+        expected=self._settled_digest()
+        if not expected: raise ValueError('SETTINGS_UNAVAILABLE')
+        return self._helper({'op':'config.patch','origin':actor,'changes':changes,'expected_digest':expected})
+    def _daq_healthy_since(self,t0):
+        a=self.agent; st=a.source.status; m=a.monitor.snapshot()
+        return bool(st and st.get('timestamp_ms',0)>t0 and a.source.view(m['clock_trusted'])['daq']['healthy'])
+    def _lifecycle(self,actor,desired,timeout):
+        a=self.agent; started=now_ms()
+        self._helper({'op':'processing.set','origin':actor,'desired':desired})
+        deadline=time.monotonic()+timeout
+        while time.monotonic()<deadline and not self.stop_event.is_set():
+            m=a.monitor.snapshot()
+            if desired=='STOPPED' and m['service_state'] in ('INACTIVE','FAILED') and m.get('cgroup_empty') is True: return True
+            if desired=='RUNNING' and m['service_state']=='ACTIVE' and self._daq_healthy_since(started): return True
+            self.stop_event.wait(0.25)
+        return False
+    def _restart_available(self):
+        a=self.agent
+        return bool(self.cfg['control']['processing_enabled'] and a.helper_status.get('allow_lifecycle'))
+    def _patch_with_restart(self,r,actor,intended,reason,progress):
+        a=self.agent; c=self.cfg['control']
+        progress('APPLYING',{'method':'RESTART','reason':reason,'changes':intended})
+        if not self._lifecycle(actor,'STOPPED',30):
+            return 'OUTCOME_UNKNOWN',{'method':'RESTART','reason':reason,'error':'ENGINE_DID_NOT_STOP','persisted':False}
+        safe=a.source.safe
+        missing={k:v for k,v in intended.items() if safe.get(k)!=v}
+        if missing: self._write_settings(actor,missing)
+        progress('VERIFYING',{'method':'RESTART','reason':reason,'persisted':True})
+        if not self._lifecycle(actor,'RUNNING',c['start_timeout_seconds']):
+            return 'OUTCOME_UNKNOWN',{'method':'RESTART','reason':reason,'persisted':True,
+                                      'error':'DAQ_NOT_HEALTHY_AFTER_RESTART','revision':a.source.revision}
+        self.stop_event.wait(1.0)
+        moved=sorted(k for k,v in intended.items() if a.source.safe.get(k)!=v)
+        if moved:
+            return 'PERSISTED_UNVERIFIED',{'method':'RESTART','reason':reason,'persisted':True,'revision':a.source.revision,
+                                           'error':'ENGINE_OVERRODE_AT_START','fields':moved}
+        a.config_proof='runtime'
+        return 'APPLIED',{'method':'RESTART','reason':reason,'persisted':True,'revision':a.source.revision,
+                          'proof':{'daq':'FRESH_HEALTHY_AFTER_RESTART','settings':'INTACT_AFTER_START'}}
+    def _config_patch(self,r,actor,progress):
+        a=self.agent; c=self.cfg['control']; changes=dict(r['changes'])
+        before=dict(a.source.safe); running=a.monitor.snapshot()['service_state']=='ACTIVE'
+        new_f=changes.get('center_frequency_hz',changes.get('vfo0_frequency_hz'))
+        old_f=before.get('center_frequency_hz')
+        jump=abs(new_f-old_f) if isinstance(new_f,int) and isinstance(old_f,int) else 0
+        restart=self._restart_available()
+        reason=None
+        if running and restart:
+            if 'gain_db' in changes: reason='GAIN_CHANGE'
+            elif jump>c['retune_live_max_hz']: reason='LARGE_FREQUENCY_JUMP'
+        if reason: return self._patch_with_restart(r,actor,changes,reason,progress)
+        started=now_ms(); old_digest=a.source.raw_digest
+        self._write_settings(actor,changes)
+        if not running:
+            # The engine reads settings.json when it starts; nothing runs it now.
+            return 'PERSISTED_UNVERIFIED',{'method':'FILE','persisted':True,'revision':a.source.revision,
+                                           'reason':'ENGINE_NOT_RUNNING'}
+        progress('VERIFYING',{'method':'LIVE','persisted':True})
+        # Values that must survive the retune: everything we did not change (gain above all).
+        keep={k:v for k,v in before.items() if k in ('center_frequency_hz','gain_db','vfo0_frequency_hz',
+                                                      'vfo0_bandwidth_hz','vfo0_squelch_db') and k not in changes}
+        deadline=time.monotonic()+c['retune_live_window_seconds']; healthy_since=None; why='DAQ_NOT_HEALTHY_AFTER_RETUNE'
+        while time.monotonic()<deadline and not self.stop_event.is_set():
+            safe=a.source.safe
+            if a.source.raw_digest!=old_digest:
+                # Our write is visible; any field now off its intended value was rewritten by the engine.
+                overrode=sorted(k for k,v in {**keep,**changes}.items() if safe.get(k)!=v)
+                if overrode: why='ENGINE_OVERRODE:'+','.join(overrode); break
+            if all(safe.get(k)==v for k,v in changes.items()) and self._daq_healthy_since(started):
+                healthy_since=healthy_since or time.monotonic()
+                # Healthy for a few seconds in a row, not just the status written before the retune settled.
+                if time.monotonic()-healthy_since>=c['retune_settle_seconds']:
+                    a.config_proof='runtime'
+                    proof={'daq':'FRESH_HEALTHY_AFTER_RETUNE','settings':'KEPT_BY_ENGINE'}
+                    rec=a.source.record
+                    if rec and rec['timestamp_ms']>started and rec['frequency_hz']==changes.get('vfo0_frequency_hz'):
+                        proof['vfo0_frequency_hz']='FRESH_DOA_FREQUENCY'
+                    return 'APPLIED',{'method':'LIVE','persisted':True,'revision':a.source.revision,'proof':proof}
+            else:
+                healthy_since=None
+            self.stop_event.wait(0.25)
+        if not restart:
+            a.config_proof='persisted_unverified'
+            return 'PERSISTED_UNVERIFIED',{'method':'LIVE','persisted':True,'revision':a.source.revision,
+                                           'reason':'NATIVE_RUNTIME_EVIDENCE_INCOMPLETE','live_failure':why}
+        # Fall back: restart with everything we meant to have, including what the engine overrode.
+        return self._patch_with_restart(r,actor,{**keep,**changes},'LIVE_FAILED:'+why,progress)
+    def _execute(self,r,actor,progress=None):
         a=self.agent; op=r['op']
         if op=='ppp.restart':
             result=self._helper({'op':'ppp.restart','origin':actor})
@@ -382,31 +487,7 @@ class CommandManager:
             a.profile=r['profile']; a.journal.set('profile',a.profile)
             return 'APPLIED',{'profile':a.profile,'proof':'SCHEDULER_PROFILE_ACTIVE'}
         if op=='config.patch':
-            expected=a.source.raw_digest
-            if not expected: raise ValueError('SETTINGS_UNAVAILABLE')
-            before=now_ms()
-            result=self._helper({'op':op,'origin':actor,'changes':r['changes'],'expected_digest':expected})
-            self._stage(r,'VERIFYING',{'persisted':True})
-            deadline=time.monotonic()+self.cfg['control']['verify_seconds']
-            # File readback is NOT proof that runtime adopted arbitrary parameters.
-            proof={}
-            while time.monotonic()<deadline and not self.stop_event.is_set():
-                st=a.source.status; rec=a.source.record; safe=a.source.safe
-                if all(safe.get(k)==v for k,v in r['changes'].items()):
-                    for key,value in r['changes'].items():
-                        if key=='vfo0_frequency_hz' and rec and rec['timestamp_ms']>before and rec['frequency_hz']==value:
-                            proof[key]='FRESH_DOA_FREQUENCY'
-                        if key=='center_frequency_hz' and st and st['timestamp_ms']>before and st.get('rf_center_frequency_hz')==value:
-                            proof[key]='FRESH_DAQ_RF_CENTER'
-                        if key=='gain_db' and st and st['timestamp_ms']>before and st.get('gain_db')==value:
-                            proof[key]='FRESH_DAQ_GAIN'
-                    if len(proof)==len(r['changes']):
-                        a.config_proof='runtime'
-                        return 'APPLIED',{'revision':a.source.revision,'proof':proof,'persisted':True}
-                self.stop_event.wait(0.2)
-            a.config_proof='persisted_unverified'
-            return 'PERSISTED_UNVERIFIED',{'revision':a.source.revision,'persisted':True,'proof':proof,
-                                          'reason':'NATIVE_RUNTIME_EVIDENCE_INCOMPLETE'}
+            return self._config_patch(r,actor,progress or (lambda stage,result:None))
         if op in ('processing.set','service.restart'):
             oldgen=a.monitor.snapshot()['generation']; started=now_ms()
             rpc={'op':op,'origin':actor}

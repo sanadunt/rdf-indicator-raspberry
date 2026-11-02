@@ -350,6 +350,13 @@ function stageText(op){
  const stage=op?.stage;
  if(stage==='APPLIED'&&String(op.op||'').endsWith('.prepare'))return 'disiapkan';
  if(stage==='APPLIED'&&op.op==='ppp.restart')return 'tersambung lagi';
+ // config.patch from Edge 1.7 says how it reached the SDR: live retune, or an engine restart (fallback).
+ const method=op?.result?.method;
+ if(op?.op==='config.patch'&&method){
+  if(stage==='VERIFYING'&&method==='LIVE')return 'retune langsung, memeriksa…';
+  if(stage==='APPLYING'&&method==='RESTART')return 'restart SDR…';
+  if(stage==='APPLIED')return method==='RESTART'?'diterapkan (restart SDR)':'diterapkan langsung';
+ }
  return STAGE_TEXT[stage]||(stageTone(stage)==='progress'?'diproses…':String(stage||'?'));
 }
 function clockText(ms){if(typeof ms!=='number'||!Number.isFinite(ms))return '--:--:--';const t=new Date(ms),pad=v=>String(v).padStart(2,'0');return `${pad(t.getHours())}:${pad(t.getMinutes())}:${pad(t.getSeconds())}`;}
@@ -427,7 +434,9 @@ function showRemoteBanner(op){
  b.stage.title=reason;
  b.root.hidden=false;
  if(remoteTimer){clearTimeout(remoteTimer);remoteTimer=null;}
+ // A warning outcome stays readable for a while, then frees the rows it covers (it stays in Riwayat).
  if(op.stage==='APPLIED')remoteTimer=setTimeout(hideRemoteBanner,10000);
+ else if(op.stage==='PERSISTED_UNVERIFIED')remoteTimer=setTimeout(hideRemoteBanner,30000);
  wakeScreen();
 }
 // Returns the operation it announced (or null) so a rejection in the same snapshot can compare times.

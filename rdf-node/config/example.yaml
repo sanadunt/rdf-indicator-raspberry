@@ -65,6 +65,12 @@ control:
   helper_socket: /run/rdf-node-control/control.sock
   verify_seconds: 12
   start_timeout_seconds: 180
+  # config.patch: a frequency change up to this many Hz is tried live; a larger jump or a gain change
+  # restarts the SDR engine (stop -> write -> start). A live change the engine overrides, or that leaves
+  # the DAQ unhealthy for retune_live_window_seconds, falls back to the same restart.
+  retune_live_max_hz: 20000000
+  retune_live_window_seconds: 20
+  retune_settle_seconds: 5
 api:
   port: 8790
   admin_hash_file: /etc/rdf-node/admin-hash.json

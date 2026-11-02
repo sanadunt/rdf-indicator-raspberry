@@ -388,6 +388,8 @@ Detail tidak menggantikan gate health utama. Ground saat ini menyimpan detail te
 {"v":2,"sid":"7a8b9c0d","contract":"1.5","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","t":1790668800123,"run":"RUNNING","daq":true,"cfg":7,"profile":"balanced","clock":"SYNCED"}
 ```
 
+Sejak kontrak 1.7 `state` dapat membawa `rf` = setelan SDR dari `settings.json` (revisi `cfg`): `f` frekuensi tengah Hz, `vfo` frekuensi VFO0 Hz, `g` gain dB, `bw` bandwidth VFO0 Hz, `sq` squelch VFO0 dB. Ini setelan, bukan bukti runtime; frekuensi yang benar-benar dipakai terlihat di `telemetry/doa.f` dan `config.patch` `APPLIED`. `telemetry/health/detail.ovr` membawa ADC overdrive (boolean atau null).
+
 `contract` adalah revisi kontrak MQTT (`major.minor`, sejak 1.5; lihat [contract/README.md](../contract/README.md)). `run` adalah state processing berupa string; `daq` adalah boolean ringkas; `cfg` revision konfigurasi; `profile` profile saat ini; `clock` state clock: `SYNCED`, `UNTRUSTED`, `DEMO`, atau `TEST` (jam OS untuk uji tanpa alat, `testing.clock: system`; tidak pernah berarti tersinkron). `state.daq=false` tidak membedakan degraded dan unknown. Gunakan `telemetry/health.daq` untuk enum health dan freshness. Ground memakai `sid` bersama `boot` dan `instance` untuk memeriksa identitas sesi.
 
 ### `capabilities`

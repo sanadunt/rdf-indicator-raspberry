@@ -748,10 +748,18 @@ class Agent:
             active=self.backup_active
             return bool(self.backup_client and (active['tls'] or active['settings_report_plaintext']))
         return True
+    RF_KEYS=(('f','center_frequency_hz'),('vfo','vfo0_frequency_hz'),('g','gain_db'),('bw','vfo0_bandwidth_hz'),
+             ('sq','vfo0_squelch_db'))
     def _state(self,s):
-        return {'v':2,'sid':self.sid,'contract':CONTRACT,'boot':self.boot,'instance':self.instance,'t':now_ms(),
-                'run':s.get('processing',{}).get('observed','UNKNOWN'),'daq':s.get('daq',{}).get('healthy',False),
-                'cfg':self.source.revision,'profile':self.profile,'clock':s.get('host',{}).get('clock_state','UNTRUSTED')}
+        state={'v':2,'sid':self.sid,'contract':CONTRACT,'boot':self.boot,'instance':self.instance,'t':now_ms(),
+               'run':s.get('processing',{}).get('observed','UNKNOWN'),'daq':s.get('daq',{}).get('healthy',False),
+               'cfg':self.source.revision,'profile':self.profile,'clock':s.get('host',{}).get('clock_state','UNTRUSTED')}
+        # What the SDR is set to (settings.json, revision cfg). Ground needs it without Data Out; it is the
+        # setting, not proof of what the radio runs (that is DoA `f` and config.patch APPLIED).
+        safe=self.source.safe or {}
+        rf={short:safe[key] for short,key in self.RF_KEYS if isinstance(safe.get(key),(int,float)) and not isinstance(safe.get(key),bool)}
+        if rf: state['rf']=rf
+        return state
     def _publish_failed(self,topic,error):
         # One topic failing (an unexpected value from the source, say) must not stop the others.
         self.publish_errors[topic]=type(error).__name__.upper()
@@ -884,7 +892,8 @@ class Agent:
                 try:
                     if tick('detail',10):
                         self._offer('detail','telemetry/health/detail',{'v':2,'sid':self.sid,'t':now_ms(),
-                            'usb':h['usb_count'],'sync':list(daq['sync'].values()),'cpu':h['cpu_percent'],'mem':h['memory_percent'],
+                            'usb':h['usb_count'],'sync':list(daq['sync'].values()),'ovr':daq.get('adc_overdrive'),
+                            'cpu':h['cpu_percent'],'mem':h['memory_percent'],
                             'disk_free':h['disk_free_percent'],'throt':h['throttled'],'uv':h['undervoltage'],
                             'tx':h['tx_kbit_s'],'rx':h['rx_kbit_s'],'adrop':self.angular_abort,'parse':self.source.parse_errors,
                             'ppp':h.get('ppp'),'peer':h.get('ppp_probe'),
