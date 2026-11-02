@@ -45,7 +45,10 @@ F_RETAIN=1; F_QOS1=2; F_ZLIB=4
 # silent for GROUND_FREE_AFTER_S), so the two radios rarely talk at once.
 F_TURN=8
 AIR_S_PER_BYTE=0.0005  # measured on the link: ~0.48 ms per byte on air
-EDGE_TURN_EVERY_S=1.0; EDGE_QUIET_S=0.3
+# The quiet window counts from the moment the turn frame really leaves the air: frames written just
+# before it still sit in the module's buffer, and Ground needs its reply window (GROUND_REPLY_WINDOW_S),
+# up to GROUND_WINDOW_BYTES on the air (~0.12 s) and its own module's latency inside that window.
+EDGE_TURN_EVERY_S=1.0; EDGE_QUIET_S=0.45
 GROUND_REPLY_WINDOW_S=0.08; GROUND_FREE_AFTER_S=3.0; GROUND_WINDOW_BYTES=250
 CRC_LEN=2
 # Fragment state older than this is dropped (a lost fragment never completes its message).
@@ -238,6 +241,8 @@ class Sender:
     def __init__(self,rate,frame_max,min_interval=None,burst=400,turn_every_s=None,quiet_s=0.0):
         self.rate=rate; self.frame_max=frame_max; self.min_interval=dict(min_interval or {})
         self.turn_every_s=turn_every_s; self.quiet_s=quiet_s; self.last_turn=-1e9; self.next_at=0.0
+        # When the radio is expected to finish what was written to it (frames queue in its buffer).
+        self.air_until=0.0
         self.burst=max(burst,frame_max*2)
         self.lock=threading.Lock(); self.box={}; self.fifo=0; self.seq=0; self.msg=0
         self.wire=deque(); self.last_sent={}; self.tokens=float(self.burst); self.refilled=time.monotonic()
@@ -298,9 +303,11 @@ class Sender:
                     (max_bytes is not None and used+len(frame)>max_bytes)): break
             self.wire.popleft(); self.seq=(self.seq+1)&0xFFFF; self.tokens-=len(frame); out.append(frame); used+=len(frame)
             self.stats['sent_frames']+=1; self.stats['sent_bytes']+=len(frame)
+            self.air_until=max(self.air_until,now)+len(frame)*AIR_S_PER_BYTE
             if turn:
-                # Stay off the air until this frame is out and the other side had its turn.
-                self.last_turn=now; self.next_at=now+len(frame)*AIR_S_PER_BYTE+self.quiet_s; break
+                # Stay off the air until this frame (and whatever was queued before it) is out, then
+                # leave the other side its turn.
+                self.last_turn=now; self.next_at=self.air_until+self.quiet_s; break
         return out
     def next_frames(self,now=None,limit=None,max_bytes=None):
         """Frames the budget (and the turn taking) allows now, possibly part of a message, or []."""

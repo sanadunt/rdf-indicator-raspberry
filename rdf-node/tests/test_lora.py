@@ -1,3 +1,4 @@
+import hashlib
 import json,os,select,tempfile,threading,time,unittest
 from pathlib import Path
 from rdf_node import lora
@@ -109,6 +110,23 @@ class SenderTests(unittest.TestCase):
         later=s.next_frames(t+.4)
         self.assertTrue(later);self.assertFalse(any(decode_frame(f[:-1])[4]&lora.F_TURN for f in later))
         r=Receiver();r.feed(first[0]);self.assertIsNotNone(r.turn_at)
+    def test_quiet_window_counts_from_the_air_not_the_write(self):
+        # Frames written just before the turn frame are still on the air when it is written: the other
+        # side's turn starts after all of them, so its reply does not collide with the edge.
+        s=Sender(100000,200,burst=1000,turn_every_s=1.0,quiet_s=.3);t=1000.0
+        s.last_turn=t-.5
+        s.offer(4,b''.join(hashlib.sha256(bytes([i])).digest() for i in range(20)),now=t)  # 640 bytes zlib cannot shrink
+        burst=s.next_frames(t)
+        self.assertGreater(len(burst),1)
+        sent=sum(len(f) for f in burst)
+        s.offer(11,b'{"ack":1}',now=t+.5)
+        turn=s.next_frames(t+.5)
+        self.assertEqual(len(turn),1);self.assertTrue(decode_frame(turn[0][:-1])[4]&lora.F_TURN)
+        air_end=max(t+sent*lora.AIR_S_PER_BYTE,t+.5)+len(turn[0])*lora.AIR_S_PER_BYTE
+        self.assertAlmostEqual(s.next_at,air_end+.3,places=6)
+        s.offer(11,b'{"ack":2}',now=t+.5)
+        self.assertEqual(s.next_frames(air_end+.29),[])
+        self.assertTrue(s.next_frames(air_end+.31))
     def test_time_frames_are_stamped_when_sent_not_when_queued(self):
         s=Sender(100000,200)
         s.urgent(lora.TIME,lora.TIME_REQ.pack(1,1));s.urgent(lora.TIME,lora.TIME_RESP.pack(2,5,6,7))
