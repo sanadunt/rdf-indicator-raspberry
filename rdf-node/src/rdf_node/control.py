@@ -41,6 +41,11 @@ ERROR_MESSAGES={
     'HELPER_FAILED':'Helper kontrol menolak perintah tanpa alasan.',
     'INTERNAL_ERROR':'Error internal di agent Edge; lihat detail.',
     'INVALID_COMMAND_FIELD':'Ada field perintah yang tipe atau nilainya tidak valid.',
+    'SPACING_SET_BY_ENGINE_BAND':'Di band ini KrakenSDR sendiri memasang jarak UCA (VHF 0,3 m, UHF 0,128 m); jarak lain tidak akan dipakai. Tidak ada yang ditulis.',
+    'NUMBER_OUT_OF_RANGE':'Nilai di luar rentang yang diizinkan; tidak ada yang ditulis.',
+    'CENTER_CHANGE_REQUIRES_VFO0_TARGET':'Frekuensi center harus dikirim bersama frekuensi VFO0.',
+    'MVP_CENTER_MUST_EQUAL_VFO0':'Frekuensi center dan VFO0 harus sama.',
+    'INTEGER_OUT_OF_RANGE':'Nilai bilangan bulat di luar rentang yang diizinkan.',
     'JOURNAL_UNAVAILABLE':'Journal perintah di Edge tidak bisa ditulis; perintah tidak dijalankan.',
     'COMMAND_TOO_LARGE':'Perintah lebih besar dari 4.096 byte dan tidak diproses.',
     'COMMAND_NOT_JSON':'Isi perintah bukan JSON yang sah, jadi tidak bisa dijawab per ID.',
@@ -426,9 +431,44 @@ class CommandManager:
         a.config_proof='runtime'
         return 'APPLIED',{'method':'RESTART','reason':reason,'persisted':True,'revision':a.source.revision,
                           'proof':{'daq':'FRESH_HEALTHY_AFTER_RESTART','settings':'INTACT_AFTER_START'}}
+    @staticmethod
+    def _band_spacing(safe,center_hz):
+        """The UCA radius rdfsdr sets itself on every retune and at start, or None where it keeps the file's.
+        A settings file without ant_arrangement starts as UCA (rdfsdr's start-up default)."""
+        if safe.get('ant_arrangement','UCA')!='UCA' or not isinstance(center_hz,(int,float)): return None
+        mhz=center_hz/1e6
+        return 0.3 if 30<=mhz<300 else 0.128 if 300<=mhz<=3000 else None
     def _config_patch(self,r,actor,progress):
-        a=self.agent; c=self.cfg['control']; changes=dict(r['changes'])
+        a=self.agent; changes=dict(r['changes'])
         before=dict(a.source.safe); running=a.monitor.snapshot()['service_state']=='ACTIVE'
+        # The helper's own checks first, with the same types it writes, so the band rule below sees the
+        # numbers the file will hold and a bad frequency gets its own error, not a spacing one.
+        try:
+            for key in ('center_frequency_hz','vfo0_frequency_hz'):
+                if key in changes: changes[key]=integer(changes[key],1,10**10)
+            if 'center_frequency_hz' in changes and changes['center_frequency_hz']!=changes.get('vfo0_frequency_hz'):
+                raise ValueError('MVP_CENTER_MUST_EQUAL_VFO0' if 'vfo0_frequency_hz' in changes else 'CENTER_CHANGE_REQUIRES_VFO0_TARGET')
+            if 'ant_spacing_m' in changes: changes['ant_spacing_m']=round(finite(changes['ant_spacing_m'],0.05,1.0),4)
+        except (ValueError,TypeError) as e:
+            code=str(e) if str(e) in ERROR_MESSAGES else 'INVALID_COMMAND_FIELD'
+            return 'FAILED',{**error_result(code),'persisted':False}
+        band=self._band_spacing(before,changes.get('center_frequency_hz',before.get('center_frequency_hz')))
+        added=False
+        if band is not None:
+            if 'ant_spacing_m' in changes:
+                # In VHF/UHF the engine's band radius always wins: another spacing could never run.
+                if abs(changes['ant_spacing_m']-band)>5e-4:
+                    return 'FAILED',{**error_result('SPACING_SET_BY_ENGINE_BAND'),'persisted':False,'band_spacing_m':band}
+                changes['ant_spacing_m']=band
+            elif before.get('ant_spacing_m')!=band:
+                # Any write makes the engine reload the file's spacing live: write the band radius too, so
+                # settings.json (and state.rf.uca) says what the engine runs and an old radius never returns.
+                changes['ant_spacing_m']=band; added=True
+        stage,result=self._config_patch_apply(r,actor,progress,changes,before,running)
+        if added: result['band_spacing_m']=band
+        return stage,result
+    def _config_patch_apply(self,r,actor,progress,changes,before,running):
+        a=self.agent; c=self.cfg['control']
         new_f=changes.get('center_frequency_hz',changes.get('vfo0_frequency_hz'))
         old_f=before.get('center_frequency_hz')
         jump=abs(new_f-old_f) if isinstance(new_f,int) and isinstance(old_f,int) else 0
@@ -445,7 +485,9 @@ class CommandManager:
             return 'PERSISTED_UNVERIFIED',{'method':'FILE','persisted':True,'revision':a.source.revision,
                                            'reason':'ENGINE_NOT_RUNNING'}
         progress('VERIFYING',{'method':'LIVE','persisted':True})
-        # Values that must survive the retune: everything we did not change (gain above all).
+        # Values that must survive the retune: everything we did not change (gain above all). Not the
+        # antenna spacing: the engine sets its band value (0.3 m VHF, 0.128 m UHF) on a retune by design;
+        # it is checked only when the patch asks for a spacing.
         keep={k:v for k,v in before.items() if k in ('center_frequency_hz','gain_db','vfo0_frequency_hz',
                                                       'vfo0_bandwidth_hz','vfo0_squelch_db') and k not in changes}
         deadline=time.monotonic()+c['retune_live_window_seconds']; healthy_since=None; why='DAQ_NOT_HEALTHY_AFTER_RETUNE'

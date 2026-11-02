@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.8.0 - Unreleased
+
+Contract `1.8` (additive).
+
+- config.patch accepts `ant_spacing_m` (metres, 0.05–1.0, rounded to 0.1 mm) for `ant_spacing_meters` (UCA
+  radius). rdfsdr sets the UCA radius itself on every retune and at start: 0.3 m in 30–300 MHz, 0.128 m in
+  300–3000 MHz (UCA; a settings file without `ant_arrangement` starts as UCA). Edge follows the same rule: in
+  those bands a spacing more than 0.5 mm off the band value is refused before anything is written (`FAILED`,
+  `SPACING_SET_BY_ENGINE_BAND`, with `band_spacing_m`), a closer one is snapped to it, and every patch there
+  writes the band radius when the file holds another one (named in the result as `band_spacing_m`), so
+  settings.json and `state.rf.uca` say what the engine runs and a settings reload never brings an old radius
+  back. Outside those bands (or with a ULA) the spacing is free and applies live. Out of range: `NUMBER_OUT_OF_RANGE`.
+  The engine moving the radius to its band value on a retune is not an override.
+- `state.rf.uca` (metres) and `capabilities.config_fields` (the fields config.patch accepts), so Ground sends
+  `ant_spacing_m` only to an Edge that takes it. The panel labels it "Jarak UCA".
+
 ## 1.7.1 - Unreleased
 
 Contract `1.7` (unchanged).

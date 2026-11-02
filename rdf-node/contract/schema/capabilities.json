@@ -112,6 +112,13 @@
     },
     "ppp_restart": {
       "type": "boolean"
+    },
+    "config_fields": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Field yang diterima config.patch (sejak kontrak 1.8). Ground hanya mengirim field yang ada di sini."
     }
   },
   "required": [

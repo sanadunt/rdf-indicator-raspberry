@@ -14,7 +14,8 @@ class FakeEngine:
         self.lock=threading.Lock(); self.running=running; self.healthy=running; self.live=live
         self.start_healthy=start_healthy; self.digest=1; self.status_ts=now_ms()
         self.safe={'center_frequency_hz':105900000,'vfo0_frequency_hz':105900000,'gain_db':12.5,
-                   'vfo0_bandwidth_hz':12500,'vfo0_squelch_db':-100.0}
+                   'vfo0_bandwidth_hz':12500,'vfo0_squelch_db':-100.0,'ant_spacing_m':0.3,
+                   'ant_arrangement':'UCA'}
         self.calls=[]; self.writes_while_running=0; self.revision=1
     # ---- what CommandManager reads ----
     @property
@@ -43,6 +44,9 @@ class FakeEngine:
                 self.writes_while_running+=1
                 if self.live=='override_gain': threading.Timer(.3,self._override,args=('gain_db',25.4)).start()
                 elif self.live=='crash': threading.Timer(.3,self._crash).start()
+                elif self.live=='band_spacing' and 'center_frequency_hz' in r['changes']:
+                    # rdfsdr's retune: band radius 0.3 m in VHF, saved back into settings.json.
+                    threading.Timer(.3,self._override,args=('ant_spacing_m',0.3)).start()
             return {'persisted':True}
         if r['op']=='processing.set':
             if r['desired']=='STOPPED':
@@ -105,6 +109,51 @@ class RetuneTests(unittest.TestCase):
         stage,result,_,_=self.run_patch(e,{'center_frequency_hz':402225000,'vfo0_frequency_hz':402225000})
         self.assertEqual((stage,result['reason']),('APPLIED','LARGE_FREQUENCY_JUMP'))
         self.assertEqual(e.writes_while_running,0)
+    def test_band_spacing_alone_applies_live(self):
+        e=FakeEngine();e.safe['ant_spacing_m']=0.2
+        stage,result,_,_=self.run_patch(e,{'ant_spacing_m':0.30001})
+        self.assertEqual((stage,result['method']),('APPLIED','LIVE'))
+        self.assertEqual(self.lifecycle(e),[]);self.assertEqual(e.safe['ant_spacing_m'],0.3)
+    def test_spacing_against_the_engine_band_is_refused_before_writing(self):
+        # rdfsdr sets 0.3 m in VHF on every retune and at start: 0.2 m could never run.
+        e=FakeEngine()
+        stage,result,_,_=self.run_patch(e,{'center_frequency_hz':103100000,'vfo0_frequency_hz':103100000,'ant_spacing_m':0.2})
+        self.assertEqual((stage,result['error'],result['band_spacing_m']),('FAILED','SPACING_SET_BY_ENGINE_BAND',0.3))
+        self.assertEqual(e.calls,[])
+        stage,result,_,_=self.run_patch(FakeEngine(running=False),{'ant_spacing_m':0.128})
+        self.assertEqual((stage,result['error']),('FAILED','SPACING_SET_BY_ENGINE_BAND'))
+    def test_engine_band_spacing_on_retune_is_not_an_override(self):
+        e=FakeEngine(live='band_spacing')
+        stage,result,_,_=self.run_patch(e,{'center_frequency_hz':103100000,'vfo0_frequency_hz':103100000})
+        self.assertEqual((stage,result['method']),('APPLIED','LIVE'));self.assertEqual(self.lifecycle(e),[])
+    def test_band_change_writes_the_band_spacing(self):
+        e=FakeEngine()
+        stage,result,_,_=self.run_patch(e,{'center_frequency_hz':433000000,'vfo0_frequency_hz':433000000})
+        self.assertEqual((stage,result['reason']),('APPLIED','LARGE_FREQUENCY_JUMP'))
+        self.assertEqual(e.safe['ant_spacing_m'],0.128)
+    def test_near_band_spacing_snaps_and_far_or_out_of_range_is_refused(self):
+        e=FakeEngine(live='band_spacing')
+        stage,result,_,_=self.run_patch(e,{'center_frequency_hz':103100000,'vfo0_frequency_hz':103100000,'ant_spacing_m':0.3001})
+        self.assertEqual((stage,result['method']),('APPLIED','LIVE'));self.assertEqual(e.safe['ant_spacing_m'],0.3)
+        self.assertEqual(self.lifecycle(e),[])
+        for bad,code in ((0.299,'SPACING_SET_BY_ENGINE_BAND'),(5.0,'NUMBER_OUT_OF_RANGE'),(-1,'NUMBER_OUT_OF_RANGE')):
+            stage,result,_,_=self.run_patch(FakeEngine(),{'ant_spacing_m':bad})
+            self.assertEqual((stage,result['error']),('FAILED',code))
+    def test_string_frequency_still_meets_the_band_rule_and_bad_frequency_gets_its_own_error(self):
+        stage,result,_,_=self.run_patch(FakeEngine(running=False),{'center_frequency_hz':'433000000','vfo0_frequency_hz':'433000000','ant_spacing_m':0.5})
+        self.assertEqual((stage,result['error'],result['band_spacing_m']),('FAILED','SPACING_SET_BY_ENGINE_BAND',0.128))
+        self.assertTrue(result['message'])
+        stage,result,_,_=self.run_patch(FakeEngine(),{'center_frequency_hz':433000000,'ant_spacing_m':0.5})
+        self.assertEqual((stage,result['error']),('FAILED','CENTER_CHANGE_REQUIRES_VFO0_TARGET'))
+    def test_any_patch_in_band_corrects_a_stale_spacing_and_says_so(self):
+        e=FakeEngine();e.safe['ant_spacing_m']=0.5;del e.safe['ant_arrangement']   # old file: starts as UCA
+        stage,result,_,_=self.run_patch(e,{'vfo0_squelch_db':-90.0})
+        self.assertEqual((stage,result['method'],result['band_spacing_m']),('APPLIED','LIVE',0.3))
+        self.assertEqual(e.safe['ant_spacing_m'],0.3)
+    def test_spacing_outside_the_band_rule_is_free(self):
+        e=FakeEngine();e.safe['ant_arrangement']='ULA'
+        stage,result,_,_=self.run_patch(e,{'ant_spacing_m':0.2})
+        self.assertEqual((stage,result['method']),('APPLIED','LIVE'));self.assertEqual(e.safe['ant_spacing_m'],0.2)
     def test_stopped_engine_only_gets_the_file(self):
         e=FakeEngine(running=False)
         stage,result,_,_=self.run_patch(e,{'gain_db':7.7})
@@ -120,8 +169,6 @@ class RetuneTests(unittest.TestCase):
         stage,result,_,_=self.run_patch(e,{'gain_db':7.7})
         self.assertEqual((stage,result['error']),('OUTCOME_UNKNOWN','DAQ_NOT_HEALTHY_AFTER_RESTART'))
         self.assertTrue(result['persisted'])
-
-if __name__=='__main__': unittest.main()
 
 class RfStatePayloadTests(unittest.TestCase):
     """state.rf and health/detail.ovr (contract 1.7): Ground's frequency/gain/overdrive without Data Out."""
@@ -148,3 +195,17 @@ class RfStatePayloadTests(unittest.TestCase):
         detail=next(json.loads(p) for t,p in out if t.endswith('/telemetry/health/detail'))
         self.assertIn('ovr',detail);self.assertIn(detail['ovr'],(True,False,None))
         self.assertEqual(contract.errors(detail,contract.schema_for('telemetry/health/detail')),[])
+
+class SpacingFieldTests(unittest.TestCase):
+    """ant_spacing_m (contract 1.8): the helper accepts it in metres and writes ant_spacing_meters."""
+    def test_helper_accepts_spacing_in_range_only(self):
+        from rdf_node.helper import validate_changes,HelperError,DEFAULT_POLICY
+        self.assertEqual(validate_changes({'ant_spacing_m':0.3},DEFAULT_POLICY),{'ant_spacing_m':0.3})
+        for bad in (0.01,1.5,float('nan'),True,None):
+            with self.assertRaises((HelperError,ValueError,TypeError)): validate_changes({'ant_spacing_m':bad},DEFAULT_POLICY)
+    def test_safe_settings_and_capabilities_list_it(self):
+        from rdf_node.source import safe_settings,FIELD_MAP
+        self.assertEqual(safe_settings({'ant_spacing_meters':0.128})['ant_spacing_m'],0.128)
+        self.assertIn('ant_spacing_m',FIELD_MAP)
+
+if __name__=='__main__': unittest.main()

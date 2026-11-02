@@ -14,6 +14,9 @@ FIELD_MAP = {
     'vfo0_frequency_hz': ('vfo_freq_0', 1),
     'vfo0_bandwidth_hz': ('vfo_bw_0', 1),
     'vfo0_squelch_db': ('vfo_squelch_0', 1),
+    # UCA radius (adjacent-element spacing for ULA), metres. The engine's own band rule sets 0.3 m in
+    # VHF and 0.128 m in UHF on every retune and at start; outside those bands it keeps this value.
+    'ant_spacing_m': ('ant_spacing_meters', 1),
 }
 
 def safe_settings(data:dict, invalid:list|None=None) -> dict:

@@ -12,7 +12,7 @@ from . import __version__, CONTRACT
 from .util import now_ms, compact, strict_json, read_boot_id, atomic_write, stable_read
 from .config import PROFILES
 from .journal import Journal
-from .source import Source
+from .source import Source, FIELD_MAP
 from .monitor import Monitor
 from .nav import Nav
 from .control import CommandManager, OPS, READ_OPS
@@ -600,6 +600,8 @@ class Agent:
                 'nav':{'compass':self.cfg['nav']['compass']['enabled'],'gps':self.cfg['nav']['gps']['enabled'],
                        'position':self.cfg['nav']['gps']['enabled'] and self.cfg['nav']['gps']['publish_position']},
                 'remote_config_patch':remote and settings_target,
+                # Fields config.patch accepts (since contract 1.8); Ground sends only what is listed.
+                'config_fields':sorted(FIELD_MAP),
                 'remote_processing':remote and lifecycle_target,
                 'remote_restart':remote and lifecycle_target,
                 'remote_reboot':remote and helper_available,
@@ -749,7 +751,7 @@ class Agent:
             return bool(self.backup_client and (active['tls'] or active['settings_report_plaintext']))
         return True
     RF_KEYS=(('f','center_frequency_hz'),('vfo','vfo0_frequency_hz'),('g','gain_db'),('bw','vfo0_bandwidth_hz'),
-             ('sq','vfo0_squelch_db'))
+             ('sq','vfo0_squelch_db'),('uca','ant_spacing_m'))
     def _state(self,s):
         state={'v':2,'sid':self.sid,'contract':CONTRACT,'boot':self.boot,'instance':self.instance,'t':now_ms(),
                'run':s.get('processing',{}).get('observed','UNKNOWN'),'daq':s.get('daq',{}).get('healthy',False),

@@ -35,7 +35,7 @@ class HelperUnavailable(HelperError):
     """The socket could not be reached: nothing was sent, so nothing ran."""
 
 def validate_changes(changes,policy):
-    if not isinstance(changes,dict) or not changes or len(changes)>5 or set(changes)-set(FIELD_MAP):
+    if not isinstance(changes,dict) or not changes or len(changes)>len(FIELD_MAP) or set(changes)-set(FIELD_MAP):
         raise HelperError('UNSUPPORTED_SETTINGS_FIELD')
     out={}
     for key,val in changes.items():
@@ -47,6 +47,7 @@ def validate_changes(changes,policy):
             if not any(abs(val-g)<0.001 for g in policy['gain_values_db']): raise HelperError('GAIN_NOT_IN_APPROVED_TABLE')
             out[key]=val
         elif key=='vfo0_squelch_db': out[key]=finite(val,-200,50)
+        elif key=='ant_spacing_m': out[key]=round(finite(val,0.05,1.0),4)
     return out
 
 def secure_parent(path):
