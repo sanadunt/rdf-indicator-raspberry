@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.10.1 - Unreleased
+
+Contract `1.10` (unchanged).
+
+- Panel: the T900/PPP leftovers are gone. The radio is the LoRa bridge: no "Restart T900" button or
+  confirmation, no T900 recovery card, and the home status, focus mode and Link tab always show LoRa. When the
+  bridge does not report, they say LORA STALE / TIDAK MELAPOR with the report's age instead of falling back to
+  the old PPP rows, and a stale report's port, loss and clock are shown as `--`, not as current green values.
+  Old `ppp.restart` operations still read correctly in Riwayat.
+- Panel: an enabled backup broker that is not connected marks the Data tab (where it is shown), not Link.
+- rdf-edge: a retained `lora/edge` status (replayed after an rdf-edge restart or broker reconnect) is as old as
+  its own stamp `t`; without a usable stamp it counts as stale. A dead bridge no longer shows LoRa UP for 20 s
+  after a restart.
+
 ## 1.10.0 - Unreleased
 
 Contract `1.10` (additive).

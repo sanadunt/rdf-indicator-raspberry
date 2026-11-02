@@ -435,11 +435,18 @@ class Agent:
         suffix=topic[len(self.prefix)+1:] if isinstance(topic,str) and topic.startswith(self.prefix+'/') else ''
         op=next((name for name,path in OPS.items() if path==suffix),'unknown')
         self.remote_rejected(CommandManager.origin('ground-controller',link),op,code)
-    def _lora_status(self,payload):
+    def _lora_status(self,payload,retained=False):
         try: j=strict_json(payload)
         except (ValueError,RecursionError): return
         if not isinstance(j,dict) or j.get('v')!=1 or j.get('role')!='edge': return
         now=time.monotonic()
+        # A retained copy (replayed when rdf-edge or the broker reconnects) is as old as the bridge's own
+        # stamp `t` (same host clock); one without a usable stamp counts as stale, so a dead bridge never
+        # shows UP for LORA_STATUS_FRESH_S after a restart.
+        seen=now
+        if retained:
+            t=j.get('t'); age_ms=now_ms()-t if isinstance(t,int) and not isinstance(t,bool) else None
+            seen=now-(age_ms/1000 if age_ms is not None and 0<=age_ms<=600_000 else LORA_STATUS_FRESH_S+1)
         with self.lock:
             prev=self.lora
             if prev and isinstance(j.get('t'),int) and isinstance(prev.get('t'),int) and j['t']>prev['t']:
@@ -453,7 +460,7 @@ class Agent:
                 self.lora_rates={'tx_kbit_s':None if tx is None else round(tx*8/1000/dt,2),
                                  'tx_msg_s':None if msg is None else round(msg/dt,2),
                                  'rx_msg_s':None if rx is None else round(rx/dt,2)}
-            self.lora=j; self.lora_seen=now
+            self.lora=j; self.lora_seen=seen
     def _lora_view(self):
         with self.lock: j=self.lora; seen=self.lora_seen; rates=dict(self.lora_rates)
         if not j: return None
@@ -472,7 +479,7 @@ class Agent:
                 'clock_offset_ms':tm.get('offset_ms'),'clock_delay_ms':tm.get('delay_ms'),
                 'link_changes':j.get('link_changes'),**rates}
     def _incoming(self,topic,payload,retained,link='primary',epoch=None):
-        if topic==self.prefix+'/lora/edge': return self._lora_status(payload)
+        if topic==self.prefix+'/lora/edge': return self._lora_status(payload,retained)
         # Larger payloads are still read far enough to answer them; only absurd ones go unanswered.
         if len(payload)>COMMAND_READ_MAX_BYTES: return self._command_dropped(topic,link,'COMMAND_TOO_LARGE')
         # Keep half of the queue for the primary (Ground) link.

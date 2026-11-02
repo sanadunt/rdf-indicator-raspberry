@@ -208,11 +208,22 @@ class EdgePanelLoraTests(unittest.TestCase):
         self.assertTrue(a.events.empty())
     def test_link_down_and_stale_bridge_raise_alerts(self):
         a=self.a;topic=a.prefix+'/lora/edge'
-        a._incoming(topic,self.status(1_000_000,link='DOWN'),True);a._snapshot()
+        a._incoming(topic,self.status(1_000_000,link='DOWN'),False);a._snapshot()
         self.assertIn('LORA_LINK_DOWN',[x['code'] for x in a.snapshot()['active_alerts']])
         a.lora_seen-=60;a._snapshot();snap=a.snapshot()
         self.assertEqual((snap['link']['transport'],snap['link']['lora']['link']),('PPP','STALE'))
         self.assertIn('LORA_BRIDGE_STALE',[x['code'] for x in snap['active_alerts']])
+    def test_retained_status_is_as_old_as_its_stamp(self):
+        # After an rdf-edge restart the broker replays the bridge's last status: a dead bridge stays stale.
+        from rdf_node.util import now_ms
+        a=self.a;topic=a.prefix+'/lora/edge'
+        a._incoming(topic,self.status(now_ms()-90_000),True);a._snapshot()
+        self.assertEqual(a.snapshot()['link']['lora']['link'],'STALE')
+        self.assertIn('LORA_BRIDGE_STALE',[x['code'] for x in a.snapshot()['active_alerts']])
+        a._incoming(topic,self.status(1_000_000),True);a._snapshot()   # no usable stamp: stale too
+        self.assertEqual(a.snapshot()['link']['lora']['link'],'STALE')
+        a._incoming(topic,self.status(now_ms()-2_000),True);a._snapshot()
+        lo=a.snapshot()['link']['lora'];self.assertEqual(lo['link'],'UP');self.assertGreaterEqual(lo['status_age_ms'],1500)
     def test_bad_status_is_ignored(self):
         a=self.a
         for bad in (b'not json',b'[]',b'{"v":2,"role":"edge"}',b'{"v":1,"role":"ground"}'):
