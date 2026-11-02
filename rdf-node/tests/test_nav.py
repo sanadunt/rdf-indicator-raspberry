@@ -177,6 +177,23 @@ class SerialTests(unittest.TestCase):
         self.assertTrue(wait(lambda:c.snapshot()['state']=='NO_REPLY',3),c.snapshot())
         self.assertIsNone(c.snapshot()['heading_deg'])
         self.assertGreater(c.snapshot()['no_reply'],0)
+    def test_compass_single_missed_reply_keeps_fresh_heading(self):
+        master,path=self.pty();count={'n':0}
+        # Every third request goes unanswered; the next answer takes 60 ms, like the module, so the
+        # gap between the miss and the next good frame is wide enough to be seen.
+        def reply():
+            count['n']+=1
+            if count['n']%3==0: return None
+            if count['n']%3==1: time.sleep(.06)
+            return GY26_201_1
+        self.fake_gy26(master,reply)
+        c=Compass(nav_cfg(compass={'enabled':True,'device':path})['compass'])
+        c.start();self.addCleanup(c.stop)
+        self.assertTrue(wait(lambda:c.snapshot()['state']=='OK',3),c.snapshot())
+        seen=set();end=time.monotonic()+1.5
+        while time.monotonic()<end: snap=c.snapshot();seen.add((snap['state'],snap['heading_deg']));time.sleep(.02)
+        self.assertEqual(seen,{('OK',201.1)})
+        self.assertGreater(c.snapshot()['no_reply'],0)
     def test_compass_garbage_is_bad_frame(self):
         master,path=self.pty()
         self.fake_gy26(master,lambda:GY26_201_1[:7]+b'\x0b')

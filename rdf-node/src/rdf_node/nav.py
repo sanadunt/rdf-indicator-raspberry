@@ -259,7 +259,9 @@ class Compass(_Sensor):
         with self.lock:
             age=round((time.monotonic()-self.mono)*1000) if self.mono is not None else None
             fresh=age is not None and age<=self.cfg['stale_ms']
-            if self.fault: state=self.fault
+            # One missed or garbled reply is not a failure while the last heading is still fresh
+            # (stale_ms); a missing or broken port is.
+            if self.fault and not (fresh and self.fault in ('NO_REPLY','BAD_FRAME')): state=self.fault
             elif fresh: state='OK'
             else: state='STALE' if self.mono is not None else 'STARTING'
             ok=state=='OK'

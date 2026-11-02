@@ -2,7 +2,7 @@
 const $=id=>document.getElementById(id);
 function readShutdownUncertainty(){try{return localStorage.getItem('rdf-node-edge-shutdown-uncertain')==='1';}catch{return false;}}
 function setShutdownUncertainty(value){shutdownUncertain=value;try{if(value)localStorage.setItem('rdf-node-edge-shutdown-uncertain','1');else localStorage.removeItem('rdf-node-edge-shutdown-uncertain');}catch{}}
-let snapshot={}, csrf=null, authenticated=false, lastSeq=null, lastProgress=0, lastApi=0, linkData=false, hostPage=false, lastTouch=Date.now(), lastAdminSessionRefresh=0, adminSessionRefreshPending=false, pinKeyHandler=null, modalReturnFocus=null, mqttKeyboardDismiss=null, pollPending=false, pollAgain=false, pollTimer=null, shutdownUncertain=readShutdownUncertainty(), shutdownHistoryChecked=false, shutdownHistoryAt=0, shutdownHistoryRequest=null;
+let snapshot={}, csrf=null, authenticated=false, lastSeq=null, lastProgress=0, lastApi=0, linkData=false, sysView=0, lastTouch=Date.now(), lastAdminSessionRefresh=0, adminSessionRefreshPending=false, pinKeyHandler=null, modalReturnFocus=null, mqttKeyboardDismiss=null, pollPending=false, pollAgain=false, pollTimer=null, shutdownUncertain=readShutdownUncertainty(), shutdownHistoryChecked=false, shutdownHistoryAt=0, shutdownHistoryRequest=null;
 const good=['UP','CONNECTED','HEALTHY','SYNCED','APPLIED','REPLY','PRESENT'];
 const bad=['ERROR','LOST','DEGRADED','FAILED','UNAVAILABLE'];
 const ADMIN_SESSION_REFRESH_MS=20000, ADMIN_SESSION_ACTIVITY_MS=30000, ADMIN_SESSION_CHECK_MS=10000;
@@ -31,7 +31,9 @@ const ICONS={
  backspace:'M9 5h11v14H9l-6-7zM12 9l5 6M17 9l-5 6',
  radio:'M4 10h16v10H4zM7.5 10 16 4.5M9 13.2a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6zM14 14h3M14 17h3',
  x:'M6 6l12 12M18 6 6 18',minus:'M6 12h12',history:'M3.5 12a8.5 8.5 0 1 0 2.5-6M3 4v4.5h4.5M12 7.5V12l3 2',
- question:'M9.2 9a2.9 2.9 0 1 1 4 2.7c-.8.4-1.2 1-1.2 1.8v.6M12 17.5v.5'
+ question:'M9.2 9a2.9 2.9 0 1 1 4 2.7c-.8.4-1.2 1-1.2 1.8v.6M12 17.5v.5',
+ compass:'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM15.5 8.5l-2 5-5 2 2-5z',
+ satellite:'M13 7 9 3 5 7l4 4M17 11l4 4-4 4-4-4M8.5 15.5l7-7M14 21a7 7 0 0 0 7-7M14 17.5a3.5 3.5 0 0 0 3.5-3.5'
 };
 function icon(name,extra=''){
  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');svg.setAttribute('focusable','false');
@@ -47,6 +49,44 @@ function setButtonLabel(button,label,iconName){
 }
 function row(label,value,code,iconName){const r=document.createElement('div');r.className='row';const l=document.createElement('label');if(iconName)l.append(icon(iconName));l.append(label);const v=document.createElement('b');v.textContent=String(value??'--');if(code)v.className=good.includes(code)?'good':bad.includes(code)?'bad':'warn';r.append(l,v);return r;}
 function rows(id,values){const e=$(id);e.replaceChildren(...values.map(v=>row(...v)));}
+// Nav (GY-26 compass, u-blox GPS) from snapshot.nav; an Edge before 1.6 has none.
+const NAV_TEXT={DISABLED:'NONAKTIF',STARTING:'MEMULAI',OK:'OK',STALE:'DATA LAMA',NO_DEVICE:'TIDAK TERHUBUNG',ERROR:'ERROR',
+ BAD_FRAME:'FRAME RUSAK',NO_REPLY:'TIDAK MENJAWAB',FIX:'FIX',NO_FIX:'MENCARI SATELIT',BAD_DATA:'DATA TIDAK VALID',NO_DATA:'TIDAK ADA DATA'};
+const TONE_CODE={good:'HEALTHY',warn:'WARN',bad:'ERROR',none:''};
+const num=v=>typeof v==='number'&&Number.isFinite(v);
+function navTone(state){return state==='OK'||state==='FIX'?'good':!state||state==='STARTING'||state==='DISABLED'?'none':state==='STALE'||state==='NO_FIX'?'warn':'bad';}
+function compassView(c){
+ const state=c?.state,ok=state==='OK'&&num(c.heading_deg);
+ return {state,tone:navTone(state),heading:ok?`${c.heading_deg.toFixed(1)}\u00b0`:null,text:ok?`${c.heading_deg.toFixed(1)}\u00b0 \u00b7 OK`:NAV_TEXT[state]||state||'--'};
+}
+// HDOP up to 2 is good, up to 5 usable; fewer than 4 satellites is never good.
+function gpsView(g){
+ const state=g?.state,fix=state==='FIX',mode=g?.fix===3?'3D':'2D';
+ const hdop=fix&&num(g.hdop)?g.hdop:null,weakSats=num(g?.sats_used)&&g.sats_used<4;
+ const quality=hdop==null?null:hdop<=2&&!weakSats?'good':hdop<=5?'warn':'bad';
+ // A fix is only as good as its accuracy: 2D, or HDOP SEDANG/BURUK, is not green.
+ const rank={none:0,good:1,warn:2,bad:3},base=fix&&mode==='2D'?'warn':navTone(state);
+ return {state,fix,mode,tone:fix&&quality&&rank[quality]>rank[base]?quality:base,quality,hdop,
+  text:fix?`${mode} FIX`:NAV_TEXT[state]||state||'--',sats:num(g?.sats_used)?`${g.sats_used}/${g.sats_view??'?'}`:'--'};
+}
+function navRows(nav){
+ const c=compassView(nav?.compass),g=gpsView(nav?.gps),gps=nav?.gps||{};
+ const qualityText={good:'BAIK',warn:'SEDANG',bad:'BURUK'}[g.quality];
+ const motion=[num(gps.alt_m)?`${Math.round(gps.alt_m)} m`:null,num(gps.speed_mps)?`${gps.speed_mps.toFixed(1)} m/s`:null].filter(Boolean).join(' \u00b7 ');
+ return [["Kompas GY-26",c.text,TONE_CODE[c.tone],'compass'],
+  ["GPS fix / satelit",g.state?`${g.text} \u00b7 ${g.sats}`:'--',TONE_CODE[g.tone],'satellite'],
+  ["Akurasi (HDOP)",g.hdop==null?'--':`${g.hdop.toFixed(2)} \u00b7 ${qualityText}`,TONE_CODE[g.quality||'none'],'gauge'],
+  ["Posisi",g.fix&&num(gps.lat)&&num(gps.lon)?`${gps.lat.toFixed(6)}, ${gps.lon.toFixed(6)}`:'--','','pin'],
+  ["Tinggi / kecepatan",motion||'--','','updown']];
+}
+// Home: a glance at GPS fix and compass heading next to the temperature; hidden without nav.
+function renderNavStat(nav){
+ const c=compassView(nav?.compass),g=gpsView(nav?.gps),off=s=>!s||s==='DISABLED';
+ const host=$('navstat');host.hidden=off(c.state)&&off(g.state);if(host.hidden)return;
+ const set=(id,hidden,tone,text,label)=>{const e=$(id);e.hidden=hidden;e.dataset.tone=tone;e.textContent=text;e.title=label;};
+ set('gpsmini',off(g.state),g.tone,g.fix?`GPS ${g.mode}`:'GPS --',`GPS: ${g.text}, satelit ${g.sats}`);
+ set('compassmini',off(c.state),c.tone,c.heading||'KOMPAS --',`Kompas: ${c.text}`);
+}
 const mqttTopics=[
  ['KELUAR / RASPBERRY -> GROUND (STATUS UTAMA)',[
   ['availability','QoS 1 / retained','Online JSON: v,sid,online,t; offline LWT: v,sid,online,reason.'],
@@ -696,6 +736,7 @@ function render(s){
  renderOperation(s.last_operation,s);
  const alerts=s.active_alerts||[];const a=alerts.find(x=>x.severity==='error')||alerts[0];
  $('alert').textContent=a?a.text:'Status lokal normal';$('alertbox').className=`alert ${a?(a.severity==='error'?'bad':'warn'):'good'}`;
+ renderNavStat(s.nav);
  $('alerticon').textContent=a?'!':'\u2713';$('temp').textContent=`${fmt(h.temperature_c)}\u00b0C`;
  $('focus-angle-label').textContent=$('angle-label').textContent;$('focusangle').textContent=$('angle').textContent;$('focusangle').className=$('angle').className;
  $('focusage').textContent=$('age').textContent;$('focusfreq').textContent=$('freq').textContent;
@@ -726,7 +767,8 @@ function render(s){
  }
  const syn=q.sync||{},syncFlags=[syn.frame,syn.sample_delay,syn.iq];
  const syncCode=syncFlags.every(flag=>flag===true)?'SYNCED':syncFlags.includes(false)?'DEGRADED':'UNKNOWN';
- if(!hostPage) rows('sysrows',[["Engine / desired",`${p.observed||'--'} / ${p.desired||'BELUM DIAMBIL'}`,p.observed==='RUNNING'?'HEALTHY':p.observed,'cpu'],["Frame / Delay / IQ",`${syn.frame??'?'} / ${syn.sample_delay??'?'} / ${syn.iq??'?'}`,syncCode,'sync'],["Frame / progress",`${q.frame_index??'--'} / ${q.frame_progressing?'MAJU':'BELUM'}`,q.frame_progressing?'HEALTHY':'UNKNOWN','film'],["Drop total / delta",`${q.dropped_frames??'--'} / ${q.drop_delta??'--'}`,'','xcircle'],["DAQ umur / USB SDR",`${age(q.source_age_ms)} / ${h.usb_count??'--'} terdeteksi`,'','clock']]);
+ if(sysView===2) rows('sysrows',navRows(s.nav));
+ else if(sysView===0) rows('sysrows',[["Engine / desired",`${p.observed||'--'} / ${p.desired||'BELUM DIAMBIL'}`,p.observed==='RUNNING'?'HEALTHY':p.observed,'cpu'],["Frame / Delay / IQ",`${syn.frame??'?'} / ${syn.sample_delay??'?'} / ${syn.iq??'?'}`,syncCode,'sync'],["Frame / progress",`${q.frame_index??'--'} / ${q.frame_progressing?'MAJU':'BELUM'}`,q.frame_progressing?'HEALTHY':'UNKNOWN','film'],["Drop total / delta",`${q.dropped_frames??'--'} / ${q.drop_delta??'--'}`,'','xcircle'],["DAQ umur / USB SDR",`${age(q.source_age_ms)} / ${h.usb_count??'--'} terdeteksi`,'','clock']]);
  else rows('sysrows',[["CPU / RAM",`${fmt(h.cpu_percent)}% / ${fmt(h.memory_percent)}%`,'','gauge'],["Suhu / disk kosong",`${fmt(h.temperature_c)} C / ${fmt(h.disk_free_percent)}%`,'','thermo'],["Throttle / under-voltage",`${h.throttled??'unknown'} / ${h.undervoltage??'unknown'}`,'','bolt'],["Uptime",h.uptime_s==null?'--':`${Math.floor(h.uptime_s/60)} menit`,'','power'],["Jam sistem",h.clock_state,h.clock_state,'clock']]);
  rows('configrows',[["Node / profil",`${s.node_id||'--'} / ${c.profile||'--'}`,'','pin'],["Source / MQTT",`${c.source_configured?'OK':'SETUP'} / ${c.mqtt_configured?'CONFIGURED':'OFF'}`,'','folder'],["RF revision / proof",`${c.sdr_revision??'--'} / ${c.proof||'--'}`,'','hash'],["Akses / helper",`${authenticated?'ADMIN':'READ ONLY'} / ${s.capabilities?.helper_available?'SIAP':'OFF'}`,'','shield'],["Versi / kontrak",`${s.version||'--'} / ${s.contract||'--'}`,'','hash']]);
  setButtonLabel($('admin'),authenticated?'Logout':'Login',authenticated?'unlock':'lock');$('adminchip').hidden=!authenticated;
@@ -871,11 +913,11 @@ function segmented(id,onChange){
  host.addEventListener('click',event=>{
   const button=event.target.closest('button[data-view]');if(!button||button.classList.contains('on'))return;
   for(const item of host.querySelectorAll('button[data-view]')){const on=item===button;item.classList.toggle('on',on);item.setAttribute('aria-pressed',String(on));}
-  onChange(button.dataset.view==='1');
+  onChange(Number(button.dataset.view));
  });
 }
-segmented('linkpage',value=>{linkData=value;render(snapshot);});
-segmented('syspage',value=>{hostPage=value;$('systitle').textContent=hostPage?'RASPBERRY / HOST':'RDF / DAQ';render(snapshot);});
+segmented('linkpage',value=>{linkData=value===1;render(snapshot);});
+segmented('syspage',value=>{sysView=value;$('systitle').textContent=['RDF / DAQ','RASPBERRY / HOST','NAVIGASI / GPS'][value]||'RDF / DAQ';render(snapshot);});
 function modal(title,iconName='',tone=''){if(mqttKeyboardDismiss){mqttKeyboardDismiss(false);mqttKeyboardDismiss=null;}const dialog=$('modal').querySelector('.dialog');dialog.querySelector('.dialoghead').append($('closemodal'));dialog.classList.remove('keyboard-open');$('modalbody').classList.remove('keyboard-open');modalReturnFocus=document.activeElement;pinKeyHandler=null;$('modaltitle').replaceChildren(...(iconName?[icon(iconName,tone)]:[]),title);$('modalbody').replaceChildren();$('modalbody').scrollTop=0;$('modalmsg').textContent='';historyView=null;$('modal').dataset.recovery='full';$('modal').hidden=false;placeRecovery();return $('modalbody');}
 function dismissModal(){if(mqttKeyboardDismiss)mqttKeyboardDismiss(false);$('modal').hidden=true;historyView=null;placeRecovery();pinKeyHandler=null;const target=modalReturnFocus;modalReturnFocus=null;if(target&&typeof target.focus==='function')target.focus();}
 $('closemodal').onclick=dismissModal;

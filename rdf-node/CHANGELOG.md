@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.7.1 - Unreleased
+
+Contract `1.7` (unchanged).
+
+- Panel: GPS and compass are visible on the Pi. Sistem has a third view "Nav" (compass heading and state,
+  GPS fix 2D/3D with satellites used/in view, HDOP with BAIK <= 2 / SEDANG <= 5 / BURUK, position, altitude and
+  speed); the home status row shows a glance ("GPS 3D", heading) with a coloured dot, hidden when both sensors
+  are off or the Edge has no nav data.
+  The GPS colour follows accuracy too: a 2D fix or HDOP above 2 is yellow, above 5 red.
+- Compass: one missed or garbled GY-26 reply no longer reports `NO_REPLY`/`BAD_FRAME` (and drops the heading)
+  while the last heading is still within `stale_ms`; a missing or broken port still does. The panel, health
+  `hs`/`hdg` and Ground no longer flicker to a fault between two good frames.
+
 ## 1.7.0 - Unreleased
 
 Contract `1.7` (additive).

@@ -116,6 +116,11 @@ header{height:28px;padding:0 8px 0 10px;display:flex;align-items:center;justify-
 .alert.good>b{background:var(--ok)}.alert.warn>b{background:var(--warn)}.alert.bad>b{background:var(--bad)}
 .alert>span:nth-child(2){flex:1;min-width:0;line-height:14px;max-height:28px;overflow:hidden;overflow-wrap:anywhere}
 .alert>span:last-child{white-space:nowrap;color:var(--dim);font-variant-numeric:tabular-nums;font-weight:600}
+/* GPS / compass glance on the home alert row */
+.navstat{display:flex;align-items:center;gap:8px;flex-shrink:0;white-space:nowrap;font-variant-numeric:tabular-nums}
+.navmini{display:inline-flex;align-items:center;gap:4px;color:var(--text);font-weight:700}
+.navmini::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--faint)}
+.navmini[data-tone=good]::before{background:var(--ok)}.navmini[data-tone=warn]::before{background:var(--warn)}.navmini[data-tone=bad]::before{background:var(--bad)}
 
 /* Rows (Link / Sistem / Config) */
 .rows .row{height:39px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid var(--line);min-width:0;padding:0 2px}
