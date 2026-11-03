@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.10.2 - Unreleased
+
+Contract `1.10` (unchanged; one optional ACK field and one availability reason added).
+
+- Progress ACKs carry `result.final_within_ms`: the latest, in ms from that ACK, by which Edge will have sent the
+  final ACK, summed from the helper timeout, `start_timeout_seconds`, `retune_live_window_seconds` and 2 s of
+  polling. `VERIFYING{LIVE}` counts the restart fallback when the patch decided it may take one; `ACCEPTED` of
+  `config.patch` counts it whenever `processing_enabled` is set, since the worker decides later. It is on `ACCEPTED` of `config.patch`, `processing.set`, `service.restart`, `system.reboot.*` and
+  `system.shutdown.*`, and on the `APPLYING`/`VERIFYING` steps of `config.patch` (241000 ms for a restart with
+  the default 180 s start timeout). Ground waits at least until receipt + `final_within_ms` + 30 s (at most
+  900 s) before it reports no final ACK; without the field it keeps its own budgets. It is not journaled, so a
+  replayed ACK does not carry it.
+- A command rejected before the journal (`BUSY`, `CLOCK_UNTRUSTED`, `HELPER_UNAVAILABLE`...) is remembered by id
+  for 60 s (at most 64 ids). A second delivery of the same id and payload (an MQTT DUP resend, a restarted radio
+  bridge) gets the same `REJECTED` instead of being evaluated again, so it can no longer be `ACCEPTED` and run
+  while Ground keeps the first `REJECTED` as final. The same id with another payload is `COMMAND_ID_CONFLICT`.
+- A clean stop (`systemctl stop`/`restart`, upgrade, shutdown) publishes a retained
+  `availability {online:false, reason:"STOPPED"}` on the primary and on a ready backup broker and waits up to 2 s
+  for its PUBACK. The clean DISCONNECT drops the Will, so the retained `online:true` used to stay, and the LoRa
+  bridge kept resending it to Ground every 2 min. rdf-edge.service now orders after mosquitto and the LoRa
+  bridge, so it stops first and the farewell reaches the broker and the bridge queue. A stop of rdf-edge alone
+  leaves the bridge running to carry it; on system shutdown/reboot the bridge stops right after without
+  draining its queue, so over LoRa the farewell reaching Ground is best effort.
+- `capabilities` is republished (retained) whenever it changes, not only at connect: a helper that came up after
+  the agent, or a new approval, no longer leaves Ground with `remote_config_patch: false` until the next reconnect.
+  One failed helper status poll (the helper busy with another RPC for over 1 s) keeps the last status; only a
+  second failure in a row clears it, so a blip neither flips capabilities nor goes out to Ground.
+- rdf-edge subscribes `lora/edge` without Retain As Published, so only the broker's replay is flagged retained and
+  aged by the bridge's stamp `t`. A chrony step between the stamp and now no longer shows a live bridge as STALE.
+  Command subscriptions keep Retain As Published.
+- LoRa bridge: commands are sent three times (the third copy 1 s after the second, in a later turn of the edge),
+  ACKs still twice. At ~13% Ground-to-Edge frame loss a one-frame command is lost ~0.2% of the time instead of
+  ~1.7%. No wire change; the ground-role bridge needs this release.
+- LoRa bridge: a heartbeat whose `uptime_s` went down, or stayed the same while the peer's wall clock in it moved
+  on by 1 s or more (a run shorter than one heartbeat period sends 0 each time), means the other bridge restarted;
+  the receiver then forgets the message ids it completed (`rx.peer_restarts`), so new messages with reused ids are
+  no longer dropped as copies for 30 s. Message ids start at a random value. No wire change.
+- `install.sh` prints a NOTICE when `rdf-lora-edge.service` (or `rdf-lora-ground.service` with `--ground`) runs a
+  bridge outside `/opt/rdf-node/current`: the installer never updates that unit, so such a bridge keeps its old
+  code. When the unit runs from `/opt/rdf-node/current` and is active, it prints a NOTICE that it still runs the
+  previous release, with `sudo systemctl restart rdf-lora-<role>.service` (this release's 3x commands and
+  peer-restart reset need it). Read-only check: the installer does not restart the bridge.
+- Docs: `LORA_SERIAL.md` makes the LORA refclock the time authority (`prefer trust`) and the GPS refclock
+  `noselect` (monitored, never steering), because Ground judges freshness by its own clock; it also lists frame
+  type 4 TIME and the TURN flag, and the 0.45 s quiet window counted from the air. `MQTT_GROUND.md` adds the LoRa
+  bridge roles (edge, ground) with their read/write topics, and `lora/ground`, `lora/edge`, `ground/gps` to the
+  Ground controller and viewer subscribe lists.
+
 ## 1.10.1 - Unreleased
 
 Contract `1.10` (unchanged).

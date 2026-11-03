@@ -1,4 +1,4 @@
-import copy,json,math,os,shutil,struct,sys,tempfile,time,unittest
+import copy,json,math,os,shutil,struct,subprocess,sys,tempfile,time,unittest
 from pathlib import Path
 from unittest import mock
 from rdf_node.config import load_config,validate_config
@@ -1067,3 +1067,40 @@ class MqttWireTests(unittest.TestCase):
         self.assertTrue(q.offer(Message('a','t',b'a',0,False,None,1,0)))
         self.assertFalse(q.offer(Message('b','t',b'b',0,False,None,1,0,on_error=errors.append)))
         self.assertEqual(errors,['OUTBOX_FULL'])
+
+class InstallerTests(unittest.TestCase):
+    """install.sh never touches the hand-installed LoRa bridge unit; it says when an upgrade skips it."""
+    def notice(self,role,exec_start,active_state='inactive'):
+        text=(Path(__file__).resolve().parents[1]/'install.sh').read_text()
+        start=text.index('# The LoRa bridge unit is installed by hand');end=text.index('\nfi\n',start)+4
+        with tempfile.TemporaryDirectory() as tmp:
+            fake=Path(tmp)/'systemctl'
+            # `systemctl show -p <property> --value <unit>`: $3 is the property, $5 the unit.
+            fake.write_text('#!/bin/sh\n[ "$5" = "rdf-lora-%s.service" ] || exit 0\n'
+                            '[ "$3" = ExecStart ] && printf "%%s" "$EXEC_START"\n'
+                            '[ "$3" = ActiveState ] && [ -n "$EXEC_START" ] && printf "%%s" "$ACTIVE_STATE"\nexit 0\n'%role)
+            fake.chmod(0o755)
+            done=subprocess.run(['bash','-c','set -euo pipefail\nROLE=%s\n'%role+text[start:end]],capture_output=True,text=True,
+                                env={'PATH':tmp+os.pathsep+os.environ.get('PATH',''),'EXEC_START':exec_start,
+                                     'ACTIVE_STATE':active_state},timeout=10)
+        self.assertEqual(done.returncode,0,done.stderr);return done.stdout
+    def test_bridge_outside_current_release_is_named(self):
+        out=self.notice('edge','{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 /opt/rdf-lora/run.py lora-bridge --role edge ; }')
+        self.assertIn('NOTICE: rdf-lora-edge.service runs a bridge outside /opt/rdf-node/current (/opt/rdf-lora/run.py)',out)
+        self.assertIn('sudo systemctl restart rdf-lora-edge.service',out)
+    def test_bridge_from_current_release_or_no_unit_is_quiet(self):
+        self.assertEqual(self.notice('edge','{ argv[]=/usr/bin/python3 /opt/rdf-node/current/run.py lora-bridge ; }'),'')
+        self.assertEqual(self.notice('ground','{ argv[]=/usr/local/bin/rdf-node lora-bridge --role ground ; }'),'')
+        self.assertEqual(self.notice('edge',''),'')
+        self.assertEqual(self.notice('edge','',active_state='active'),'')
+    def test_running_bridge_from_current_release_is_told_to_restart(self):
+        # The new code under /opt/rdf-node/current reaches a running bridge only when it restarts.
+        for role,exec_start in (('edge','{ argv[]=/usr/bin/python3 /opt/rdf-node/current/run.py lora-bridge ; }'),
+                                ('ground','{ argv[]=/usr/local/bin/rdf-node lora-bridge --role ground ; }')):
+            out=self.notice(role,exec_start,active_state='active')
+            self.assertIn('NOTICE: rdf-lora-%s.service still runs the previous release'%role,out)
+            self.assertIn('sudo systemctl restart rdf-lora-%s.service'%role,out)
+            self.assertNotIn('outside /opt/rdf-node/current',out)
+        # A bridge outside the release keeps its own notice, whether running or not.
+        out=self.notice('edge','{ argv[]=/usr/bin/python3 /opt/rdf-lora/run.py lora-bridge ; }',active_state='active')
+        self.assertIn('runs a bridge outside /opt/rdf-node/current',out);self.assertNotIn('previous release',out)

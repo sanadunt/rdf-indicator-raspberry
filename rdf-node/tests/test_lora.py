@@ -1,5 +1,6 @@
 import hashlib
 import json,os,select,tempfile,threading,time,unittest
+from unittest import mock
 from pathlib import Path
 from rdf_node import lora
 from rdf_node.lora import (DATA,EDGE_TOPICS,GROUND_TOPICS,TOPIC_IDS,Bridge,Receiver,Sender,cobs_decode,cobs_encode,
@@ -73,15 +74,49 @@ class SenderTests(unittest.TestCase):
         self.assertEqual(s.stats['superseded'],1)
         s.offer(3,b'{"doa":1}',now=now)
         s.next_frames(t+4);self.assertGreaterEqual(s.stats['expired'],1)
-    def test_commands_and_acks_go_twice_and_arrive_once(self):
+    def test_commands_go_three_times_acks_twice_and_each_arrives_once(self):
         s=Sender(100000,200);t=1000.0;s.offer(65,b'{"op":"config.patch"}',now=t)
         first=s.next_frames(t);r=Receiver()
         self.assertEqual(len(first),1)
         # The copy waits REPEAT_GAP_S so a single collision cannot take both.
         self.assertEqual(s.next_frames(t+lora.REPEAT_GAP_S/2),[])
-        again=s.next_frames(t+lora.REPEAT_GAP_S+.01);self.assertEqual(len(again),1)
-        self.assertEqual(len(r.feed(b''.join(first+again))),1);self.assertEqual(r.stats['duplicates'],1)
+        t2=t+lora.REPEAT_GAP_S+.01;again=s.next_frames(t2);self.assertEqual(len(again),1)
+        # The third send waits twice as long, so it lands in a later turn of the edge.
+        self.assertEqual(s.next_frames(t2+lora.REPEAT_GAP_S*1.5),[])
+        third=s.next_frames(t2+lora.REPEAT_GAP_S*2+.01);self.assertEqual(len(third),1)
+        self.assertEqual(len({decode_frame(f[:-1])[2] for f in first+again+third}),1)  # one message id
+        self.assertEqual(len(r.feed(b''.join(first+again+third))),1);self.assertEqual(r.stats['duplicates'],2)
         self.assertEqual(s.depth(),0)
+        # An ACK goes twice.
+        s.offer(11,b'{"ack":1}',now=t);sent=[];x=t
+        for _ in range(40): x+=.1;sent+=s.next_frames(x)
+        self.assertEqual(len(sent),2)
+    def test_a_restarted_peer_is_not_taken_for_copies(self):
+        # Message ids start again when the other bridge restarts; its lower uptime tells the receiver.
+        def beat(up):
+            s=Sender(100000,200);s.heartbeat(up,Receiver().stats,0.0);return s.next_frames(1.0)[0]
+        r=Receiver();t=100.0
+        self.assertEqual(len(r.feed(beat(50)+encode_frames(DATA,0,7,64,b'{"id":"a"}')[0],t)),1)
+        self.assertEqual(r.feed(encode_frames(DATA,1,7,64,b'{"id":"a"}')[0],t+1),[])  # a copy
+        self.assertEqual(r.feed(beat(55),t+2),[]);self.assertEqual(r.stats['peer_restarts'],0)
+        out=r.feed(beat(1)+encode_frames(DATA,0,7,64,b'{"id":"b"}')[0],t+3)
+        self.assertEqual(out,[(64,b'{"id":"b"}',False,False)]);self.assertEqual(r.stats['peer_restarts'],1)
+        self.assertEqual(r.feed(encode_frames(DATA,1,7,64,b'{"id":"b"}')[0],t+4),[])  # copies still dropped
+    def test_a_peer_restarted_within_one_heartbeat_is_seen(self):
+        # A crash loop (or a run shorter than heartbeat_s) sends uptime 0 every start: the same uptime a second
+        # or more later by the peer's own clock is a new run; the same uptime within that second is not.
+        def beat(up,clock_ms):
+            s=Sender(100000,200)
+            with mock.patch.object(lora,'now_ms',return_value=clock_ms):  # stamped as it leaves
+                s.heartbeat(up,Receiver().stats,0.0);return s.next_frames(1.0)[0]
+        r=Receiver();t=100.0;c=1_793_000_000_000
+        self.assertEqual(len(r.feed(beat(0,c)+encode_frames(DATA,0,7,64,b'{"id":"a"}')[0],t)),1)
+        self.assertEqual(r.feed(beat(0,c+400),t+.5),[]);self.assertEqual(r.stats['peer_restarts'],0)
+        out=r.feed(beat(0,c+3_400)+encode_frames(DATA,0,7,64,b'{"id":"b"}')[0],t+3)
+        self.assertEqual(out,[(64,b'{"id":"b"}',False,False)]);self.assertEqual(r.stats['peer_restarts'],1)
+        self.assertEqual(r.feed(beat(5,c+8_400),t+8),[]);self.assertEqual(r.stats['peer_restarts'],1)
+    def test_message_ids_start_anywhere(self):
+        self.assertGreater(len({Sender(1000,200).msg for _ in range(64)}),8)
     def test_byte_budget_paces_and_min_interval_spaces_angular(self):
         s=Sender(500,200,{4:20});now=0.0
         sent=0
@@ -250,8 +285,34 @@ class EdgePanelLoraTests(unittest.TestCase):
     def test_subscribed_on_the_primary_control_client_only(self):
         self.a.cfg['mqtt']['enabled']=True
         clients=self.a._new_mqtt_clients(dict(self.a.mqtt_desired,enabled=True))
-        self.assertIn((self.a.prefix+'/lora/edge',0,False),clients['control'].subscriptions)
-        self.assertNotIn((self.a.prefix+'/lora/edge',0,False),self.a._command_subscriptions())
+        # Without Retain As Published: only the broker's replay arrives flagged retained.
+        self.assertIn((self.a.prefix+'/lora/edge',0,False,False),clients['control'].subscriptions)
+        self.assertNotIn(self.a.prefix+'/lora/edge',[s[0] for s in self.a._command_subscriptions()])
+        self.assertTrue(all(len(s)==3 for s in self.a._command_subscriptions()))  # commands keep RAP
+    def test_live_status_is_fresh_even_when_the_clock_stepped(self):
+        # chrony may step the Pi clock between the bridge's stamp and now. Through rdf-edge's own subscription
+        # (no Retain As Published) a retained status published while it listens arrives unflagged, so its
+        # stamp does not age it; only the broker's replay on subscribe is aged by `t`.
+        from rdf_node.util import now_ms
+        a=self.a;topic=a.prefix+'/lora/edge';broker=Broker();self.addCleanup(broker.stop)
+        creds=Path(self.tmp.name)/'creds.json';creds.write_text(json.dumps({'username':'test','password':'test-password'}))
+        broker.retained[topic]=self.status(now_ms()-90_000)   # left by a bridge that has since stopped
+        a.cfg['mqtt'].update(enabled=True,host='127.0.0.1',port=broker.port,tls=False,allow_insecure_loopback=True,
+                             control_credentials_file=str(creds),keepalive=5,reconnect_max=5)
+        flags=[];incoming=a._incoming
+        def record(topic,payload,retained,**kw):
+            if topic.endswith('/lora/edge'):flags.append(retained)
+            return incoming(topic,payload,retained,**kw)
+        a._incoming=record
+        control=a._new_mqtt_clients(dict(a.mqtt_desired,enabled=True))['control'];self.addCleanup(control.stop);control.start()
+        self.assertTrue(wait(lambda:control.ready and flags,5),(control.status(),broker.errors))
+        a._snapshot();self.assertEqual((flags,a.snapshot()['link']['lora']['link']),([True],'STALE'))
+        bridge=Client(cfg=dict(a.cfg['mqtt'],control_credentials_file=None),client_id='bridge',credentials_file=str(creds))
+        self.addCleanup(bridge.stop);bridge.start();self.assertTrue(wait(lambda:bridge.ready,5))
+        for n,step in enumerate((700_000,-25_000),2):
+            self.assertTrue(bridge.offer('s',topic,self.status(now_ms()+step),qos=1,retain=True))
+            self.assertTrue(wait(lambda:len(flags)==n,5),broker.errors);a._snapshot()
+            self.assertEqual((flags[-1],a.snapshot()['link']['lora']['link']),(False,'UP'),step)
 
 class StatusContractTests(unittest.TestCase):
     def test_status_fields_the_ground_console_reads(self):

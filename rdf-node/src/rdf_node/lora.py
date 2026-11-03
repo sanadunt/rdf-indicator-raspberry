@@ -11,8 +11,8 @@ So rdf-edge, rdf-ground and any other consumer keep the MQTT contract unchanged.
 `header | chunk | CRC-16`, COBS-encoded and ended by 0x00. Payloads are zlib-compressed with a shared
 dictionary when that is smaller, split into fragments of at most `frame_max` bytes on the wire, and
 paced by a byte budget so the module's ~1 KB buffer never overflows. There is no retransmission:
-telemetry is replaced by newer telemetry, retained topics are resent when the link comes back, and
-commands and ACKs are sent twice (the receiver drops the copy).
+telemetry is replaced by newer telemetry, retained topics are resent when the link comes back, ACKs
+are sent twice and commands three times (the receiver drops the copies).
 """
 from __future__ import annotations
 import json
@@ -70,6 +70,7 @@ GROUND_TOPICS={
 TOPIC_IDS={suffix:i for i,suffix in {**EDGE_TOPICS,**GROUND_TOPICS}.items()}
 
 # Sending policy per topic id: (priority: lower first, max age s or None, latest-wins, sent twice).
+# A topic "sent twice" that is a command goes COMMAND_SENDS times.
 # Ages stay inside what Ground accepts as fresh (DoA 5 s, angular 10 s, health 8 s). DoA comes first
 # among telemetry and goes twice; health is the newest one at most every 2 s (Ground needs <= 8 s).
 POLICY={
@@ -79,6 +80,10 @@ POLICY={
 }
 # Commands carry a 15 s deadline (expires_ms); one that cannot leave within 10 s is dropped here.
 for _id in GROUND_TOPICS: POLICY[_id]=(0,10,False,True)
+# Ground to edge loses more frames (~13%) than the other way, and a lost command is only seen as no ACK
+# 20 s later: three sends of a one-frame command lose it ~0.2% of the time instead of ~1.7%. Commands are
+# rare and small, so the airtime costs nothing.
+COMMAND_SENDS=3
 RETAINED_RESEND=(9,7,8)  # availability, state, capabilities: resent when the link comes back
 # ...and every few minutes: a retained topic Edge publishes once (capabilities at connect) is lost for good
 # when one of its frames is, and a few hundred bytes every 2 min cost nothing on the link.
@@ -172,8 +177,8 @@ class Receiver:
     def __init__(self):
         self.buf=bytearray(); self.parts={}; self.recent={}; self.last_seq=None
         self.stats=dict(frames=0,crc_errors=0,bad_frames=0,lost_frames=0,messages=0,duplicates=0,
-                        incomplete=0,heartbeats=0)
-        self.peer=None; self.time_frames=[]; self.turn_at=None
+                        incomplete=0,heartbeats=0,peer_restarts=0)
+        self.peer=None; self.peer_clock=None; self.time_frames=[]; self.turn_at=None
     def feed(self,data,now=None):
         now=time.monotonic() if now is None else now
         out=[]; self.buf+=data
@@ -200,6 +205,14 @@ class Receiver:
                 self.stats['heartbeats']+=1
                 if len(chunk)>=20:
                     up,rx,crc,lost,clock=struct.unpack('!IIHHQ',chunk[:20])
+                    # The peer bridge restarted: its uptime went down, or stayed the same while its wall clock
+                    # moved on a second or more (a run shorter than one heartbeat period sends 0 each time). Its
+                    # message ids start again, so ids this side completed in the last DEDUP_S are new messages
+                    # now, not copies.
+                    if self.peer and (up<self.peer['uptime_s'] or
+                                      (up==self.peer['uptime_s'] and clock-self.peer_clock>=1000)):
+                        self.recent.clear(); self.parts.clear(); self.stats['peer_restarts']+=1
+                    self.peer_clock=clock
                     # Peer wall clock minus ours at arrival (includes one-way latency, ~0.1 s).
                     self.peer=dict(uptime_s=up,rx_frames=rx,crc_errors=crc,lost_frames=lost,
                                    clock_offset_ms=clock-now_ms(),at=now)
@@ -224,7 +237,7 @@ class Receiver:
         return topic,payload,bool(flags&F_RETAIN),bool(flags&F_QOS1)
 
 # The copy of a command or ACK leaves this long after the first, so one collision on the half-duplex
-# radio cannot take both.
+# radio cannot take both; a command's third send waits twice as long, so it lands in a later turn.
 REPEAT_GAP_S=0.5
 
 class Pending:
@@ -244,7 +257,9 @@ class Sender:
         # When the radio is expected to finish what was written to it (frames queue in its buffer).
         self.air_until=0.0
         self.burst=max(burst,frame_max*2)
-        self.lock=threading.Lock(); self.box={}; self.fifo=0; self.seq=0; self.msg=0
+        # A random first message id: should the peer miss this side's first heartbeat after a restart (it
+        # then still remembers the old ids), new messages rarely reuse an id it completed recently.
+        self.lock=threading.Lock(); self.box={}; self.fifo=0; self.seq=0; self.msg=os.urandom(1)[0]
         self.wire=deque(); self.last_sent={}; self.tokens=float(self.burst); self.refilled=time.monotonic()
         self.stats=dict(queued=0,superseded=0,expired=0,sent_messages=0,sent_frames=0,sent_bytes=0,too_large=0)
     def offer(self,topic,payload,retain=False,qos1=False,now=None):
@@ -256,7 +271,8 @@ class Sender:
                 key=topic
             else:
                 self.fifo+=1; key=(topic,self.fifo)
-            self.box[key]=Pending(topic,payload,retain,qos1,priority,now,2 if twice else 1)
+            sends=(COMMAND_SENDS if topic in GROUND_TOPICS else 2) if twice else 1
+            self.box[key]=Pending(topic,payload,retain,qos1,priority,now,sends)
             self.stats['queued']+=1
     def _expire(self,now):
         for key,p in list(self.box.items()):
@@ -278,8 +294,9 @@ class Sender:
         if p.repeat>1:
             # The copy keeps the message id, so the receiver drops it when the first one arrived.
             self.fifo+=1
+            gap=REPEAT_GAP_S if p.msg is None else 2*REPEAT_GAP_S
             self.box[('copy',self.fifo)]=Pending(p.topic,p.payload,p.retain,p.qos1,p.priority,p.created,
-                                                 p.repeat-1,msg,now+REPEAT_GAP_S)
+                                                 p.repeat-1,msg,now+gap)
         if p.msg is None: self.last_sent[p.topic]=now; self.stats['sent_messages']+=1
     @staticmethod
     def _stamp(part):

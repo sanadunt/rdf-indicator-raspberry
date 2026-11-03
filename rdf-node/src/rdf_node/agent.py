@@ -55,8 +55,9 @@ class Agent:
         self.bulk_resume_after=time.monotonic()+cfg['telemetry']['resume_stable_seconds']
         self.hq=0; self.last_doa_q=0; self.last_angular_q=0; self.publish_errors={}; self.inbound_rejects={}
         self.diagnostic_q=0; self.diagnostic_angular_q=0
-        self.angular_abort=0; self.bulk_reason='BOOTSTRAP'; self.helper_status={}
+        self.angular_abort=0; self.bulk_reason='BOOTSTRAP'; self.helper_status={}; self.helper_misses=0
         self.clients={}; self._generation=-1; self.last_config_rev=None; self.last_sent_state=None
+        self.caps_sent={}  # link -> capabilities bytes last offered there
         self.mqtt_state_path=Path(cfg['state_dir'])/'mqtt-ui-settings.json'
         self.mqtt_credentials_paths={name:Path(cfg['state_dir'])/f'mqtt-ui-{name}.json' for name in ('control','bulk')}
         self.mqtt_base_credentials={name:cfg['mqtt'].get(f'{name}_credentials_file') for name in ('control','bulk')}
@@ -153,7 +154,9 @@ class Agent:
         if not self.cfg['mqtt']['enabled']: return {}
         m=self.cfg['mqtt']; demo_suffix='-demo' if self.demo else ''
         # The primary also hears the LoRa bridge status on its (local) broker; retained, so it arrives at once.
-        subs=self._command_subscriptions()+[(self.prefix+'/lora/edge',0,False)]; will=self._will()
+        # Without Retain As Published only that replay comes flagged retained; live statuses do not, so a
+        # clock step between the bridge's stamp and now never ages a live one.
+        subs=self._command_subscriptions()+[(self.prefix+'/lora/edge',0,False,False)]; will=self._will()
         epoch=self.link_epoch['primary']
         return {
             'control':Client(cfg=m,client_id=settings['client_id']+'-control'+demo_suffix,
@@ -423,12 +426,26 @@ class Agent:
         self.commands.stop()
         with self.mqtt_apply_lock:
             self.mqtt_running=False
+            self._farewell()
             for c in self.clients.values(): c.stop()
             if self.backup_client: self.backup_client.stop()
         self.monitor.stop(); self.nav.stop()
         for t in self.threads: t.join(3)
         # A long lifecycle worker may still be reconciling; daemon exits without replay.
         if not self.commands.thread.is_alive(): self.journal.close()
+    def _farewell(self,timeout=2.0):
+        # A clean stop sends DISCONNECT, which makes the broker drop the Will: without this the retained
+        # availability (and what the LoRa bridge resends from it) would say online until the next start.
+        farewell={'v':2,'sid':self.sid,'contract':CONTRACT,'online':False,'t':now_ms(),'reason':'STOPPED'}
+        clients=[c for c in (self.clients.get('control'),self.backup_client) if c and c.ready]; pending=set()
+        for i,c in enumerate(clients):
+            # Wait for the PUBACK: the broker then holds the farewell retained before the session closes.
+            pending.add(i)
+            if not c.offer('offline',self.prefix+'/availability',farewell,qos=1,retain=True,priority=0,
+                           on_sent=lambda i=i:pending.discard(i),on_error=lambda reason,i=i:pending.discard(i)):
+                pending.discard(i)
+        deadline=time.monotonic()+timeout
+        while pending and time.monotonic()<deadline: time.sleep(.05)
     def _command_dropped(self,topic,link,code):
         # A command that never reaches CommandManager still shows up in the panel and in health/detail.
         with self.lock: self.inbound_rejects[code]=self.inbound_rejects.get(code,0)+1
@@ -440,9 +457,9 @@ class Agent:
         except (ValueError,RecursionError): return
         if not isinstance(j,dict) or j.get('v')!=1 or j.get('role')!='edge': return
         now=time.monotonic()
-        # A retained copy (replayed when rdf-edge or the broker reconnects) is as old as the bridge's own
-        # stamp `t` (same host clock); one without a usable stamp counts as stale, so a dead bridge never
-        # shows UP for LORA_STATUS_FRESH_S after a restart.
+        # A retained copy (only the replay when rdf-edge or the broker reconnects: the subscription has no
+        # Retain As Published) is as old as the bridge's own stamp `t` (same host clock); one without a usable
+        # stamp counts as stale, so a dead bridge never shows UP for LORA_STATUS_FRESH_S after a restart.
         seen=now
         if retained:
             t=j.get('t'); age_ms=now_ms()-t if isinstance(t,int) and not isinstance(t,bool) else None
@@ -507,15 +524,21 @@ class Agent:
         while not self.stop_event.is_set():
             try:
                 self.source.poll()
-                if count%20==0 and not self.demo:
-                    try: self.helper_status=call_helper(self.cfg['control']['helper_socket'],{'op':'status'},timeout=1)
-                    except Exception: self.helper_status={}
+                if count%20==0 and not self.demo: self._poll_helper()
                 self._snapshot()
                 if count%240==0: self.journal.prune()
             except Exception as e:
                 with self.lock:
                     self.snapshot_data['collector_error']=type(e).__name__
             count+=1; self.stop_event.wait(self.cfg['source']['poll_ms']/1000)
+    def _poll_helper(self):
+        # The helper serves one RPC at a time, so this 1 s poll fails while another RPC holds it. One miss keeps
+        # the last status; the second in a row clears it. A blip then neither flips capabilities (republished
+        # to Ground on change) nor what the panel offers.
+        try: self.helper_status=call_helper(self.cfg['control']['helper_socket'],{'op':'status'},timeout=1); self.helper_misses=0
+        except Exception:
+            self.helper_misses+=1
+            if self.helper_misses>=2: self.helper_status={}
     def _snapshot(self):
         host=self.monitor.snapshot()
         if self.demo: host['clock_trusted']=True; host['clock_state']='DEMO'
@@ -891,7 +914,7 @@ class Agent:
                     self.bulk_resume_after=now+self.cfg['telemetry']['resume_stable_seconds']
                     self._offer('available','availability',{'v':2,'sid':self.sid,'contract':CONTRACT,'online':True,'t':now_ms()},1,True,priority=0,
                                 links=('primary',))
-                    self._offer('caps','capabilities',self.capabilities(),1,True,priority=3,links=('primary',))
+                    self.caps_sent.pop('primary',None)
                     due['state']=0; due['diagnostic-angular-invalid']=0; due['diagnostic-angular-blocked']=0
                 backup_hello=False
                 if b_ready and bk.generation!=self._backup_generation:
@@ -899,8 +922,14 @@ class Agent:
                     self._backup_generation=bk.generation; backup_hello=True
                     self._offer('available','availability',{'v':2,'sid':self.sid,'contract':CONTRACT,'online':True,'t':now_ms()},1,True,priority=0,
                                 links=('backup',))
-                    self._offer('caps','capabilities',self.capabilities(),1,True,priority=3,links=('backup',))
+                    self.caps_sent.pop('backup',None)
                     due['diagnostic-angular-invalid:backup']=0; due['diagnostic-angular-blocked:backup']=0
+                # Capabilities go out at connect and again whenever they change (a helper that came up after
+                # the agent, a new approval): the retained copy, and what the LoRa bridge resends, stays true.
+                caps=compact(self.capabilities())
+                for link in ready:
+                    if self.caps_sent.get(link)!=caps and self._offer('caps','capabilities',caps,1,True,priority=3,links=(link,)):
+                        self.caps_sent[link]=caps
                 def tick(key,seconds):
                     if now>=due.get(key,0): due[key]=now+seconds; return True
                     return False

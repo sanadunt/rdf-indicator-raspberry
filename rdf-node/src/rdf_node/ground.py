@@ -328,7 +328,8 @@ class Ground:
                     'detection':{'valid':doa_valid,'relative_doa_deg':self.doa.get('a') if doa_valid else None,
                                  'frequency_hz':self.doa.get('f'),'source_timestamp_ms':self.doa.get('t'),'confidence_native_db':self.doa.get('c'),
                                  'power_native_db':self.doa.get('p'),'received_age_ms':da,
-                                 # Edge 1.10+: north-clockwise bearing = array heading + relative DoA.
+                                 # Edge 1.10+ sends its own bearing `b` from north, clockwise: (h - a) mod 360 with
+                                 # theta_mirror (a runs counter-clockwise), (h + a) mod 360 with csv_native. Shown as sent.
                                  **({key:(value if doa_valid else None) for key,value in doa_nav(self.doa).items()}
                                     if self.doa else {})},
                     'diagnostic_doa':diagnostic,

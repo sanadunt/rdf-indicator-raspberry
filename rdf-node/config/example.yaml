@@ -94,7 +94,8 @@ nav:
     baud: 9600
     stale_ms: 3000
     publish_position: false
-    # GPS time to chrony (`refclock SOCK <path> refid GPS offset 0.2`), e.g. /run/chrony.gps.sock.
+    # GPS time to chrony (`refclock SOCK <path> refid GPS offset 0.2 ... noselect`: monitored only, the LORA
+    # refclock steers the clock; see docs/LORA_SERIAL.md), e.g. /run/chrony.gps.sock.
     chrony_sock: null
   # Array heading stamped on every DoA sample (telemetry/doa h, b): where the array reference
   # (DoA 0°) points, clockwise from north. compass: the compass (offset_deg turns it into the array

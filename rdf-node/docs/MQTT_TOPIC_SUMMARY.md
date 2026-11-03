@@ -77,7 +77,7 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | `telemetry/health/detail` | Edge -> Ground | Control | 0 | Tidak | Tiap 10 s; expiry 15 s | Detail host, USB, sync DAQ, trafik, parse dan abort counter, serta status link PPP (interface, ping peer, unit `t900-ppp.service`, restart count). |
 | `telemetry/angular` | Edge -> Ground | Bulk | 0 | Tidak | Profile-dependent; expiry 3 s | Frame 360 sampel; flags `63` untuk LIVE atau trust-only partial untuk UNVERIFIED. |
 | `state` | Edge -> Ground | Control | 1 | Ya | Saat state berubah dan paling lambat tiap 60 s | Status run/DAQ, profile, clock dan identitas boot. Jangan dipakai sebagai heartbeat. |
-| `capabilities` | Edge -> Ground | Control | 1 | Ya | Saat generation koneksi Control berubah | Versi, identitas, codec, profile dan capability yang diizinkan. |
+| `capabilities` | Edge -> Ground | Control | 1 | Ya | Saat generation koneksi Control berubah, dan sejak 1.10.2 setiap kali isinya berubah | Versi, identitas, codec, profile dan capability yang diizinkan. |
 | `settings/reported` | Edge -> Ground | Control | 1 | Tidak | Hanya setelah `cmd/config/get`; expiry 30 s | `v,sid,boot,id,rev,t,settings_json`; teks native UTF-8 persis; broker utama TLS atau plaintext, broker cadangan TLS kecuali opt-in plaintext; compact envelope maksimum 8 KiB. |
 | `availability` | Edge -> Ground | Control | 1 | Ya | Online saat koneksi siap; Last Will saat koneksi hilang | Ketersediaan Control, bukan bukti DAQ sehat. |
 | `ack/config` | Edge -> Ground | Control | 1 | Tidak | Saat progress/hasil command `config.*`; expiry 30 s | ACK command konfigurasi. |
@@ -468,6 +468,14 @@ Last Will saat koneksi MQTT hilang:
 {"v":2,"sid":"7a8b9c0d","contract":"1.5","online":false,"reason":"CONNECTION_LOST"}
 ```
 
+DISCONNECT yang bersih membuat broker membuang Last Will. Karena itu sejak 1.10.2 agent yang berhenti
+normal (`systemctl stop`/`restart`, upgrade, shutdown) lebih dulu mengirim farewell retained ke broker
+utama dan cadangan yang siap, lalu menunggu PUBACK paling lama 2 s:
+
+```json
+{"v":2,"sid":"7a8b9c0d","contract":"1.10","online":false,"t":1790668900123,"reason":"STOPPED"}
+```
+
 Availability adalah nilai terakhir, bukan heartbeat dan bukan bukti DAQ sehat. Cek `state`,
 `health`, dan timestamp. PUBACK hanya menunjukkan broker mengakui PUBLISH QoS 1, bukan aplikasi
 Ground memprosesnya.
@@ -643,6 +651,14 @@ Jika `id` sama dan payload sama, Edge mengembalikan progress/hasil jurnal tanpa 
 `ack/config`, lalu memicu respons terpisah di `settings/reported`. `operation.get` mengembalikan
 `operation` berupa record operation publik atau `null`. Error biasanya berisi `{"error":"ERROR_CODE"}`.
 Status yang dikenal jurnal mencakup `ACCEPTED`, `APPLYING`, `VERIFYING`, `REBOOT_SCHEDULED`, `SHUTDOWN_SCHEDULED`, `PPP_RESTART_REQUESTED`, `APPLIED`, `FAILED`, `REJECTED`, `EXPIRED`, `CONFLICT`, `PERSISTED_UNVERIFIED`, `OUTCOME_UNKNOWN`, dan `CANCELLED`.
+
+Sejak 1.10.2 ACK progress membawa `result.final_within_ms` (integer, opsional): paling lambat berapa
+milidetik setelah ACK itu Edge sudah mengirim ACK akhir. Ada di `ACCEPTED` untuk `config.patch`,
+`processing.set`, `service.restart`, `system.reboot.*`, dan `system.shutdown.*`, serta di `APPLYING` dan
+`VERIFYING` `config.patch`. Nilainya dihitung dari timeout yang dikonfigurasi (lihat
+[CONTROL.md](CONTROL.md#batas-waktu-ack-akhir-final_within_ms)). Ground menunggu ACK akhir paling
+sedikit sampai waktu terima ACK + `final_within_ms` + 30.000 ms (maks. 900.000 ms); tanpa field ini
+Ground memakai batas bawaannya.
 
 Untuk `ppp.restart`, ACK berurutan `ACCEPTED`, `PPP_RESTART_REQUESTED` (`accepted_by_systemd`,
 `requested_ms`, `service`), lalu ACK akhir dari pemantau link Edge: `APPLIED` dengan

@@ -81,7 +81,7 @@ class RetuneTests(unittest.TestCase):
     def run_patch(self,engine,changes,**control):
         cm,agent=self.manager(engine,**control);steps=[]
         r={'id':'t1','op':'config.patch','changes':changes}
-        stage,result=cm._execute(r,'ground-controller',lambda st,res:steps.append((st,dict(res))))
+        stage,result=cm._execute(r,'ground-controller',lambda st,res,within=None:steps.append((st,dict(res))))
         return stage,result,steps,agent
     def lifecycle(self,engine):
         return [d for op,d,_ in engine.calls if op=='processing.set']
@@ -101,6 +101,19 @@ class RetuneTests(unittest.TestCase):
         # The gain we had is written back while the engine is stopped, and stays after start.
         self.assertEqual((e.safe['gain_db'],e.safe['center_frequency_hz']),(12.5,103100000))
         self.assertIn(('APPLYING','RESTART'),[(st,res.get('method')) for st,res in steps])
+    def test_live_bound_follows_the_fallback_decision_not_a_later_status_read(self):
+        # The helper status poll can fail ({}) between the fallback decision and the VERIFYING{LIVE} ACK;
+        # the restart still runs, so the bound must still cover it.
+        e=FakeEngine(live='crash');cm,agent=self.manager(e,retune_live_window_seconds=1);steps=[]
+        def helper(r):
+            if r['op']=='config.patch':agent.helper_status={}
+            return e.helper(r)
+        cm._helper=helper
+        r={'id':'t1','op':'config.patch','changes':{'vfo0_frequency_hz':105700000,'center_frequency_hz':105700000}}
+        stage,result=cm._execute(r,'ground-controller',lambda st,res,within=None:steps.append((st,res.get('method'),within)))
+        self.assertEqual((stage,result['method']),('APPLIED','RESTART'))
+        self.assertEqual(steps[0],('VERIFYING','LIVE',cm._live_within_s(True)))
+        self.assertGreater(cm._live_within_s(True),cm._restart_within_s())
     def test_lost_daq_sync_after_live_retune_falls_back_to_restart(self):
         e=FakeEngine(live='crash')
         stage,result,_,_=self.run_patch(e,{'vfo0_frequency_hz':105700000,'center_frequency_hz':105700000})

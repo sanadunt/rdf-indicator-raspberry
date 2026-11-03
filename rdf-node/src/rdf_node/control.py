@@ -1,4 +1,6 @@
 from __future__ import annotations
+import collections
+import math
 import queue
 import re
 import sqlite3
@@ -24,6 +26,12 @@ SUMMARY_KIND={'config.patch':'config','stream.set':'profile','processing.set':'p
               'system.shutdown.prepare':'shutdown','system.shutdown.execute':'shutdown',
               'config.get':'read','operation.get':'read'}
 PPP_RESTART_MIN_GAP_S=15
+# A command rejected before the journal is remembered this long (longer than any command deadline), so a
+# duplicate delivery of the same id gets the same REJECTED answer instead of a second evaluation.
+REJECTED_MEMORY_S=60; REJECTED_MEMORY_MAX=64
+# Each helper RPC waits at most HELPER_TIMEOUT_S. Progress ACKs carry result.final_within_ms, the latest the
+# final ACK leaves, summed from these and the configured timeouts; FINAL_ACK_SLACK_S covers the 0.25 s polling.
+HELPER_TIMEOUT_S=8; SETTLE_DIGEST_S=4.0; FINAL_ACK_SLACK_S=2.0
 COMMAND_FIELDS=frozenset({'v','id','sid','boot','issued_ms','expires_ms','base_rev','op','changes','desired','profile',
                           'target_id','prepare_id','challenge'})
 # Operations that only the root helper can carry out (stream.set and the read ops stay in the agent).
@@ -159,11 +167,13 @@ class CommandManager:
         self.queue=queue.Queue(1); self.stop_event=threading.Event()
         self.thread=threading.Thread(target=self._worker,daemon=True,name='command-worker')
         self.last_rate={}
+        # id -> (request digest, op, result, monotonic time) of commands rejected before the journal.
+        self.rejected=collections.OrderedDict()
         # PPP restart has its own lane: an SDR verification (BUSY) must never block link recovery.
         self.ppp_lock=threading.Lock(); self.ppp_active=None; self.ppp_last=None; self.ppp_thread=None
     def start(self): self.thread.start()
     def stop(self): self.stop_event.set(); self.thread.join(3)
-    def _helper(self,r,timeout=8):
+    def _helper(self,r,timeout=HELPER_TIMEOUT_S):
         return call_helper(self.cfg['control']['helper_socket'],r,timeout)
     def _require_helper(self):
         # Reject before journaling when the helper is known to be gone: nothing would run anyway.
@@ -209,6 +219,13 @@ class CommandManager:
                 if old['hash']!=digest(request): raise ValueError('COMMAND_ID_CONFLICT')
                 self._send(id,op,old['stage'],old['result'],link=link)
                 return self.public(old)
+            with self.lock: seen=self.rejected.get(id)
+            if seen and time.monotonic()-seen[3]<=REJECTED_MEMORY_S:
+                # A repeated delivery (MQTT DUP resend, a restarted radio bridge): the reason it was refused
+                # (BUSY, say) may be gone now, but Ground already holds the REJECTED as final.
+                if seen[0]!=digest(request): raise ValueError('COMMAND_ID_CONFLICT')
+                self._send(id,seen[1],'REJECTED',seen[2],link=link)
+                return {'id':id,'stage':'REJECTED','result':seen[2]}
             extra={'ignored':ignored} if ignored else {}
             if request.get('sid')!=a.sid or request.get('boot')!=a.boot: raise ValueError('SESSION_MISMATCH')
             n=now_ms()
@@ -289,7 +306,8 @@ class CommandManager:
                 self.journal.accept(request,actor,origin,meta)
                 self.busy=True; self.active_id=id
                 self.queue.put_nowait((request,actor,link))
-            self._send(id,op,'ACCEPTED',extra,link=link)
+            within=self._accepted_within_s(op)
+            self._send(id,op,'ACCEPTED',{**extra,'final_within_ms':self.within_ms(within)} if within else extra,link=link)
             return {'id':id,'stage':'ACCEPTED',**({'result':extra} if extra else {})}
         except Exception as e:
             if CODE_RE.fullmatch(str(e)) and isinstance(e,ValueError): code=str(e)
@@ -306,7 +324,19 @@ class CommandManager:
             remember=getattr(self.agent,'remote_rejected',None)
             if remember: remember(self.origin(actor,link),op_name,code)
         if isinstance(request,dict) and isinstance(request.get('id'),str) and len(request['id'])<=80:
-            self._send(request['id'],str(request.get('op','unknown'))[:64],'REJECTED',result,link=link)
+            op=str(request.get('op','unknown'))[:64]
+            self._send(request['id'],op,'REJECTED',result,link=link)
+            # COMMAND_ID_CONFLICT answers for an id that belongs to another command; keep that one's answer.
+            if code!='COMMAND_ID_CONFLICT' and re.fullmatch(r'[A-Za-z0-9_.:-]{1,80}',request['id']):
+                try: h=digest(request)
+                except (TypeError,ValueError): h=None
+                if h:
+                    with self.lock:
+                        now=time.monotonic(); self.rejected.pop(request['id'],None)
+                        self.rejected[request['id']]=(h,op,result,now)
+                        while self.rejected and (len(self.rejected)>REJECTED_MEMORY_MAX or
+                                                 now-next(iter(self.rejected.values()))[3]>REJECTED_MEMORY_S):
+                            self.rejected.popitem(last=False)
         return {'id':request.get('id') if isinstance(request,dict) else None,'stage':'REJECTED','result':result}
     @staticmethod
     def public(op):
@@ -367,9 +397,12 @@ class CommandManager:
             except queue.Empty: continue
             try:
                 self._stage(r,'APPLYING')
-                def progress(stage,result,r=r,link=link):
-                    # An intermediate ACK, so Ground can follow a long operation (live retune, fallback).
-                    self._stage(r,stage,result); self._send(r['id'],r['op'],stage,result,link=link)
+                def progress(stage,result,within=None,r=r,link=link):
+                    # An intermediate ACK, so Ground can follow a long operation (live retune, fallback). Its
+                    # final_within_ms is sent, not journaled: it counts from this ACK. A caller whose next step
+                    # depends on a decision it already made passes `within` from that decision.
+                    self._stage(r,stage,result); within=self._progress_within_s(stage,result) if within is None else within
+                    self._send(r['id'],r['op'],stage,{**result,'final_within_ms':self.within_ms(within)} if within else result,link=link)
                 stage,result=self._execute(r,actor,progress)
                 self._stage(r,stage,result)
                 self._send(r['id'],r['op'],stage,result,link=link)
@@ -383,12 +416,44 @@ class CommandManager:
                 with self.lock: self.busy=False; self.active_id=None
                 self.agent.bulk_resume_after=time.monotonic()+self.cfg['telemetry']['resume_stable_seconds']
                 self.queue.task_done()
+    # ---- final_within_ms: the latest the final ACK leaves, from the configured timeouts ----
+    @staticmethod
+    def within_ms(seconds): return int(math.ceil(seconds*1000))
+    def _start_within_s(self):
+        # VERIFYING{RESTART}: start RPC, then DAQ fresh and healthy within start_timeout_seconds, then 1 s.
+        return HELPER_TIMEOUT_S+self.cfg['control']['start_timeout_seconds']+1+FINAL_ACK_SLACK_S
+    def _restart_within_s(self):
+        # APPLYING{RESTART}: stop RPC + 30 s stop check, settled digest + write RPC, then the start above.
+        return HELPER_TIMEOUT_S+30+SETTLE_DIGEST_S+HELPER_TIMEOUT_S+self._start_within_s()
+    def _accepted_within_s(self,op):
+        """Bound for the ACCEPTED ACK of a worker operation, or None where none is given."""
+        c=self.cfg['control']; pickup=0.25
+        if op=='config.patch':
+            # Worst path: live write and retune window, then the restart fallback. The worker decides on the
+            # fallback later, from the helper status it reads then, so the bound counts it whenever it can be.
+            return pickup+SETTLE_DIGEST_S+HELPER_TIMEOUT_S+self._live_within_s(bool(c['processing_enabled']))
+        if op in ('processing.set','service.restart'):
+            return pickup+HELPER_TIMEOUT_S+c['start_timeout_seconds']+FINAL_ACK_SLACK_S
+        if op in ('system.reboot.prepare','system.reboot.execute','system.shutdown.prepare','system.shutdown.execute'):
+            return pickup+HELPER_TIMEOUT_S+FINAL_ACK_SLACK_S
+        return None
+    def _progress_within_s(self,stage,result):
+        """Bound for a config.patch progress ACK, from the step it reports."""
+        method=result.get('method')
+        if stage=='APPLYING' and method=='RESTART': return self._restart_within_s()
+        if stage=='VERIFYING' and method=='RESTART': return self._start_within_s()
+        return None
+    def _live_within_s(self,restart):
+        """VERIFYING{LIVE}: the retune window, then the restart fallback when the live change does not hold.
+        `restart` is the fallback decision _config_patch_apply made, not the helper status read again now."""
+        return (self.cfg['control']['retune_live_window_seconds']+FINAL_ACK_SLACK_S+
+                (self._restart_within_s() if restart else 0))
     # ---- config.patch: live retune first, engine restart when it is needed or the live one fails ----
     # Some SDR engines re-apply their own band gain on a live retune (rdfsdr: 25.4 dB in VHF) and can lose
     # DAQ sync; at start they take settings.json as written. So a gain change or a large frequency jump goes
     # straight to stop -> write -> start, and a live change that the engine overrides or that leaves the DAQ
     # unhealthy falls back to the same restart. Ground follows each step through intermediate ACKs.
-    def _settled_digest(self,timeout=4.0):
+    def _settled_digest(self,timeout=SETTLE_DIGEST_S):
         a=self.agent; end=time.monotonic()+timeout; last=None; stable=0
         while time.monotonic()<end and not self.stop_event.is_set():
             d=a.source.raw_digest
@@ -504,7 +569,7 @@ class CommandManager:
             # The engine reads settings.json when it starts; nothing runs it now.
             return 'PERSISTED_UNVERIFIED',{'method':'FILE','persisted':True,'revision':a.source.revision,
                                            'reason':'ENGINE_NOT_RUNNING'}
-        progress('VERIFYING',{'method':'LIVE','persisted':True})
+        progress('VERIFYING',{'method':'LIVE','persisted':True},self._live_within_s(restart))
         # Values that must survive the retune: everything we did not change (gain above all). Not the
         # antenna spacing: the engine sets its band value (0.3 m VHF, 0.128 m UHF) on a retune by design;
         # it is checked only when the patch asks for a spacing.
@@ -553,7 +618,7 @@ class CommandManager:
             a.profile=r['profile']; a.journal.set('profile',a.profile)
             return 'APPLIED',{'profile':a.profile,'proof':'SCHEDULER_PROFILE_ACTIVE'}
         if op=='config.patch':
-            return self._config_patch(r,actor,progress or (lambda stage,result:None))
+            return self._config_patch(r,actor,progress or (lambda stage,result,within=None:None))
         if op in ('processing.set','service.restart'):
             oldgen=a.monitor.snapshot()['generation']; started=now_ms()
             rpc={'op':op,'origin':actor}

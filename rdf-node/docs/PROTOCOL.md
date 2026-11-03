@@ -416,7 +416,14 @@ command dengan `COMMAND_QUEUE_FULL`. Semua penolakan tanpa ACK tetap terlihat: m
 di snapshot panel, dihitung di `link.command_drops`, dan jumlahnya ada di `telemetry/health/detail`
 sebagai `crej`.
 
-ACK berisi `v,sid,id,status,t,rev,result`. APPLIED memerlukan bukti sesuai aksi.
+ACK berisi `v,sid,id,status,t,rev,result`. APPLIED memerlukan bukti sesuai aksi. Sejak 1.10.2 ACK
+progress (`ACCEPTED` `config.patch`, `processing.set`, `service.restart`, `system.reboot.*`,
+`system.shutdown.*`, serta `APPLYING`/`VERIFYING` `config.patch` dengan `method` `RESTART` atau `LIVE`)
+membawa `result.final_within_ms`: paling lambat berapa ms setelah ACK itu ACK akhir sudah dikirim.
+`ppp.restart`, `stream.set`, dan operasi baca tidak membawanya. Ground
+menunggu sampai waktu terima + nilai itu + 30 s (maks. 900 s); tanpa field, batas bawaan Ground
+berlaku. Rincian di [CONTROL.md](CONTROL.md#batas-waktu-ack-akhir-final_within_ms). Command yang
+ditolak sebelum jurnal diingat 60 s: ID dan payload sama mendapat `REJECTED` yang sama lagi.
 PERSISTED_UNVERIFIED dan OUTCOME_UNKNOWN bukan sinonim gagal atau berhasil.
 Hasil tersedia lewat jurnal setelah reconnect; tidak bergantung broker offline history.
 

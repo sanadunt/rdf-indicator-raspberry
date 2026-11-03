@@ -113,6 +113,12 @@ Atomic replace melindungi partial file tetapi tidak membuat semua writer koopera
 Ketentuan single writer tetap harus dipenuhi. GUI engine lain yang masih menulis dapat
 menimbulkan conflict/lost update; jangan approve sebelum menyelaraskannya.
 
+Command yang ditolak sebelum masuk jurnal (`BUSY`, `CLOCK_UNTRUSTED`, `HELPER_UNAVAILABLE`, dan
+lainnya) diingat per ID selama 60 s (maks. 64 ID). Salinan yang datang lagi dengan ID dan payload yang
+sama (resend MQTT DUP, jembatan radio yang restart) mendapat `REJECTED` yang sama, tidak dinilai ulang,
+jadi tidak bisa berubah menjadi `ACCEPTED` setelah Ground menyimpan `REJECTED` sebagai hasil akhir. ID
+sama dengan payload berbeda ditolak `COMMAND_ID_CONFLICT`.
+
 Bukti APPLIED field-specific:
 - VFO frequency: record DoA baru yang sesuai target.
 - Center: status DAQ baru dengan rf_center_frequency_hz/rf_center_freq sesuai target.
@@ -123,6 +129,28 @@ Bukti APPLIED field-specific:
 Pada native status yang tidak menyediakan center/gain evidence, retune tetap dapat
 terpersist dan engine watcher dapat menerapkannya, tetapi aplikasi tidak mengklaim telah
 memverifikasi seluruh efek. Ini terlihat pada panel/ACK. Freshness DoA tetap diperiksa.
+
+## Batas waktu ACK akhir (`final_within_ms`)
+
+Sejak 1.10.2 ACK progress membawa `result.final_within_ms`: paling lambat berapa milidetik setelah ACK
+itu Edge sudah mengirim ACK akhir. Field ini opsional dan tidak dijurnal (dihitung dari saat ACK
+dikirim), jadi ACK yang diputar ulang untuk ID duplikat tidak membawanya. Nilainya dijumlah dari
+timeout helper (8 s per RPC), `control.start_timeout_seconds`, `control.retune_live_window_seconds`,
+dan 2 s cadangan untuk polling:
+
+| ACK | Batas |
+|---|---|
+| `config.patch` `ACCEPTED` | 0,25 s ambil antrean + 4 s digest stabil + 8 s tulis + jendela retune live + 2 s, ditambah batas restart di bawah bila `processing_enabled` (worker baru memutuskan fallback nanti, dari status helper saat itu) |
+| `config.patch` `APPLYING` `method: RESTART` | 8 s + 30 s stop, 4 s + 8 s tulis, lalu batas `VERIFYING` restart |
+| `config.patch` `VERIFYING` `method: RESTART` | 8 s + `start_timeout_seconds` + 1 s + 2 s |
+| `config.patch` `VERIFYING` `method: LIVE` | jendela retune live + 2 s, ditambah batas restart bila patch ini sudah memutuskan fallback tersedia (`processing_enabled` dan helper `allow_lifecycle` saat keputusan, bukan saat ACK dikirim) |
+| `processing.set`, `service.restart` `ACCEPTED` | 0,25 s + 8 s + `start_timeout_seconds` + 2 s |
+| `system.reboot.*`, `system.shutdown.*` `ACCEPTED` | 0,25 s + 8 s + 2 s |
+
+Dengan default (start 180 s, jendela live 20 s) `APPLYING` restart memuat 241.000 ms. Ground yang
+membaca field ini menunggu ACK akhir paling sedikit sampai waktu terima ACK + `final_within_ms` +
+30.000 ms (maks. 900.000 ms) sebelum menyatakan tidak ada ACK akhir; Ground lama mengabaikannya dan
+memakai batas bawaannya. Edge lama tidak mengirimnya.
 
 ## Restart layanan PPP T900
 

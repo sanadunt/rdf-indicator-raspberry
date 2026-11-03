@@ -502,9 +502,11 @@ class Client:
                         self.error=None; self.generation+=1; self.last_success=time.monotonic()
                         self._connected_at=self._clock()
                         handshake_deadline=time.monotonic()+10
-                        for topic,qos,no_retained in self.subscriptions:
+                        # (topic, qos, no_retained[, retain_as_published]). Retain As Published (default) keeps
+                        # the publisher's retain flag on live messages; without it only a replay is retained.
+                        for topic,qos,no_retained,*rap in self.subscriptions:
                             mid=self._next_id(); pending_sub.add(mid)
-                            options=qos|8|(32 if no_retained else 0)
+                            options=qos|(8 if (rap[0] if rap else True) else 0)|(32 if no_retained else 0)
                             queue_wire(packet(0x82,struct.pack('!H',mid)+b'\x00'+utf(topic)+bytes([options])))
                         self.ready=not pending_sub
                     elif kind==9:

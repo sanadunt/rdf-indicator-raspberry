@@ -1,6 +1,7 @@
 import copy,http.client,json,os,socket,stat,tempfile,threading,time,unittest,uuid
 from pathlib import Path
 from unittest import mock
+from rdf_node import CONTRACT
 from rdf_node.agent import Agent
 from rdf_node.ground import Ground
 from rdf_node.mqtt import Client,Message
@@ -1113,6 +1114,81 @@ class CommandTests(unittest.TestCase):
         result=self.a.commands.submit(self.request('stream.set',profile='balanced'),'untrusted-caller')
         self.assertEqual(result['result']['error'],'INVALID_COMMAND_ACTOR')
 
+    def test_duplicate_of_a_rejected_command_gets_the_same_rejection(self):
+        # A second delivery of the same id (MQTT DUP resend, restarted radio bridge) must not run the command
+        # once the transient reason is gone: Ground already keeps the first REJECTED as final.
+        from rdf_node import control
+        acks=[];self.a.operation_changed=lambda id,op,stage,result,link=None:acks.append((id,stage,result.get('error')))
+        request=self.request('stream.set',profile='balanced')
+        self.a.commands.busy=True
+        try:first=self.a.commands.submit(request,'ground-controller')
+        finally:self.a.commands.busy=False
+        self.assertEqual((first['stage'],first['result']['error']),('REJECTED','BUSY'))
+        again=self.a.commands.submit(dict(request),'ground-controller')
+        self.assertEqual((again['stage'],again['result']),('REJECTED',first['result']))
+        self.assertEqual(acks,[(request['id'],'REJECTED','BUSY')]*2)
+        self.assertIsNone(self.a.journal.lookup(request['id']))
+        self.assertEqual(len(self.a.remote_rejects),1)
+        # The same id with another payload is a conflict, and does not replace the remembered answer.
+        other=dict(request,profile='control')
+        self.assertEqual(self.a.commands.submit(other,'ground-controller')['result']['error'],'COMMAND_ID_CONFLICT')
+        self.assertEqual(self.a.commands.submit(dict(request),'ground-controller')['result']['error'],'BUSY')
+        # Long after any deadline the id is forgotten and evaluated again.
+        with mock.patch.object(control.time,'monotonic',return_value=time.monotonic()+control.REJECTED_MEMORY_S+1):
+            self.assertEqual(self.a.commands.submit(dict(request),'ground-controller')['stage'],'ACCEPTED')
+
+    def test_rejected_memory_is_bounded(self):
+        from rdf_node import control
+        self.a.commands.busy=True
+        try:
+            ids=[self.a.commands.submit(self.request('stream.set',profile='balanced'),'ground-controller')['id']
+                 for _ in range(control.REJECTED_MEMORY_MAX+5)]
+        finally:self.a.commands.busy=False
+        self.assertEqual(list(self.a.commands.rejected),ids[5:])
+
+    def test_progress_acks_say_when_the_final_ack_leaves(self):
+        from rdf_node import control
+        c=self.a.cfg['control'];c.update(start_timeout_seconds=180,retune_live_window_seconds=20,processing_enabled=True)
+        self.a.helper_status={'allow_lifecycle':True}
+        cm=self.a.commands;helper,slack=control.HELPER_TIMEOUT_S,control.FINAL_ACK_SLACK_S
+        start=helper+180+1+slack;restart=helper+30+control.SETTLE_DIGEST_S+helper+start
+        self.assertEqual(restart,241)
+        self.assertEqual(cm._progress_within_s('APPLYING',{'method':'RESTART'}),restart)
+        self.assertEqual(cm._progress_within_s('VERIFYING',{'method':'RESTART'}),start)
+        self.assertEqual(cm._live_within_s(True),20+slack+restart)
+        self.assertEqual(cm._accepted_within_s('config.patch'),.25+control.SETTLE_DIGEST_S+helper+20+slack+restart)
+        self.assertEqual(cm._accepted_within_s('processing.set'),.25+helper+180+slack)
+        self.assertIsNone(cm._accepted_within_s('stream.set'));self.assertIsNone(cm._progress_within_s('APPLYING',{}))
+        # VERIFYING{LIVE} is bounded by the fallback decision the patch made (passed in), not by a fresh read.
+        self.assertIsNone(cm._progress_within_s('VERIFYING',{'method':'LIVE'}))
+        # Without a restart fallback a live retune ends with its window.
+        self.a.helper_status={'allow_lifecycle':False}
+        self.assertEqual(cm._live_within_s(False),20+slack)
+        # ACCEPTED comes before the worker reads the helper status: a status blip now (helper busy, {}) must
+        # not drop the fallback it may still take; only processing_enabled rules the restart out.
+        self.a.helper_status={}
+        self.assertEqual(cm._accepted_within_s('config.patch'),.25+control.SETTLE_DIGEST_S+helper+20+slack+restart)
+        c['processing_enabled']=False
+        self.assertEqual(cm._accepted_within_s('config.patch'),.25+control.SETTLE_DIGEST_S+helper+20+slack)
+        c['processing_enabled']=True
+        # Sent in the ACK (in ms), never journaled: a replayed ACK must not carry an old deadline.
+        acks=[];self.a.operation_changed=lambda id,op,stage,result,link=None:acks.append((stage,result))
+        self.a.helper_status={'allow_lifecycle':True}
+        request=self.request('config.patch',changes={'gain_db':20.7})
+        with mock.patch.object(cm,'_require_helper'):
+            self.assertEqual(cm.submit(request,'ground-controller')['stage'],'ACCEPTED')
+        self.assertEqual(acks[0],('ACCEPTED',{'final_within_ms':cm.within_ms(cm._accepted_within_s('config.patch'))}))
+        self.assertEqual(self.a.journal.lookup(request['id'])['result'],{})
+        journaled=[]
+        def execute(r,actor,progress):
+            progress('APPLYING',{'method':'RESTART'})
+            journaled.append(self.a.journal.lookup(r['id'])['result'])
+            return 'APPLIED',{'method':'RESTART'}
+        cm.start();self.addCleanup(cm.stop)
+        with mock.patch.object(cm,'_execute',side_effect=execute):cm.queue.join()
+        self.assertEqual(acks[1:],[('APPLYING',{'method':'RESTART','final_within_ms':241000}),('APPLIED',{'method':'RESTART'})])
+        self.assertEqual(journaled,[{'method':'RESTART'}])
+
 class PppRecoveryTests(unittest.TestCase):
     """Local T900 restart lane, link recovery observer, and operator-visible command origin."""
     HELPER_OK={'requested':True,'service':'t900-ppp.service'}
@@ -1957,6 +2033,64 @@ class BackupLinkTests(unittest.TestCase):
     def ack_ids(self,client,suffix='ack/operation'):
         return [(p['id'],p['status']) for p in self.payloads(client,suffix)]
 
+    def test_capabilities_are_republished_when_they_change(self):
+        # A helper that comes up after the agent (parallel restart after `controls approve`) changes what
+        # Ground may do; the retained capabilities, and what the LoRa bridge resends from them, must follow.
+        a=self.a;control,_,backup=self.links()
+        self.run_once();self.run_once()
+        for client in (control,backup):self.assertEqual(self.suffixes(client).count('capabilities'),1)
+        self.assertFalse(self.payloads(control,'capabilities')[-1]['remote_config_patch'])
+        a.helper_status={'settings_target_available':True,'allow_config':True}
+        self.run_once()
+        for client in (control,backup):
+            self.assertEqual(self.suffixes(client).count('capabilities'),2)
+            self.assertTrue(self.payloads(client,'capabilities')[-1]['remote_config_patch'])
+            options=[o for _,topic,_,o in client.sent if topic==a.prefix+'/capabilities'][-1]
+            self.assertEqual((options['qos'],options['retain']),(1,True))
+        self.run_once()
+        self.assertEqual(self.suffixes(control).count('capabilities'),2)
+        # A reconnect republishes them on that link only.
+        control.generation+=1;self.run_once()
+        self.assertEqual((self.suffixes(control).count('capabilities'),self.suffixes(backup).count('capabilities')),(3,2))
+
+    def test_one_failed_helper_poll_does_not_republish_capabilities(self):
+        # A status poll that times out (the helper busy with another RPC) must not go out to Ground as
+        # remote_config_patch false and back; two misses in a row mean the helper is gone.
+        from rdf_node import agent as agent_mod
+        a=self.a;control,_,_=self.links();ok={'settings_target_available':True,'allow_config':True}
+        def poll(result):
+            def call(*args,**kw):
+                if isinstance(result,Exception):raise result
+                return dict(result)
+            with mock.patch.object(agent_mod,'call_helper',side_effect=call):a._poll_helper()
+        poll(ok);self.run_once()
+        self.assertEqual(self.suffixes(control).count('capabilities'),1)
+        self.assertTrue(self.payloads(control,'capabilities')[-1]['remote_config_patch'])
+        poll(TimeoutError());self.run_once();poll(ok);self.run_once()
+        self.assertEqual(a.helper_status,ok);self.assertEqual(self.suffixes(control).count('capabilities'),1)
+        poll(TimeoutError());poll(ConnectionRefusedError());self.run_once()
+        self.assertEqual(a.helper_status,{});self.assertEqual(self.suffixes(control).count('capabilities'),2)
+        self.assertFalse(self.payloads(control,'capabilities')[-1]['remote_config_patch'])
+    def test_clean_stop_leaves_a_retained_offline_farewell(self):
+        a=self.a;control,bulk,backup=self.links()
+        for client in (control,backup):
+            confirmed=capture_client(client.client_id,confirm=True);confirmed.sent=client.sent
+            if client is control:a.clients['control']=confirmed
+            else:a.backup_client=confirmed
+        started=time.monotonic();a._farewell()
+        self.assertLess(time.monotonic()-started,1)
+        for client in (control,backup):
+            (key,topic,payload,options),=client.sent
+            self.assertEqual((key,topic,options['qos'],options['retain'],options['priority']),
+                             ('offline',a.prefix+'/availability',1,True,0))
+            self.assertEqual({k:v for k,v in payload.items() if k!='t'},
+                             {'v':2,'sid':a.sid,'contract':CONTRACT,'online':False,'reason':'STOPPED'})
+        self.assertEqual(bulk.sent,[])
+        # A link that is not ready gets nothing; an unconfirmed one is waited for at most `timeout`.
+        a.backup_client=capture_client('down',ready=False);a.clients['control']=capture_client('slow')
+        started=time.monotonic();a._farewell(timeout=.3)
+        self.assertGreaterEqual(time.monotonic()-started,.25);self.assertEqual(a.backup_client.sent,[])
+
     def test_disabled_backup_snapshot_shape(self):
         self.assertIsNone(self.a.backup_client)
         snapshot=self.a.snapshot()
@@ -2598,6 +2732,19 @@ class BackupBrokerEndToEndTests(unittest.TestCase):
         self.assertTrue(wait(offline,8),backup.retained.get(agent.prefix+'/availability'))
         self.assertTrue(wait(lambda:not backup.clients,8))
         self.assertTrue(all(c.ready for c in agent.clients.values()))
+        self.assertFalse(primary.errors or backup.errors)
+
+    def test_clean_stop_replaces_the_retained_online_on_both_brokers(self):
+        # A clean DISCONNECT drops the Will, so without a farewell both brokers would keep online:true.
+        primary=self.broker();backup=self.broker(auth={'':''})
+        agent=self.start_agent(primary,backup);self.wait_ready(agent)
+        def availability(broker):
+            return json.loads(broker.retained.get(agent.prefix+'/availability',b'{}') or b'{}')
+        self.assertTrue(wait(lambda:availability(primary).get('online') and availability(backup).get('online'),8))
+        agent.stop()
+        for broker in (primary,backup):
+            value=availability(broker)
+            self.assertEqual((value.get('online'),value.get('reason'),value.get('sid')),(False,'STOPPED',agent.sid))
         self.assertFalse(primary.errors or backup.errors)
 
     def test_backup_mirrors_telemetry_and_survives_primary_outage(self):

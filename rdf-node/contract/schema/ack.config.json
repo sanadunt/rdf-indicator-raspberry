@@ -76,6 +76,12 @@
           },
           "maxItems": 16,
           "description": "Field command yang tidak dikenal dan diabaikan (sejak 1.5)."
+        },
+        "final_within_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600000,
+          "description": "Opsional, di ACK progress (sejak 1.10.2): paling lambat berapa ms setelah ACK ini Edge sudah mengirim ACK akhir. Ground menunggu sampai terima + nilai ini + 30000 ms (maks. 900000 ms)."
         }
       },
       "additionalProperties": true
