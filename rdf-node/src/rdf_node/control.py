@@ -1,4 +1,6 @@
 from __future__ import annotations
+import collections
+import math
 import queue
 import re
 import sqlite3
@@ -8,6 +10,7 @@ from .util import digest, now_ms, finite, integer, compact
 from .journal import TERMINAL
 from .helper import call_helper,HelperUnavailable
 from .config import PROFILES
+from .source import SQUELCH_MODES, squelch_is_auto
 
 OPS={
     'config.get':'cmd/config/get', 'config.patch':'cmd/config/patch',
@@ -23,6 +26,12 @@ SUMMARY_KIND={'config.patch':'config','stream.set':'profile','processing.set':'p
               'system.shutdown.prepare':'shutdown','system.shutdown.execute':'shutdown',
               'config.get':'read','operation.get':'read'}
 PPP_RESTART_MIN_GAP_S=15
+# A command rejected before the journal is remembered this long (longer than any command deadline), so a
+# duplicate delivery of the same id gets the same REJECTED answer instead of a second evaluation.
+REJECTED_MEMORY_S=60; REJECTED_MEMORY_MAX=64
+# Each helper RPC waits at most HELPER_TIMEOUT_S. Progress ACKs carry result.final_within_ms, the latest the
+# final ACK leaves, summed from these and the configured timeouts; FINAL_ACK_SLACK_S covers the 0.25 s polling.
+HELPER_TIMEOUT_S=8; SETTLE_DIGEST_S=4.0; FINAL_ACK_SLACK_S=2.0
 COMMAND_FIELDS=frozenset({'v','id','sid','boot','issued_ms','expires_ms','base_rev','op','changes','desired','profile',
                           'target_id','prepare_id','challenge'})
 # Operations that only the root helper can carry out (stream.set and the read ops stay in the agent).
@@ -41,6 +50,12 @@ ERROR_MESSAGES={
     'HELPER_FAILED':'Helper kontrol menolak perintah tanpa alasan.',
     'INTERNAL_ERROR':'Error internal di agent Edge; lihat detail.',
     'INVALID_COMMAND_FIELD':'Ada field perintah yang tipe atau nilainya tidak valid.',
+    'SPACING_SET_BY_ENGINE_BAND':'Di band ini KrakenSDR sendiri memasang jarak UCA (VHF 0,3 m, UHF 0,128 m); jarak lain tidak akan dipakai. Tidak ada yang ditulis.',
+    'NUMBER_OUT_OF_RANGE':'Nilai di luar rentang yang diizinkan; tidak ada yang ditulis.',
+    'CENTER_CHANGE_REQUIRES_VFO0_TARGET':'Frekuensi center harus dikirim bersama frekuensi VFO0.',
+    'MVP_CENTER_MUST_EQUAL_VFO0':'Frekuensi center dan VFO0 harus sama.',
+    'INTEGER_OUT_OF_RANGE':'Nilai bilangan bulat di luar rentang yang diizinkan.',
+    'SQUELCH_MODE_INVALID':'Mode squelch harus Manual, Auto, Auto Channel, atau Default.',
     'JOURNAL_UNAVAILABLE':'Journal perintah di Edge tidak bisa ditulis; perintah tidak dijalankan.',
     'COMMAND_TOO_LARGE':'Perintah lebih besar dari 4.096 byte dan tidak diproses.',
     'COMMAND_NOT_JSON':'Isi perintah bukan JSON yang sah, jadi tidak bisa dijawab per ID.',
@@ -152,11 +167,13 @@ class CommandManager:
         self.queue=queue.Queue(1); self.stop_event=threading.Event()
         self.thread=threading.Thread(target=self._worker,daemon=True,name='command-worker')
         self.last_rate={}
+        # id -> (request digest, op, result, monotonic time) of commands rejected before the journal.
+        self.rejected=collections.OrderedDict()
         # PPP restart has its own lane: an SDR verification (BUSY) must never block link recovery.
         self.ppp_lock=threading.Lock(); self.ppp_active=None; self.ppp_last=None; self.ppp_thread=None
     def start(self): self.thread.start()
     def stop(self): self.stop_event.set(); self.thread.join(3)
-    def _helper(self,r,timeout=8):
+    def _helper(self,r,timeout=HELPER_TIMEOUT_S):
         return call_helper(self.cfg['control']['helper_socket'],r,timeout)
     def _require_helper(self):
         # Reject before journaling when the helper is known to be gone: nothing would run anyway.
@@ -202,6 +219,13 @@ class CommandManager:
                 if old['hash']!=digest(request): raise ValueError('COMMAND_ID_CONFLICT')
                 self._send(id,op,old['stage'],old['result'],link=link)
                 return self.public(old)
+            with self.lock: seen=self.rejected.get(id)
+            if seen and time.monotonic()-seen[3]<=REJECTED_MEMORY_S:
+                # A repeated delivery (MQTT DUP resend, a restarted radio bridge): the reason it was refused
+                # (BUSY, say) may be gone now, but Ground already holds the REJECTED as final.
+                if seen[0]!=digest(request): raise ValueError('COMMAND_ID_CONFLICT')
+                self._send(id,seen[1],'REJECTED',seen[2],link=link)
+                return {'id':id,'stage':'REJECTED','result':seen[2]}
             extra={'ignored':ignored} if ignored else {}
             if request.get('sid')!=a.sid or request.get('boot')!=a.boot: raise ValueError('SESSION_MISMATCH')
             n=now_ms()
@@ -260,15 +284,19 @@ class CommandManager:
                     if op=='processing.set' and request.get('desired') not in ('RUNNING','STOPPED'): raise ValueError('INVALID_DESIRED_STATE')
                     if op=='config.patch':
                         from .helper import FIELD_MAP
+                        from .source import STRING_FIELDS
                         changes=request.get('changes')
                         if not isinstance(changes,dict) or not changes or set(changes)-set(FIELD_MAP): raise ValueError('INVALID_PATCH')
-                        for v in changes.values(): finite(v,-200,5e9)
+                        for k,v in changes.items():
+                            if k not in STRING_FIELDS: finite(v,-200,5e9)
                 if op=='processing.set' and request.get('desired') not in ('RUNNING','STOPPED'): raise ValueError('INVALID_DESIRED_STATE')
                 if op=='config.patch':
                     from .helper import FIELD_MAP
+                    from .source import STRING_FIELDS
                     changes=request.get('changes')
                     if not isinstance(changes,dict) or not changes or set(changes)-set(FIELD_MAP): raise ValueError('INVALID_PATCH')
-                    for v in changes.values(): finite(v,-200,5e9)
+                    for k,v in changes.items():
+                        if k not in STRING_FIELDS: finite(v,-200,5e9)
             if op in HELPER_OPS: self._require_helper()
             meta=self._before(op,request)
             if op=='ppp.restart':
@@ -278,7 +306,8 @@ class CommandManager:
                 self.journal.accept(request,actor,origin,meta)
                 self.busy=True; self.active_id=id
                 self.queue.put_nowait((request,actor,link))
-            self._send(id,op,'ACCEPTED',extra,link=link)
+            within=self._accepted_within_s(op)
+            self._send(id,op,'ACCEPTED',{**extra,'final_within_ms':self.within_ms(within)} if within else extra,link=link)
             return {'id':id,'stage':'ACCEPTED',**({'result':extra} if extra else {})}
         except Exception as e:
             if CODE_RE.fullmatch(str(e)) and isinstance(e,ValueError): code=str(e)
@@ -295,7 +324,19 @@ class CommandManager:
             remember=getattr(self.agent,'remote_rejected',None)
             if remember: remember(self.origin(actor,link),op_name,code)
         if isinstance(request,dict) and isinstance(request.get('id'),str) and len(request['id'])<=80:
-            self._send(request['id'],str(request.get('op','unknown'))[:64],'REJECTED',result,link=link)
+            op=str(request.get('op','unknown'))[:64]
+            self._send(request['id'],op,'REJECTED',result,link=link)
+            # COMMAND_ID_CONFLICT answers for an id that belongs to another command; keep that one's answer.
+            if code!='COMMAND_ID_CONFLICT' and re.fullmatch(r'[A-Za-z0-9_.:-]{1,80}',request['id']):
+                try: h=digest(request)
+                except (TypeError,ValueError): h=None
+                if h:
+                    with self.lock:
+                        now=time.monotonic(); self.rejected.pop(request['id'],None)
+                        self.rejected[request['id']]=(h,op,result,now)
+                        while self.rejected and (len(self.rejected)>REJECTED_MEMORY_MAX or
+                                                 now-next(iter(self.rejected.values()))[3]>REJECTED_MEMORY_S):
+                            self.rejected.popitem(last=False)
         return {'id':request.get('id') if isinstance(request,dict) else None,'stage':'REJECTED','result':result}
     @staticmethod
     def public(op):
@@ -356,7 +397,13 @@ class CommandManager:
             except queue.Empty: continue
             try:
                 self._stage(r,'APPLYING')
-                stage,result=self._execute(r,actor)
+                def progress(stage,result,within=None,r=r,link=link):
+                    # An intermediate ACK, so Ground can follow a long operation (live retune, fallback). Its
+                    # final_within_ms is sent, not journaled: it counts from this ACK. A caller whose next step
+                    # depends on a decision it already made passes `within` from that decision.
+                    self._stage(r,stage,result); within=self._progress_within_s(stage,result) if within is None else within
+                    self._send(r['id'],r['op'],stage,{**result,'final_within_ms':self.within_ms(within)} if within else result,link=link)
+                stage,result=self._execute(r,actor,progress)
                 self._stage(r,stage,result)
                 self._send(r['id'],r['op'],stage,result,link=link)
             except Exception as e:
@@ -369,7 +416,196 @@ class CommandManager:
                 with self.lock: self.busy=False; self.active_id=None
                 self.agent.bulk_resume_after=time.monotonic()+self.cfg['telemetry']['resume_stable_seconds']
                 self.queue.task_done()
-    def _execute(self,r,actor):
+    # ---- final_within_ms: the latest the final ACK leaves, from the configured timeouts ----
+    @staticmethod
+    def within_ms(seconds): return int(math.ceil(seconds*1000))
+    def _start_within_s(self):
+        # VERIFYING{RESTART}: start RPC, then DAQ fresh and healthy within start_timeout_seconds, then 1 s.
+        return HELPER_TIMEOUT_S+self.cfg['control']['start_timeout_seconds']+1+FINAL_ACK_SLACK_S
+    def _restart_within_s(self):
+        # APPLYING{RESTART}: stop RPC + 30 s stop check, settled digest + write RPC, then the start above.
+        return HELPER_TIMEOUT_S+30+SETTLE_DIGEST_S+HELPER_TIMEOUT_S+self._start_within_s()
+    def _accepted_within_s(self,op):
+        """Bound for the ACCEPTED ACK of a worker operation, or None where none is given."""
+        c=self.cfg['control']; pickup=0.25
+        if op=='config.patch':
+            # Worst path: live write and retune window, then the restart fallback. The worker decides on the
+            # fallback later, from the helper status it reads then, so the bound counts it whenever it can be.
+            return pickup+SETTLE_DIGEST_S+HELPER_TIMEOUT_S+self._live_within_s(bool(c['processing_enabled']))
+        if op in ('processing.set','service.restart'):
+            return pickup+HELPER_TIMEOUT_S+c['start_timeout_seconds']+FINAL_ACK_SLACK_S
+        if op in ('system.reboot.prepare','system.reboot.execute','system.shutdown.prepare','system.shutdown.execute'):
+            return pickup+HELPER_TIMEOUT_S+FINAL_ACK_SLACK_S
+        return None
+    def _progress_within_s(self,stage,result):
+        """Bound for a config.patch progress ACK, from the step it reports."""
+        method=result.get('method')
+        if stage=='APPLYING' and method=='RESTART': return self._restart_within_s()
+        if stage=='VERIFYING' and method=='RESTART': return self._start_within_s()
+        return None
+    def _live_within_s(self,restart):
+        """VERIFYING{LIVE}: the retune window, then the restart fallback when the live change does not hold.
+        `restart` is the fallback decision _config_patch_apply made, not the helper status read again now."""
+        return (self.cfg['control']['retune_live_window_seconds']+FINAL_ACK_SLACK_S+
+                (self._restart_within_s() if restart else 0))
+    # ---- config.patch: live retune first, engine restart when it is needed or the live one fails ----
+    # Some SDR engines re-apply their own band gain on a live retune (rdfsdr: 25.4 dB in VHF) and can lose
+    # DAQ sync; at start they take settings.json as written. So a gain change or a large frequency jump goes
+    # straight to stop -> write -> start, and a live change that the engine overrides or that leaves the DAQ
+    # unhealthy falls back to the same restart. Ground follows each step through intermediate ACKs.
+    def _settled_digest(self,timeout=SETTLE_DIGEST_S):
+        a=self.agent; end=time.monotonic()+timeout; last=None; stable=0
+        while time.monotonic()<end and not self.stop_event.is_set():
+            d=a.source.raw_digest
+            if d and d==last: stable+=1
+            else: stable=0; last=d
+            if stable>=4: return d
+            self.stop_event.wait(0.25)
+        return a.source.raw_digest
+    def _write_settings(self,actor,changes):
+        expected=self._settled_digest()
+        if not expected: raise ValueError('SETTINGS_UNAVAILABLE')
+        return self._helper({'op':'config.patch','origin':actor,'changes':changes,'expected_digest':expected})
+    def _daq_healthy_since(self,t0):
+        a=self.agent; st=a.source.status; m=a.monitor.snapshot()
+        return bool(st and st.get('timestamp_ms',0)>t0 and a.source.view(m['clock_trusted'])['daq']['healthy'])
+    def _lifecycle(self,actor,desired,timeout):
+        a=self.agent; started=now_ms()
+        self._helper({'op':'processing.set','origin':actor,'desired':desired})
+        deadline=time.monotonic()+timeout
+        while time.monotonic()<deadline and not self.stop_event.is_set():
+            m=a.monitor.snapshot()
+            if desired=='STOPPED' and m['service_state'] in ('INACTIVE','FAILED') and m.get('cgroup_empty') is True: return True
+            if desired=='RUNNING' and m['service_state']=='ACTIVE' and self._daq_healthy_since(started): return True
+            self.stop_event.wait(0.25)
+        return False
+    def _restart_available(self):
+        a=self.agent
+        return bool(self.cfg['control']['processing_enabled'] and a.helper_status.get('allow_lifecycle'))
+    def _patch_with_restart(self,r,actor,intended,reason,progress):
+        a=self.agent; c=self.cfg['control']
+        progress('APPLYING',{'method':'RESTART','reason':reason,'changes':intended})
+        if not self._lifecycle(actor,'STOPPED',30):
+            return 'OUTCOME_UNKNOWN',{'method':'RESTART','reason':reason,'error':'ENGINE_DID_NOT_STOP','persisted':False}
+        safe=a.source.safe
+        missing={k:v for k,v in intended.items() if safe.get(k)!=v}
+        if missing: self._write_settings(actor,missing)
+        progress('VERIFYING',{'method':'RESTART','reason':reason,'persisted':True})
+        if not self._lifecycle(actor,'RUNNING',c['start_timeout_seconds']):
+            return 'OUTCOME_UNKNOWN',{'method':'RESTART','reason':reason,'persisted':True,
+                                      'error':'DAQ_NOT_HEALTHY_AFTER_RESTART','revision':a.source.revision}
+        self.stop_event.wait(1.0)
+        moved=sorted(k for k,v in intended.items() if a.source.safe.get(k)!=v
+                     and not (k=='vfo0_squelch_db' and squelch_is_auto(a.source.safe)))
+        if moved:
+            return 'PERSISTED_UNVERIFIED',{'method':'RESTART','reason':reason,'persisted':True,'revision':a.source.revision,
+                                           'error':'ENGINE_OVERRODE_AT_START','fields':moved}
+        a.config_proof='runtime'
+        return 'APPLIED',{'method':'RESTART','reason':reason,'persisted':True,'revision':a.source.revision,
+                          'proof':{'daq':'FRESH_HEALTHY_AFTER_RESTART','settings':'INTACT_AFTER_START'}}
+    @staticmethod
+    def _band_spacing(safe,center_hz):
+        """The UCA radius rdfsdr sets itself on every retune and at start, or None where it keeps the file's.
+        A settings file without ant_arrangement starts as UCA (rdfsdr's start-up default)."""
+        if safe.get('ant_arrangement','UCA')!='UCA' or not isinstance(center_hz,(int,float)): return None
+        mhz=center_hz/1e6
+        return 0.3 if 30<=mhz<300 else 0.128 if 300<=mhz<=3000 else None
+    def _config_patch(self,r,actor,progress):
+        a=self.agent; changes=dict(r['changes'])
+        before=dict(a.source.safe); running=a.monitor.snapshot()['service_state']=='ACTIVE'
+        # The helper's own checks first, with the same types it writes, so the band rule below sees the
+        # numbers the file will hold and a bad frequency gets its own error, not a spacing one.
+        try:
+            for key in ('center_frequency_hz','vfo0_frequency_hz'):
+                if key in changes: changes[key]=integer(changes[key],1,10**10)
+            if 'center_frequency_hz' in changes and changes['center_frequency_hz']!=changes.get('vfo0_frequency_hz'):
+                raise ValueError('MVP_CENTER_MUST_EQUAL_VFO0' if 'vfo0_frequency_hz' in changes else 'CENTER_CHANGE_REQUIRES_VFO0_TARGET')
+            if 'ant_spacing_m' in changes: changes['ant_spacing_m']=round(finite(changes['ant_spacing_m'],0.05,1.0),4)
+            if 'vfo0_squelch_db' in changes: changes['vfo0_squelch_db']=int(round(finite(changes['vfo0_squelch_db'],-200,50)))
+            if 'vfo0_squelch_mode' in changes and changes['vfo0_squelch_mode'] not in SQUELCH_MODES: raise ValueError('SQUELCH_MODE_INVALID')
+        except (ValueError,TypeError) as e:
+            code=str(e) if str(e) in ERROR_MESSAGES else 'INVALID_COMMAND_FIELD'
+            return 'FAILED',{**error_result(code),'persisted':False}
+        band=self._band_spacing(before,changes.get('center_frequency_hz',before.get('center_frequency_hz')))
+        added=False
+        if band is not None:
+            if 'ant_spacing_m' in changes:
+                # In VHF/UHF the engine's band radius always wins: another spacing could never run.
+                if abs(changes['ant_spacing_m']-band)>5e-4:
+                    return 'FAILED',{**error_result('SPACING_SET_BY_ENGINE_BAND'),'persisted':False,'band_spacing_m':band}
+                changes['ant_spacing_m']=band
+            elif before.get('ant_spacing_m')!=band:
+                # Any write makes the engine reload the file's spacing live: write the band radius too, so
+                # settings.json (and state.rf.uca) says what the engine runs and an old radius never returns.
+                changes['ant_spacing_m']=band; added=True
+        # A squelch level only counts in Manual: setting one switches an automatic squelch to Manual.
+        manual=False
+        if 'vfo0_squelch_db' in changes and 'vfo0_squelch_mode' not in changes and squelch_is_auto(before):
+            changes['vfo0_squelch_mode']='Manual'; manual=True
+        # A Manual squelch runs int(level): a fractional level left in the file (an automatic squelch's saved
+        # level, or an older Edge) is written as the engine runs it, so a later retune does not look like an override.
+        level=before.get('vfo0_squelch_db')
+        if ('vfo0_squelch_db' not in changes and not squelch_is_auto({**before,**changes})
+                and isinstance(level,float) and level!=int(level)):
+            changes['vfo0_squelch_db']=int(level)
+        stage,result=self._config_patch_apply(r,actor,progress,changes,before,running)
+        if added: result['band_spacing_m']=band
+        if manual: result['squelch_mode']='Manual'
+        return stage,result
+    def _config_patch_apply(self,r,actor,progress,changes,before,running):
+        a=self.agent; c=self.cfg['control']
+        new_f=changes.get('center_frequency_hz',changes.get('vfo0_frequency_hz'))
+        old_f=before.get('center_frequency_hz')
+        jump=abs(new_f-old_f) if isinstance(new_f,int) and isinstance(old_f,int) else 0
+        restart=self._restart_available()
+        reason=None
+        if running and restart:
+            if 'gain_db' in changes: reason='GAIN_CHANGE'
+            elif jump>c['retune_live_max_hz']: reason='LARGE_FREQUENCY_JUMP'
+        if reason: return self._patch_with_restart(r,actor,changes,reason,progress)
+        started=now_ms(); old_digest=a.source.raw_digest
+        self._write_settings(actor,changes)
+        if not running:
+            # The engine reads settings.json when it starts; nothing runs it now.
+            return 'PERSISTED_UNVERIFIED',{'method':'FILE','persisted':True,'revision':a.source.revision,
+                                           'reason':'ENGINE_NOT_RUNNING'}
+        progress('VERIFYING',{'method':'LIVE','persisted':True},self._live_within_s(restart))
+        # Values that must survive the retune: everything we did not change (gain above all). Not the
+        # antenna spacing: the engine sets its band value (0.3 m VHF, 0.128 m UHF) on a retune by design;
+        # it is checked only when the patch asks for a spacing.
+        # An automatic squelch is the engine's to change (it saves its computed level on a retune).
+        auto_sq=squelch_is_auto({**before,**changes})
+        keep={k:v for k,v in before.items() if k in ('center_frequency_hz','gain_db','vfo0_frequency_hz',
+                                                      'vfo0_bandwidth_hz','vfo0_squelch_db','vfo0_squelch_mode')
+              and k not in changes and not (auto_sq and k=='vfo0_squelch_db')}
+        expect={k:v for k,v in changes.items() if not (auto_sq and k=='vfo0_squelch_db')}
+        deadline=time.monotonic()+c['retune_live_window_seconds']; healthy_since=None; why='DAQ_NOT_HEALTHY_AFTER_RETUNE'
+        while time.monotonic()<deadline and not self.stop_event.is_set():
+            safe=a.source.safe
+            if a.source.raw_digest!=old_digest:
+                # Our write is visible; any field now off its intended value was rewritten by the engine.
+                overrode=sorted(k for k,v in {**keep,**expect}.items() if safe.get(k)!=v)
+                if overrode: why='ENGINE_OVERRODE:'+','.join(overrode); break
+            if all(safe.get(k)==v for k,v in expect.items()) and self._daq_healthy_since(started):
+                healthy_since=healthy_since or time.monotonic()
+                # Healthy for a few seconds in a row, not just the status written before the retune settled.
+                if time.monotonic()-healthy_since>=c['retune_settle_seconds']:
+                    a.config_proof='runtime'
+                    proof={'daq':'FRESH_HEALTHY_AFTER_RETUNE','settings':'KEPT_BY_ENGINE'}
+                    rec=a.source.record
+                    if rec and rec['timestamp_ms']>started and rec['frequency_hz']==changes.get('vfo0_frequency_hz'):
+                        proof['vfo0_frequency_hz']='FRESH_DOA_FREQUENCY'
+                    return 'APPLIED',{'method':'LIVE','persisted':True,'revision':a.source.revision,'proof':proof}
+            else:
+                healthy_since=None
+            self.stop_event.wait(0.25)
+        if not restart:
+            a.config_proof='persisted_unverified'
+            return 'PERSISTED_UNVERIFIED',{'method':'LIVE','persisted':True,'revision':a.source.revision,
+                                           'reason':'NATIVE_RUNTIME_EVIDENCE_INCOMPLETE','live_failure':why}
+        # Fall back: restart with everything we meant to have, including what the engine overrode.
+        return self._patch_with_restart(r,actor,{**keep,**changes},'LIVE_FAILED:'+why,progress)
+    def _execute(self,r,actor,progress=None):
         a=self.agent; op=r['op']
         if op=='ppp.restart':
             result=self._helper({'op':'ppp.restart','origin':actor})
@@ -382,31 +618,7 @@ class CommandManager:
             a.profile=r['profile']; a.journal.set('profile',a.profile)
             return 'APPLIED',{'profile':a.profile,'proof':'SCHEDULER_PROFILE_ACTIVE'}
         if op=='config.patch':
-            expected=a.source.raw_digest
-            if not expected: raise ValueError('SETTINGS_UNAVAILABLE')
-            before=now_ms()
-            result=self._helper({'op':op,'origin':actor,'changes':r['changes'],'expected_digest':expected})
-            self._stage(r,'VERIFYING',{'persisted':True})
-            deadline=time.monotonic()+self.cfg['control']['verify_seconds']
-            # File readback is NOT proof that runtime adopted arbitrary parameters.
-            proof={}
-            while time.monotonic()<deadline and not self.stop_event.is_set():
-                st=a.source.status; rec=a.source.record; safe=a.source.safe
-                if all(safe.get(k)==v for k,v in r['changes'].items()):
-                    for key,value in r['changes'].items():
-                        if key=='vfo0_frequency_hz' and rec and rec['timestamp_ms']>before and rec['frequency_hz']==value:
-                            proof[key]='FRESH_DOA_FREQUENCY'
-                        if key=='center_frequency_hz' and st and st['timestamp_ms']>before and st.get('rf_center_frequency_hz')==value:
-                            proof[key]='FRESH_DAQ_RF_CENTER'
-                        if key=='gain_db' and st and st['timestamp_ms']>before and st.get('gain_db')==value:
-                            proof[key]='FRESH_DAQ_GAIN'
-                    if len(proof)==len(r['changes']):
-                        a.config_proof='runtime'
-                        return 'APPLIED',{'revision':a.source.revision,'proof':proof,'persisted':True}
-                self.stop_event.wait(0.2)
-            a.config_proof='persisted_unverified'
-            return 'PERSISTED_UNVERIFIED',{'revision':a.source.revision,'persisted':True,'proof':proof,
-                                          'reason':'NATIVE_RUNTIME_EVIDENCE_INCOMPLETE'}
+            return self._config_patch(r,actor,progress or (lambda stage,result,within=None:None))
         if op in ('processing.set','service.restart'):
             oldgen=a.monitor.snapshot()['generation']; started=now_ms()
             rpc={'op':op,'origin':actor}

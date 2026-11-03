@@ -1,6 +1,9 @@
 [Unit]
 Description=RDF Node bridge and loopback status panel
-After=network.target
+# Stops before the broker and the LoRa bridge, so its retained STOPPED farewell reaches the broker and the
+# bridge queue. A stop of rdf-edge alone leaves the bridge running to carry it; on shutdown/reboot the bridge
+# stops right after without draining, so over LoRa the farewell reaching Ground is best effort.
+After=network.target mosquitto.service rdf-lora-edge.service
 StartLimitIntervalSec=60
 StartLimitBurst=10
 

@@ -97,6 +97,41 @@
       },
       "minItems": 1,
       "maxItems": 2
+    },
+    "h": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 360,
+      "description": "Edge 1.10+ (nav aktif): heading referensi array (DoA 0°) saat kirim, derajat searah jarum jam dari utara; null bila tidak ada sumber heading."
+    },
+    "hsrc": {
+      "enum": [
+        "C",
+        "G",
+        "H",
+        null
+      ],
+      "description": "Sumber h: C kompas (+offset_deg), G course GPS saat bergerak (+travel_offset_deg), H course GPS terakhir yang ditahan."
+    },
+    "b": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 360,
+      "description": "Bearing ke pemancar dari utara searah jarum jam: (h - a) mod 360 dengan capabilities.angle theta_mirror (a = theta_0, berlawanan jarum jam), (h + a) mod 360 dengan csv_native; hanya bila ok=1 dan h ada."
+    },
+    "lat": {
+      "type": "number",
+      "minimum": -90,
+      "maximum": 90,
+      "description": "Posisi saat sampel diambil (5 desimal); hanya dengan fix GPS dan nav.gps.publish_position."
+    },
+    "lon": {
+      "type": "number",
+      "minimum": -180,
+      "maximum": 180
     }
   },
   "required": [
@@ -137,5 +172,16 @@
         "angle_reference"
       ]
     }
-  ]
+  ],
+  "dependentRequired": {
+    "b": [
+      "h"
+    ],
+    "lat": [
+      "lon"
+    ],
+    "lon": [
+      "lat"
+    ]
+  }
 }

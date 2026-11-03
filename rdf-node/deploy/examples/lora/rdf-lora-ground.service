@@ -1,0 +1,24 @@
+# Contoh: jembatan MQTT <-> LoRa serial di Ground (lihat docs/LORA_SERIAL.md). Tidak dipasang otomatis.
+# Ganti --device dengan port LoRa Ground (lebih baik /dev/serial/by-id/...) dan path paket rdf-node.
+# Broker Ground lokal: mosquitto 127.0.0.1:1883 (atau --mqtt-transport websocket --mqtt-port 9001).
+[Unit]
+Description=RDF Node LoRa serial bridge (ground)
+After=network.target mosquitto.service
+Wants=mosquitto.service
+
+[Service]
+Type=exec
+DynamicUser=yes
+SupplementaryGroups=dialout
+ExecStart=/usr/bin/python3 /opt/rdf-node/current/run.py lora-bridge --role ground --device /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0 --baud 115200 --node-id uav-01 --mqtt-host 127.0.0.1 --mqtt-port 1883
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

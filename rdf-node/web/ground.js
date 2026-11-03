@@ -359,7 +359,7 @@ function validateSettings(){
  if(bandwidth!==null&&(settingsBase.bandwidth_hz===null||bandwidth!==settingsBase.bandwidth_hz))changes.vfo0_bandwidth_hz=bandwidth;
  const gain=readSettingValue('gain',settingsBase.gain_db,-10,100,false,errors);
  if(gain!==null&&(settingsBase.gain_db===null||gain!==settingsBase.gain_db))changes.gain_db=gain;
- const squelch=readSettingValue('squelch',settingsBase.squelch_db,-200,50,false,errors);
+ const squelch=readSettingValue('squelch',settingsBase.squelch_db,-200,50,true,errors);  // whole dB, as rdfsdr runs it
  if(squelch!==null&&(settingsBase.squelch_db===null||squelch!==settingsBase.squelch_db))changes.vfo0_squelch_db=squelch;
  return {errors,changes};
 }

@@ -4,7 +4,7 @@
 <header><span class="brand"><b class="brand-dot"></b>RDF NODE <small id="mode"></small></span><span class="head-right"><span id="adminchip" class="adminchip" hidden>ADMIN</span><span id="run" class="badge neutral">MENUNGGU</span></span></header>
 <section id="home" class="page active">
 <div class="statusbar">
-<div class="stat"><small>PPP</small><b id="ppp">--</b></div>
+<div class="stat"><small>LORA</small><b id="radio">--</b></div>
 <div class="stat"><small>MQTT</small><b id="mqtt">--</b></div>
 <div class="stat"><small>DAQ</small><b id="daq">BELUM DIKETAHUI</b></div>
 <div class="stat"><small>CONFIG REV</small><b id="sync">--</b></div>
@@ -17,14 +17,14 @@
 </div>
 </div>
 <div class="commandline"><span class="tag">CMD</span><span id="cmdorigin" class="originchip" hidden></span><span id="command">Belum ada operasi</span><span id="cmdreason" class="cmdreason"></span><span id="cmdstage" class="stagechip" hidden></span></div>
-<div id="alertbox" class="alert"><b id="alerticon">i</b><span id="alert">Memuat status lokal...</span><span id="temp">--</span></div>
+<div id="alertbox" class="alert"><b id="alerticon">i</b><span id="alert">Memuat status lokal...</span><span id="navstat" class="navstat" hidden><span id="gpsmini" class="navmini"></span><span id="compassmini" class="navmini"></span></span><span id="temp">--</span></div>
 </section>
 <section id="link" class="page details">
 <div class="pagetitle"><b>KONEKSI / DELIVERY</b><div id="linkpage" class="seg" role="group" aria-label="Tampilan halaman Link"><button type="button" data-view="0" class="on" aria-pressed="true">Koneksi</button><button type="button" data-view="1" aria-pressed="false">Rincian</button></div></div>
 <div id="linkrows" class="rows"></div>
 </section>
 <section id="system" class="page details">
-<div class="pagetitle"><b id="systitle">RDF / DAQ</b><div id="syspage" class="seg" role="group" aria-label="Tampilan halaman Sistem"><button type="button" data-view="0" class="on" aria-pressed="true">DAQ</button><button type="button" data-view="1" aria-pressed="false">Host</button></div></div>
+<div class="pagetitle"><b id="systitle">RDF / DAQ</b><div id="syspage" class="seg" role="group" aria-label="Tampilan halaman Sistem"><button type="button" data-view="0" class="on" aria-pressed="true">DAQ</button><button type="button" data-view="1" aria-pressed="false">Host</button><button type="button" data-view="2" aria-pressed="false">Nav</button></div></div>
 <div id="sysrows" class="rows"></div>
 </section>
 <section id="config" class="page details">
@@ -58,12 +58,12 @@
 <div class="focus-angle"><strong id="focusangle" class="neutral">--</strong><span class="unit">&deg;</span></div>
 <label id="focusage">Belum ada pengukuran</label>
 <div class="focus-freq"><strong id="focusfreq">--</strong><span class="unit">MHz</span></div>
-<div class="focus-status"><b id="focusppp">PPP --</b><b id="focusmqtt">MQTT --</b><b id="focusdaq">DAQ --</b></div>
+<div class="focus-status"><b id="focusradio">LORA --</b><b id="focusmqtt">MQTT --</b><b id="focusdaq">DAQ --</b></div>
 <p id="focusalert" class="focus-alert"></p>
 </div>
 </div>
 <div id="stale" hidden role="status" aria-live="polite"><div class="stale-card"><b class="stale-icon" aria-hidden="true">!</b><b>SUMBER STATUS HILANG</b><span id="stalereason">API lokal tidak merespons.</span><small>Data di belakang bukan status terkini.</small><button id="retry" type="button">Coba lagi</button></div></div>
-<div id="modal" hidden><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="modaltitle"><div class="dialoghead"><b id="modaltitle">Login</b><button id="closemodal" type="button" aria-label="Tutup">&times;</button></div><div id="modalrecovery"></div><div id="modalbody"></div><div id="modalmsg" class="hint" aria-live="polite"></div></div></div>
+<div id="modal" hidden><div class="dialog" role="dialog" aria-modal="true" aria-labelledby="modaltitle"><div class="dialoghead"><b id="modaltitle">Login</b><button id="closemodal" type="button" aria-label="Tutup">&times;</button></div><div id="modalbody"></div><div id="modalmsg" class="hint" aria-live="polite"></div></div></div>
 <div id="notices"><div id="toast" class="toast" role="status" aria-live="polite" hidden></div></div>
 <div id="blank" hidden aria-label="Layar hitam; ketuk untuk kembali"><div class="blank-clock"><strong id="blanktime">--:--</strong><span id="blankdate"></span><em id="blankclock" hidden>BELUM SINKRON</em></div></div>
 </main><script src="/app.js"></script></body></html>

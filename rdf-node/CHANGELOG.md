@@ -1,5 +1,199 @@
 # Changelog
 
+## 1.11.0 - Unreleased
+
+Contract `1.11` (two optional `telemetry/health` fields).
+
+- The output VFO's peak against squelch reaches the panel and Ground also while squelch holds DoA back.
+  `deploy/kraken/vfo_peaks.patch` makes rdfsdr write `vfo_peaks` to `status.json` every frame: per active VFO
+  the FFT peak inside its bandwidth (CH1 with the Single spectrum, every channel with Full: the value KrakenSDR
+  compares with squelch), the squelch it was compared
+  with (Manual, or what Auto/Auto Channel computed), frequency, bandwidth and the frame time. Edge reads the
+  `source.output_vfo` entry into `detection.vfo_peak` (`OK` with numbers, `STALE` without once older than
+  `freshness.source_status_ms`; `above_squelch` null at a 0.0 dB margin, since rdfsdr compares unrounded values
+  and writes 0.1 dB); a malformed `vfo_peaks` is null in `daq.null_fields` and the rest of the status
+  still counts.
+- `telemetry/health` carries `pk` (peak, dB on KrakenSDR's FFT scale, not dBm) and `psq` (squelch), 0.1 dB,
+  null when stale. They are there only once KrakenSDR has reported `vfo_peaks`: with stock KrakenSDR health is
+  byte-identical to 1.10. `pk` well under `psq` while `why` says no fresh sample (`EMPTY_CSV`, or `DOA_FILE_NOT_UPDATING` with rdfsdr, which
+  writes `DOA_value.html` only when DoA ran) means squelch is holding the signal back.
+- Panel: without a fresh sample (`NO_RECORD`, `NO_FRESH_DOA`, `EMPTY_CSV`, `DOA_FILE_NOT_UPDATING`) the line
+  under the frequency reads `Puncak … dB / SQ … dB` instead of the last sample's PAPR/P. A fresh sample held
+  back only by approval keeps its PAPR/P.
+
+## 1.10.2 - Unreleased
+
+Contract `1.10` (unchanged; one optional ACK field and one availability reason added).
+
+- Progress ACKs carry `result.final_within_ms`: the latest, in ms from that ACK, by which Edge will have sent the
+  final ACK, summed from the helper timeout, `start_timeout_seconds`, `retune_live_window_seconds` and 2 s of
+  polling. `VERIFYING{LIVE}` counts the restart fallback when the patch decided it may take one; `ACCEPTED` of
+  `config.patch` counts it whenever `processing_enabled` is set, since the worker decides later. It is on `ACCEPTED` of `config.patch`, `processing.set`, `service.restart`, `system.reboot.*` and
+  `system.shutdown.*`, and on the `APPLYING`/`VERIFYING` steps of `config.patch` (241000 ms for a restart with
+  the default 180 s start timeout). Ground waits at least until receipt + `final_within_ms` + 30 s (at most
+  900 s) before it reports no final ACK; without the field it keeps its own budgets. It is not journaled, so a
+  replayed ACK does not carry it.
+- A command rejected before the journal (`BUSY`, `CLOCK_UNTRUSTED`, `HELPER_UNAVAILABLE`...) is remembered by id
+  for 60 s (at most 64 ids). A second delivery of the same id and payload (an MQTT DUP resend, a restarted radio
+  bridge) gets the same `REJECTED` instead of being evaluated again, so it can no longer be `ACCEPTED` and run
+  while Ground keeps the first `REJECTED` as final. The same id with another payload is `COMMAND_ID_CONFLICT`.
+- A clean stop (`systemctl stop`/`restart`, upgrade, shutdown) publishes a retained
+  `availability {online:false, reason:"STOPPED"}` on the primary and on a ready backup broker and waits up to 2 s
+  for its PUBACK. The clean DISCONNECT drops the Will, so the retained `online:true` used to stay, and the LoRa
+  bridge kept resending it to Ground every 2 min. rdf-edge.service now orders after mosquitto and the LoRa
+  bridge, so it stops first and the farewell reaches the broker and the bridge queue. A stop of rdf-edge alone
+  leaves the bridge running to carry it; on system shutdown/reboot the bridge stops right after without
+  draining its queue, so over LoRa the farewell reaching Ground is best effort.
+- `capabilities` is republished (retained) whenever it changes, not only at connect: a helper that came up after
+  the agent, or a new approval, no longer leaves Ground with `remote_config_patch: false` until the next reconnect.
+  One failed helper status poll (the helper busy with another RPC for over 1 s) keeps the last status; only a
+  second failure in a row clears it, so a blip neither flips capabilities nor goes out to Ground.
+- rdf-edge subscribes `lora/edge` without Retain As Published, so only the broker's replay is flagged retained and
+  aged by the bridge's stamp `t`. A chrony step between the stamp and now no longer shows a live bridge as STALE.
+  Command subscriptions keep Retain As Published.
+- LoRa bridge: commands are sent three times (the third copy 1 s after the second, in a later turn of the edge),
+  ACKs still twice. At ~13% Ground-to-Edge frame loss a one-frame command is lost ~0.2% of the time instead of
+  ~1.7%. No wire change; the ground-role bridge needs this release.
+- LoRa bridge: a heartbeat whose `uptime_s` went down, or stayed the same while the peer's wall clock in it moved
+  on by 1 s or more (a run shorter than one heartbeat period sends 0 each time), means the other bridge restarted;
+  the receiver then forgets the message ids it completed (`rx.peer_restarts`), so new messages with reused ids are
+  no longer dropped as copies for 30 s. Message ids start at a random value. No wire change.
+- `install.sh` prints a NOTICE when `rdf-lora-edge.service` (or `rdf-lora-ground.service` with `--ground`) runs a
+  bridge outside `/opt/rdf-node/current`: the installer never updates that unit, so such a bridge keeps its old
+  code. When the unit runs from `/opt/rdf-node/current` and is active, it prints a NOTICE that it still runs the
+  previous release, with `sudo systemctl restart rdf-lora-<role>.service` (this release's 3x commands and
+  peer-restart reset need it). Read-only check: the installer does not restart the bridge.
+- Docs: `LORA_SERIAL.md` makes the LORA refclock the time authority (`prefer trust`) and the GPS refclock
+  `noselect` (monitored, never steering), because Ground judges freshness by its own clock; it also lists frame
+  type 4 TIME and the TURN flag, and the 0.45 s quiet window counted from the air. `MQTT_GROUND.md` adds the LoRa
+  bridge roles (edge, ground) with their read/write topics, and `lora/ground`, `lora/edge`, `ground/gps` to the
+  Ground controller and viewer subscribe lists.
+
+## 1.10.1 - Unreleased
+
+Contract `1.10` (unchanged).
+
+- Panel: the T900/PPP leftovers are gone. The radio is the LoRa bridge: no "Restart T900" button or
+  confirmation, no T900 recovery card, and the home status, focus mode and Link tab always show LoRa. When the
+  bridge does not report, they say LORA STALE / TIDAK MELAPOR with the report's age instead of falling back to
+  the old PPP rows, and a stale report's port, loss and clock are shown as `--`, not as current green values.
+  Old `ppp.restart` operations still read correctly in Riwayat.
+- Panel: an enabled backup broker that is not connected marks the Data tab (where it is shown), not Link.
+- LoRa bridge (edge): the quiet window after a turn frame now counts from when the radio is expected to have
+  sent that frame and every frame queued before it (`air_until`), not from when it was written to the module,
+  and lasts 0.45 s instead of 0.3 s. Frames written just before the turn frame were still on the air, so Ground's
+  reply collided with the edge's next frames: on the bench the edge lost about 62% of Ground's frames (commands
+  such as `config.get` went unanswered) and now about 13%; Edge to Ground stays at about 4%.
+- rdf-edge: a retained `lora/edge` status (replayed after an rdf-edge restart or broker reconnect) is as old as
+  its own stamp `t`; without a usable stamp it counts as stale. A dead bridge no longer shows LoRa UP for 20 s
+  after a restart.
+
+## 1.10.0 - Unreleased
+
+Contract `1.10` (additive).
+
+- Every `telemetry/doa` sample of a node with a compass or GPS carries the array heading at send time: `h`
+  (where DoA 0° points, degrees clockwise from north, null when there is none) and `hsrc` (`C` compass, `G` GPS
+  course, `H` held GPS course). A valid sample (`ok=1`) also carries `b`, the bearing to the transmitter from
+  north: (`h` - `a`) mod 360 with `theta_mirror` (`a` is theta_0, counter-clockwise from the array reference),
+  (`h` + `a`) mod 360 with `csv_native`, and with `nav.gps.publish_position` the position it was taken at (`lat`, `lon`).
+  Ground no longer has to pair a DoA sample with a heading from a health message up to 2 s older.
+- `nav.heading` picks the source: `compass` (default; GPS course when the compass has nothing), `gps` (course
+  while moving at `gps_min_speed_mps` or faster for `gps_min_seconds`, then held for `hold_seconds`, else the
+  compass) or `auto` (course while moving, else the compass, else the held course). `travel_offset_deg` turns
+  the direction of travel into the array reference, as `nav.compass.offset_deg` does for the compass.
+- `telemetry/angular` and `telemetry/diagnostic/angular` carry `heading_deg` and `heading_source` (the heading of
+  the latest DoA sample): bin theta points at (`heading_deg` + 360 - theta) mod 360.
+- Ground receiver: `detection` adds `bearing_deg`, `array_heading_deg`, `heading_source`, `lat`, `lon`; a bad stamp
+  is dropped (`nav_rejected`) and the sample still counts. `capabilities.nav.heading` names the source; the Edge
+  snapshot shows the last choice in `nav.array_heading`.
+- `run.py nav-calibrate --tx-lat .. --tx-lon ..`: compares the bearing with the true bearing to a transmitter at
+  a known place and suggests the change to `nav.compass.offset_deg` or `nav.heading.travel_offset_deg`.
+  It never writes the configuration.
+
+## 1.9.0 - Unreleased
+
+Contract `1.9` (additive).
+
+- config.patch accepts `vfo0_squelch_mode` (`Manual`, `Auto`, `Auto Channel`, `Default`) for `vfo_squelch_mode_0`.
+  rdfsdr computes DoA only while the VFO's peak is above its squelch: Manual uses `vfo0_squelch_db`, Auto the
+  mean of the whole spectrum + 5 dB, Auto Channel the mean around the VFO + 3 dB (an automatic squelch just
+  under any signal above the noise), Default follows `vfo_default_squelch_mode`. Applied live (no retune).
+- `vfo0_squelch_db` is written in whole dB (rdfsdr reads it with `int()`). Setting a level while the squelch is
+  automatic also switches it to Manual (result `squelch_mode: Manual`).
+- With an automatic squelch the engine saves its computed level into settings.json on a retune; that is no
+  longer taken for an override (no needless restart), and `state.rf` then leaves `sq` out. In Manual a
+  fractional level left in the file (from Auto or an older Edge) is rewritten as the whole dB the engine runs
+  (`int()`), so a later retune is not mistaken for an override. Missing mode keys mean what rdfsdr reads:
+  `Default` -> `Auto`. The built-in Ground page asks for the squelch in whole dB, so its settings form matches
+  what Edge writes.
+- `state.rf.sqm`: the squelch mode. `capabilities.config_fields` lists `vfo0_squelch_mode`.
+
+## 1.8.0 - Unreleased
+
+Contract `1.8` (additive).
+
+- config.patch accepts `ant_spacing_m` (metres, 0.05–1.0, rounded to 0.1 mm) for `ant_spacing_meters` (UCA
+  radius). rdfsdr sets the UCA radius itself on every retune and at start: 0.3 m in 30–300 MHz, 0.128 m in
+  300–3000 MHz (UCA; a settings file without `ant_arrangement` starts as UCA). Edge follows the same rule: in
+  those bands a spacing more than 0.5 mm off the band value is refused before anything is written (`FAILED`,
+  `SPACING_SET_BY_ENGINE_BAND`, with `band_spacing_m`), a closer one is snapped to it, and every patch there
+  writes the band radius when the file holds another one (named in the result as `band_spacing_m`), so
+  settings.json and `state.rf.uca` say what the engine runs and a settings reload never brings an old radius
+  back. Outside those bands (or with a ULA) the spacing is free and applies live. Out of range: `NUMBER_OUT_OF_RANGE`.
+  The engine moving the radius to its band value on a retune is not an override.
+- LoRa bridge (Edge side): availability, state and capabilities are also resent every 2 min while the link is
+  up, not only when it comes back. Capabilities is published once at connect and spans ~4 radio frames; one
+  lost frame (~2.5 % Edge->Ground) left Ground with the previous version until the next link drop.
+- `state.rf.uca` (metres) and `capabilities.config_fields` (the fields config.patch accepts), so Ground sends
+  `ant_spacing_m` only to an Edge that takes it. The panel labels it "Jarak UCA".
+
+## 1.7.1 - Unreleased
+
+Contract `1.7` (unchanged).
+
+- Panel: GPS and compass are visible on the Pi. Sistem has a third view "Nav" (compass heading and state,
+  GPS fix 2D/3D with satellites used/in view, HDOP with BAIK <= 2 / SEDANG <= 5 / BURUK, position, altitude and
+  speed); the home status row shows a glance ("GPS 3D", heading) with a coloured dot, hidden when both sensors
+  are off or the Edge has no nav data.
+  The GPS colour follows accuracy too: a 2D fix or HDOP above 2 is yellow, above 5 red.
+- Compass: one missed or garbled GY-26 reply no longer reports `NO_REPLY`/`BAD_FRAME` (and drops the heading)
+  while the last heading is still within `stale_ms`; a missing or broken port still does. The panel, health
+  `hs`/`hdg` and Ground no longer flicker to a fault between two good frames.
+
+## 1.7.0 - Unreleased
+
+Contract `1.7` (additive).
+
+- config.patch on a running SDR engine tries the change live and falls back to an engine restart
+  (stop -> write -> start) when needed. A gain change or a frequency jump above
+  `control.retune_live_max_hz` (20 MHz) restarts directly: the rdfsdr engine re-applies its own band gain
+  on a live retune (25.4 dB in VHF) and lost DAQ sync, while at start it takes settings.json as written.
+  A live change the engine overrides (any field, also one not in the patch) or that leaves the DAQ
+  unhealthy for `retune_live_window_seconds` falls back to the restart with every intended value. Ground
+  follows it through intermediate ACKs (`VERIFYING` with `method: LIVE`, `APPLYING` with
+  `method: RESTART` and `reason`); APPLIED carries `method` and runtime proof (fresh healthy DAQ held for
+  `retune_settle_seconds`, values intact). A stopped engine only gets the file (`ENGINE_NOT_RUNNING`).
+- `state.rf`: what the SDR is set to (`f`, `vfo`, `g`, `bw`, `sq`), resent with every config revision, so
+  Ground shows frequency, gain and squelch without Data Out. `telemetry/health/detail.ovr`: ADC overdrive.
+- Panel: the Config tab fits 480x320 again (five rows + buttons were 267 px in a 244 px page, so the buttons
+  slid under the nav and its border line crossed "Riwayat"). A Ground command banner that ends
+  "tersimpan, belum terbukti" hides after 30 s instead of covering the rows until closed (it stays in
+  Riwayat). config.patch stages show the route: "retune langsung", "restart SDR", "diterapkan (restart SDR)".
+
+## 1.6.1 - Unreleased
+
+Contract `1.6` (unchanged).
+
+- Edge panel on LoRa: rdf-edge subscribes to the bridge's retained `lora/edge` status on its local
+  broker and exposes it as `snapshot.link.lora` with rates and loss, plus `link.transport`
+  (`LORA` while the status is fresh, else `PPP`). The panel header and Link tab show the LoRa link, data
+  rate, loss each way, clock vs Ground and radio port instead of T900/PPP rows. Alerts
+  `LORA_LINK_DOWN` and `LORA_BRIDGE_STALE`.
+- A `doa.xml` sample older than 60 s is no longer shown as the current bearing (KrakenSDR writes none
+  while it has no DoA, so it can be hours old). Without a live or fresh sample the panel shows the
+  frequency the SDR is set to, labelled `FREKUENSI SETELAN`.
+
 ## 1.6.0 - Unreleased
 
 Contract `1.6` (additive): `telemetry/health` can carry optional compass and GPS fields.
@@ -23,6 +217,22 @@ Contract `1.6` (additive): `telemetry/health` can carry optional compass and GPS
   and the track. A bad nav field is counted as a reject and never costs the health message.
 - `rdf-edge.service` gains `SupplementaryGroups=dialout`; `deploy/examples/nav/99-rdf-nav.rules` sets
   stable symlinks and keeps ModemManager off the sensor ports.
+- LoRa serial bridge (RLS1, `run.py lora-bridge --role edge|ground`, docs/LORA_SERIAL.md): carries the
+  MQTT topics over a transparent LoRa UART without PPP or TCP/IP. Each side talks to its local broker;
+  Ground gets byte-identical payloads and retain flags, commands go the other way. Frames are COBS +
+  CRC-16, zlib with a shared dictionary, at most 200 B, released one by one under a 1000 B/s budget with
+  a 400 B burst (the module buffer is ~1 KB without flow control). Per-topic priority and maximum age
+  keep data inside Ground's freshness windows; commands and ACKs go twice, retained topics are resent
+  when the link returns. Heartbeats carry link counters and wall clock; status is published retained on
+  `sdr/v2/<node>/lora/edge|ground`. Example units in `deploy/examples/lora/`.
+- Clock sync without IP: the edge bridge exchanges NTP-style TIME frames with the ground bridge and feeds
+  the best sample to chrony (`--chrony-sock`, `refclock SOCK`); the GPS reader can feed RMC time of a
+  valid fix to chrony too (`nav.gps.chrony_sock`). `run.py lora-test` measures LoRa throughput, loss and
+  latency with RLS1 TEST frames (rx, tx sweep, echo).
+- Field test on the real link drove three bridge changes: DoA ranks first among telemetry and goes twice;
+  health is the newest one at most every 2 s (`--health-every`); half-duplex turn taking (the edge sets
+  F_TURN about once a second and stays quiet 0.3 s, the ground transmits only then or after 3 s of edge
+  silence). TIME frames are stamped when they leave, not when queued.
 
 ## 1.5.0 - Unreleased
 

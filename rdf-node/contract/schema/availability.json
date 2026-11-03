@@ -31,7 +31,7 @@
     "reason": {
       "type": "string",
       "maxLength": 64,
-      "description": "Hanya saat offline: CONNECTION_LOST, BACKUP_RECONFIGURED, BACKUP_DISABLED."
+      "description": "Hanya saat offline: CONNECTION_LOST (Last Will), STOPPED (agent berhenti normal, sejak 1.10.2), BACKUP_RECONFIGURED, BACKUP_DISABLED. Consumer harus menerima kode lain."
     }
   },
   "required": [

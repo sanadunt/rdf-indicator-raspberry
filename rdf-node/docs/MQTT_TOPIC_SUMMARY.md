@@ -77,7 +77,7 @@ QoS dan expiry berikut adalah setting publish dari implementasi saat ini. `Retai
 | `telemetry/health/detail` | Edge -> Ground | Control | 0 | Tidak | Tiap 10 s; expiry 15 s | Detail host, USB, sync DAQ, trafik, parse dan abort counter, serta status link PPP (interface, ping peer, unit `t900-ppp.service`, restart count). |
 | `telemetry/angular` | Edge -> Ground | Bulk | 0 | Tidak | Profile-dependent; expiry 3 s | Frame 360 sampel; flags `63` untuk LIVE atau trust-only partial untuk UNVERIFIED. |
 | `state` | Edge -> Ground | Control | 1 | Ya | Saat state berubah dan paling lambat tiap 60 s | Status run/DAQ, profile, clock dan identitas boot. Jangan dipakai sebagai heartbeat. |
-| `capabilities` | Edge -> Ground | Control | 1 | Ya | Saat generation koneksi Control berubah | Versi, identitas, codec, profile dan capability yang diizinkan. |
+| `capabilities` | Edge -> Ground | Control | 1 | Ya | Saat generation koneksi Control berubah, dan sejak 1.10.2 setiap kali isinya berubah | Versi, identitas, codec, profile dan capability yang diizinkan. |
 | `settings/reported` | Edge -> Ground | Control | 1 | Tidak | Hanya setelah `cmd/config/get`; expiry 30 s | `v,sid,boot,id,rev,t,settings_json`; teks native UTF-8 persis; broker utama TLS atau plaintext, broker cadangan TLS kecuali opt-in plaintext; compact envelope maksimum 8 KiB. |
 | `availability` | Edge -> Ground | Control | 1 | Ya | Online saat koneksi siap; Last Will saat koneksi hilang | Ketersediaan Control, bukan bukti DAQ sehat. |
 | `ack/config` | Edge -> Ground | Control | 1 | Tidak | Saat progress/hasil command `config.*`; expiry 30 s | ACK command konfigurasi. |
@@ -288,6 +288,9 @@ lama. Kode alasan dan cara membacanya: [PROTOCOL.md](PROTOCOL.md#kode-alasan-doa
 | `a` | `ok=1`: sudut relatif menurut konfigurasi angle, bukan otomatis true north. `ok=0`: raw source degree; tafsirkan RAW hanya dengan `angle_reference="RAW"`. |
 | `c` | Confidence/PAPR native dB, bukan probabilitas atau persen. |
 | `p` | Power native bertanda, bukan level absolut terkalibrasi. |
+| `h`, `hsrc` | Sejak 1.10, hanya bila kompas/GPS dikonfigurasi: heading referensi array saat kirim (derajat dari utara searah jarum jam, `null` bila tidak ada) dan sumbernya (`C` kompas, `G` course GPS, `H` course GPS yang ditahan). |
+| `b` | Sejak 1.10: bearing ke pemancar dari utara searah jarum jam: (`h` − `a`) mod 360 dengan `capabilities.angle` = `theta_mirror` (`a` = theta_0, berlawanan jarum jam dari referensi array), (`h` + `a`) mod 360 dengan `csv_native`. Hanya pada `ok=1` dengan `h`. |
+| `lat`, `lon` | Sejak 1.10: posisi saat sampel dikirim, 5 desimal; hanya dengan fix GPS dan `nav.gps.publish_position`. |
 | `rev` | Revision konfigurasi aman saat sampel dibaca; `null` bila sampel belum teratribusi ke settings. |
 | `ok` | `1` menandakan DoA lolos semua gate source Edge; `0` menandakan sampel berlabel. |
 | `clk` | `1` jam Edge tersinkron, `0` tidak. `ok=1` dengan `clk=0` hanya terjadi dengan jam uji (`state.clock="TEST"`). |
@@ -339,6 +342,20 @@ di `nav:`; tanpa sensor, payload sama persis dengan 1.5. Consumer harus menerima
 | `lat`, `lon` | Posisi WGS84, 5 desimal (~1 m). Hanya ada bila fix dan `nav.gps.publish_position: true`. |
 | `alt` | Ketinggian MSL meter (fix 3D); `sog` kecepatan m/s; `cog` arah gerak derajat true (dari RMC, dapat `null`). Hanya bersama `lat`/`lon`. |
 
+Sejak kontrak 1.11 health juga dapat membawa `pk` dan `psq`. Keduanya hanya ada bila KrakenSDR
+melaporkan `vfo_peaks` di `status.json` (patch rdfsdr `deploy/kraken/vfo_peaks.patch`); tanpa patch,
+payload tidak berubah.
+
+| Field | Makna |
+|---|---|
+| `pk` | Puncak spektrum di lebar VFO output, dB skala FFT KrakenSDR (bukan dBm, ikut gain), 0.1 dB. Diukur setiap frame, juga saat di bawah squelch. `null` bila pengukuran basi. |
+| `psq` | Squelch VFO output yang dipakai KrakenSDR pada frame itu (Manual, atau hasil Auto/Auto Channel), 0.1 dB. DoA hanya dihitung bila `pk` > `psq`. `null` bila basi atau tidak diketahui. |
+
+`pk` jauh di bawah `psq` sementara `why` menyebut tidak ada sampel baru (`EMPTY_CSV`, atau
+`DOA_FILE_NOT_UPDATING` pada rdfsdr yang hanya menulis `DOA_value.html` saat DoA dihitung) berarti squelch
+menahan sinyal (atau memang tidak ada sinyal); `pk` terus di atas `psq` tetapi tetap tanpa sampel baru
+berarti yang menahan bukan squelch.
+
 Contoh dengan kompas dan GPS berposisi:
 
 ```json
@@ -387,6 +404,8 @@ Detail tidak menggantikan gate health utama. Ground saat ini menyimpan detail te
 ```json
 {"v":2,"sid":"7a8b9c0d","contract":"1.5","boot":"10aa2345-6789-4abc-9def-1234567890ab","instance":"8a5bb269-73fd-4cbb-9c6b-a3327f679221","t":1790668800123,"run":"RUNNING","daq":true,"cfg":7,"profile":"balanced","clock":"SYNCED"}
 ```
+
+Sejak kontrak 1.7 `state` dapat membawa `rf` = setelan SDR dari `settings.json` (revisi `cfg`): `f` frekuensi tengah Hz, `vfo` frekuensi VFO0 Hz, `g` gain dB, `bw` bandwidth VFO0 Hz, `sq` squelch VFO0 dB. Ini setelan, bukan bukti runtime; frekuensi yang benar-benar dipakai terlihat di `telemetry/doa.f` dan `config.patch` `APPLIED`. `telemetry/health/detail.ovr` membawa ADC overdrive (boolean atau null). Sejak kontrak 1.8 `rf.uca` = `ant_spacing_meters` (radius UCA, meter), dan `capabilities.config_fields` mendaftar field yang diterima `config.patch`. Sejak kontrak 1.9 `rf.sqm` = mode squelch VFO0; saat squelch otomatis `rf.sq` tidak dikirim.
 
 `contract` adalah revisi kontrak MQTT (`major.minor`, sejak 1.5; lihat [contract/README.md](../contract/README.md)). `run` adalah state processing berupa string; `daq` adalah boolean ringkas; `cfg` revision konfigurasi; `profile` profile saat ini; `clock` state clock: `SYNCED`, `UNTRUSTED`, `DEMO`, atau `TEST` (jam OS untuk uji tanpa alat, `testing.clock: system`; tidak pernah berarti tersinkron). `state.daq=false` tidak membedakan degraded dan unknown. Gunakan `telemetry/health.daq` untuk enum health dan freshness. Ground memakai `sid` bersama `boot` dan `instance` untuk memeriksa identitas sesi.
 
@@ -461,6 +480,14 @@ Last Will saat koneksi MQTT hilang:
 
 ```json
 {"v":2,"sid":"7a8b9c0d","contract":"1.5","online":false,"reason":"CONNECTION_LOST"}
+```
+
+DISCONNECT yang bersih membuat broker membuang Last Will. Karena itu sejak 1.10.2 agent yang berhenti
+normal (`systemctl stop`/`restart`, upgrade, shutdown) lebih dulu mengirim farewell retained ke broker
+utama dan cadangan yang siap, lalu menunggu PUBACK paling lama 2 s:
+
+```json
+{"v":2,"sid":"7a8b9c0d","contract":"1.10","online":false,"t":1790668900123,"reason":"STOPPED"}
 ```
 
 Availability adalah nilai terakhir, bukan heartbeat dan bukan bukti DAQ sehat. Cek `state`,
@@ -591,7 +618,7 @@ yang diizinkan ACL topic dapat mengirim command langsung.
 | Topic suffix | `op` | Field tambahan (contoh) |
 |---|---|---|
 | `cmd/config/get` | `config.get` | Tidak ada. Read-only; meminta teks native settings melalui `settings/reported`. |
-| `cmd/config/patch` | `config.patch` | `{"changes":{"center_frequency_hz":433920000,"vfo0_frequency_hz":433920000}}`; subset field safe dan tidak kosong. |
+| `cmd/config/patch` | `config.patch` | `{"changes":{"center_frequency_hz":433920000,"vfo0_frequency_hz":433920000}}`; subset field safe dan tidak kosong: `center_frequency_hz`, `vfo0_frequency_hz`, `vfo0_bandwidth_hz`, `gain_db` (tabel), `vfo0_squelch_db`, dan sejak 1.8 `ant_spacing_m` (0.05–1.0 m), sejak 1.9 `vfo0_squelch_mode` (`Manual`/`Auto`/`Auto Channel`/`Default`; `vfo0_squelch_db` ditulis dalam dB bulat dan, bila squelch sedang otomatis, ikut mengubah mode ke Manual). Engine rdfsdr sendiri memasang 0.3 m di VHF (30–300 MHz) dan 0.128 m di UHF (300–3000 MHz) setiap retune dan saat start (UCA); jarak yang meleset > 0,5 mm dari nilai band ditolak sebelum ditulis (`FAILED`, `SPACING_SET_BY_ENGINE_BAND`, `band_spacing_m`), yang lebih dekat dibulatkan ke nilai band, dan setiap patch di band itu ikut menulis jarak band bila file berisi nilai lain (disebut di hasil sebagai `band_spacing_m`). |
 | `cmd/processing/set` | `processing.set` | `{"desired":"STOPPED"}` atau `{"desired":"RUNNING"}`. Hanya target SDR audited; tanpa approval root per command. |
 | `cmd/service/restart` | `service.restart` | Tidak ada. Hanya target SDR audited; tanpa approval root per command. |
 | `cmd/service/ppp/restart` | `ppp.restart` | Tidak ada. Ground tanpa root grant/approval; helper memeriksa fixed unit loaded, tanpa job, dan `active`/`failed`/`activating(auto-restart)` pada setiap request (`inactive` hanya dari panel Edge lokal). Satu restart aktif dan jeda minimum 15 s untuk semua asal. Konfirmasi ulang diperlukan setelah hasil unknown. |
@@ -638,6 +665,14 @@ Jika `id` sama dan payload sama, Edge mengembalikan progress/hasil jurnal tanpa 
 `ack/config`, lalu memicu respons terpisah di `settings/reported`. `operation.get` mengembalikan
 `operation` berupa record operation publik atau `null`. Error biasanya berisi `{"error":"ERROR_CODE"}`.
 Status yang dikenal jurnal mencakup `ACCEPTED`, `APPLYING`, `VERIFYING`, `REBOOT_SCHEDULED`, `SHUTDOWN_SCHEDULED`, `PPP_RESTART_REQUESTED`, `APPLIED`, `FAILED`, `REJECTED`, `EXPIRED`, `CONFLICT`, `PERSISTED_UNVERIFIED`, `OUTCOME_UNKNOWN`, dan `CANCELLED`.
+
+Sejak 1.10.2 ACK progress membawa `result.final_within_ms` (integer, opsional): paling lambat berapa
+milidetik setelah ACK itu Edge sudah mengirim ACK akhir. Ada di `ACCEPTED` untuk `config.patch`,
+`processing.set`, `service.restart`, `system.reboot.*`, dan `system.shutdown.*`, serta di `APPLYING` dan
+`VERIFYING` `config.patch`. Nilainya dihitung dari timeout yang dikonfigurasi (lihat
+[CONTROL.md](CONTROL.md#batas-waktu-ack-akhir-final_within_ms)). Ground menunggu ACK akhir paling
+sedikit sampai waktu terima ACK + `final_within_ms` + 30.000 ms (maks. 900.000 ms); tanpa field ini
+Ground memakai batas bawaannya.
 
 Untuk `ppp.restart`, ACK berurutan `ACCEPTED`, `PPP_RESTART_REQUESTED` (`accepted_by_systemd`,
 `requested_ms`, `service`), lalu ACK akhir dari pemantau link Edge: `APPLIED` dengan

@@ -14,7 +14,24 @@ FIELD_MAP = {
     'vfo0_frequency_hz': ('vfo_freq_0', 1),
     'vfo0_bandwidth_hz': ('vfo_bw_0', 1),
     'vfo0_squelch_db': ('vfo_squelch_0', 1),
+    # UCA radius (adjacent-element spacing for ULA), metres. The engine's own band rule sets 0.3 m in
+    # VHF and 0.128 m in UHF on every retune and at start; outside those bands it keeps this value.
+    'ant_spacing_m': ('ant_spacing_meters', 1),
+    # rdfsdr computes DoA only while the VFO's peak exceeds its squelch. Manual uses vfo0_squelch_db; Auto is the
+    # mean of the whole spectrum + 5 dB, Auto Channel the mean around the VFO + 3 dB; Default follows
+    # vfo_default_squelch_mode.
+    'vfo0_squelch_mode': ('vfo_squelch_mode_0', 1),
 }
+# Fields carried as text, with the values the engine knows.
+SQUELCH_MODES = ('Manual', 'Auto', 'Auto Channel', 'Default')
+STRING_FIELDS = {'vfo0_squelch_mode': SQUELCH_MODES}
+
+def squelch_is_auto(safe:dict) -> bool:
+    """True when rdfsdr sets VFO0's squelch itself (its own rule, Default resolved). Missing keys take rdfsdr's
+    defaults: vfo_squelch_mode_0 'Default', vfo_default_squelch_mode 'Auto'."""
+    mode=safe.get('vfo0_squelch_mode','Default')
+    if mode=='Default': mode=safe.get('vfo_default_squelch_mode','Auto')
+    return mode in ('Auto','Auto Channel')
 
 def safe_settings(data:dict, invalid:list|None=None) -> dict:
     """Safe subset of native settings. A field that does not parse is left out (and named in
@@ -23,13 +40,18 @@ def safe_settings(data:dict, invalid:list|None=None) -> dict:
         raise ValueError('SETTINGS_OBJECT_REQUIRED')
     result={}
     for name,(key,scale) in FIELD_MAP.items():
+        if name in STRING_FIELDS:
+            if key in data:
+                if data[key] in STRING_FIELDS[name]: result[name]=data[key]
+                elif invalid is not None: invalid.append(name)
+            continue
         if key in data:
             try: n=finite(data[key],-1e6,5e9)*scale
             except (ValueError,TypeError,OverflowError):
                 if invalid is not None: invalid.append(name)
                 continue
             result[name]=int(round(n)) if name.endswith('_hz') else n
-    for key in ('ant_arrangement','doa_method','active_vfos','output_vfo','en_doa'):
+    for key in ('ant_arrangement','doa_method','active_vfos','output_vfo','en_doa','vfo_default_squelch_mode'):
         val=data.get(key)
         if isinstance(val,(str,int,bool)) and len(str(val))<64:
             result[key]=val
@@ -107,6 +129,24 @@ def parse_doa_xml(data:bytes) -> dict:
             'frequency_mhz':finite(field('FREQUENCY'),0.001,5000)}
 
 
+def _db(v):
+    if v is None: return None
+    if isinstance(v,bool) or not isinstance(v,(int,float)): raise ValueError('VFO_PEAKS_INVALID')
+    return finite(v,-400,200)
+
+def parse_vfo_peaks(v) -> list:
+    # rdfsdr's channel peak per VFO and the squelch it was held against (deploy/kraken/vfo_peaks.patch).
+    # Measured every frame, also when nothing clears squelch; stock KrakenSDR writes no such key.
+    if not isinstance(v,list) or len(v)>16: raise ValueError('VFO_PEAKS_INVALID')
+    out=[]
+    for e in v:
+        if not isinstance(e,dict): raise ValueError('VFO_PEAKS_INVALID')
+        out.append({'vfo':integer(e.get('vfo'),0,15),'frequency_hz':integer(e.get('frequency_hz'),1,0xffffffff),
+                    'bandwidth_hz':integer(e.get('bandwidth_hz'),1,100000000),
+                    'peak_db':_db(e.get('peak_db')),'squelch_db':_db(e.get('squelch_db')),
+                    'timestamp_ms':integer(e.get('timestamp_ms'),1000000000000,9999999999999)})
+    return out
+
 def parse_status(data:bytes) -> dict:
     j=strict_json(data)
     if not isinstance(j,dict):
@@ -134,6 +174,11 @@ def parse_status(data:bytes) -> dict:
              adc_overdrive=b(daq.get('adc_overdrive')),gps_status=str(j.get('gps_status','Unknown'))[:40],
              rf_center_frequency_hz=daq.get('rf_center_frequency_hz',daq.get('rf_center_freq')),
              gain_db=daq.get('gain_db'),null_fields=null_fields)
+    # None when the key is missing (stock KrakenSDR) or malformed (named; the rest of the status still counts).
+    out['vfo_peaks_reported']='vfo_peaks' in j; out['vfo_peaks']=None
+    if out['vfo_peaks_reported']:
+        try: out['vfo_peaks']=parse_vfo_peaks(j['vfo_peaks'])
+        except (ValueError,TypeError,OverflowError): null_fields.append('vfo_peaks')
     return out
 
 class Source:
@@ -154,6 +199,8 @@ class Source:
         # rewritten is a different state from a file that stopped changing.
         self.record_file_mtime_ms=None
         self.source_tick=0; self.next_settings=0; self.next_status=0; self.settings_stat=None
+        # Set once status.json has carried vfo_peaks: from then on the peak is reported, stale or not.
+        self.peak_capable=False
     def poll(self, force=False):
         self.source_tick+=1
         if not self.path:
@@ -200,6 +247,7 @@ class Source:
                     self.drop_delta=max(0,drop-self.last_drop) if self.last_drop is not None else None
                     self.last_drop=drop
                 self.status=st; self.status_error=None
+                if st['vfo_peaks_reported']: self.peak_capable=True
             except (OSError,ValueError,TypeError,KeyError,RecursionError) as e:
                 self.status_error=type(e).__name__+':STATUS_UNAVAILABLE'
         try: self.record_file_mtime_ms=(self.path/'DOA_value.html').stat().st_mtime_ns//1000000
@@ -270,6 +318,7 @@ class Source:
         if not attrib: reasons.append('CONFIG_ATTRIBUTION_UNVERIFIED')
         if mutation: reasons.append('CONTROL_IN_PROGRESS')
         raw=rec['raw_doa_deg'] if rec else None
+        vfo_peak=self.vfo_peak_view(st,status_fresh,sa,utc) if self.peak_capable else None
         angle=(360-raw)%360 if raw is not None and self.cfg['source']['angle_mode']=='theta_mirror' else raw
         valid=not reasons
         return dict(valid=valid,reasons=reasons,state='VALID' if valid else ('SETUP_REQUIRED' if not self.path else 'UNVERIFIED' if any('UNVERIFIED' in r for r in reasons) else 'NO_FRESH_DOA'),
@@ -281,13 +330,30 @@ class Source:
                     angle_convention=self.cfg['source']['angle_mode'],q=rec['q'] if rec else 0,
                     revision=rec.get('observed_revision') if rec and attrib else None,
                     config_attributed=attrib,parse_errors=self.parse_errors,
-                    null_fields=list(rec.get('null_fields',())) if rec else [],
+                    null_fields=list(rec.get('null_fields',())) if rec else [],vfo_peak=vfo_peak,
                     daq=dict(state='HEALTHY' if health else 'DEGRADED' if status_fresh else 'UNKNOWN',
                              healthy=health,sync=sync,source_age_ms=sa,frame_progressing=frame_progress,
                              frame_index=st['frame_index'] if st else None,
                              dropped_frames=st['dropped_frames'] if st else None,drop_delta=self.drop_delta,
                              adc_overdrive=st['adc_overdrive'] if st else None,
                              null_fields=list(st.get('null_fields',())) if st else []))
+
+    def vfo_peak_view(self, st, status_fresh, status_age, utc) -> dict:
+        # The output VFO's peak against its squelch from the latest status, also while squelch holds DoA back:
+        # it tells a missing signal from a squelch set too high. STALE carries no numbers.
+        out=dict(state='STALE',vfo=None,frequency_hz=None,bandwidth_hz=None,peak_db=None,squelch_db=None,
+                 margin_db=None,above_squelch=None,age_ms=None)
+        want=self.cfg['source']['output_vfo']; peaks=(st or {}).get('vfo_peaks') or []
+        e=next((p for p in peaks if p['vfo']==want),None) if want>=0 else (peaks[0] if peaks else None)
+        if not (e and status_fresh and e['peak_db'] is not None and e['timestamp_ms']<=utc+1000): return out
+        a=max(0,utc-e['timestamp_ms'],status_age or 0)
+        if a>self.cfg['freshness']['source_status_ms']: return out
+        sq=e['squelch_db']; margin=None if sq is None else round(e['peak_db']-sq,1)
+        # rdfsdr compares unrounded values and writes 0.1 dB: a margin of 0.0 cannot say which side it was.
+        out.update(state='OK',vfo=e['vfo'],frequency_hz=e['frequency_hz'],bandwidth_hz=e['bandwidth_hz'],
+                   peak_db=round(e['peak_db'],1),squelch_db=None if sq is None else round(sq,1),
+                   margin_db=margin,above_squelch=None if not margin else margin>0,age_ms=a)
+        return out
 
     def diagnostic_view(self, validation_reasons=()) -> dict:
         mono=time.monotonic(); utc=now_ms(); rec=self.diagnostic_record

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/sanadunt/rdf-indicator-raspberry/rdf-node/contract/schema/telemetry.health.json",
   "title": "telemetry/health",
-  "description": "Heartbeat 1/s. Field tambahan boleh ada dan harus diabaikan consumer. Sejak kontrak 1.6 health bisa membawa field nav opsional (hdg/hs untuk kompas, gs/fix/sat untuk GPS, lat/lon/alt/sog/cog untuk posisi); field itu hanya ada bila sensornya dikonfigurasi.",
+  "description": "Heartbeat 1/s. Field tambahan boleh ada dan harus diabaikan consumer. Sejak kontrak 1.6 health bisa membawa field nav opsional (hdg/hs untuk kompas, gs/fix/sat untuk GPS, lat/lon/alt/sog/cog untuk posisi); field itu hanya ada bila sensornya dikonfigurasi. Sejak kontrak 1.11 health bisa membawa pk/psq (puncak VFO output dan squelch KrakenSDR); field itu hanya ada bila KrakenSDR melaporkan vfo_peaks (patch rdfsdr).",
   "x-topic": "telemetry/health",
   "type": "object",
   "properties": {
@@ -163,6 +163,24 @@
       "minimum": 0,
       "maximum": 360,
       "description": "Arah gerak di atas tanah, derajat true."
+    },
+    "pk": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": -400,
+      "maximum": 200,
+      "description": "Puncak spektrum (dB skala FFT KrakenSDR, bukan dBm) di lebar VFO output, 0.1 dB, diukur tiap frame walau di bawah squelch. null bila pengukuran basi. Tidak ada bila KrakenSDR tidak melaporkan vfo_peaks."
+    },
+    "psq": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": -400,
+      "maximum": 200,
+      "description": "Level squelch VFO output yang dipakai KrakenSDR pada frame yang sama (Manual, atau hasil Auto/Auto Channel), 0.1 dB. DoA hanya dihitung bila pk > psq. null bila basi atau tidak diketahui."
     }
   },
   "required": [

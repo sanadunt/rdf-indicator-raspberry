@@ -25,12 +25,36 @@ Node bulk:
 - publish telemetry/angular saja; tidak memperoleh hak reboot/command.
 
 Ground controller:
-- subscribe `telemetry/#`, `state`, `availability`, `settings/reported`, `capabilities`, and `ack/#`.
+- subscribe `telemetry/#`, `state`, `availability`, `settings/reported`, `capabilities`, `ack/#`,
+  `lora/ground`, `lora/edge`, dan `ground/gps`.
 - publish `cmd/#` milik node sendiri.
 
 Viewer:
-- subscribe `telemetry/#`, `state`, `availability`, `settings/reported`, `capabilities`, and `ack/#`.
+- subscribe `telemetry/#`, `state`, `availability`, `settings/reported`, `capabilities`, `ack/#`,
+  `lora/ground`, `lora/edge`, dan `ground/gps`.
 - tidak publish command dan tidak mendapat credential controller.
+
+Ground GPS (opsional, publisher posisi Ground):
+- publish `ground/gps` saja.
+
+Ground Console subscribe `lora/ground`, `lora/edge`, dan `ground/gps` dalam satu permintaan bersama
+topik node. Satu filter yang ditolak ACL membuat console masuk `SUBSCRIPTION_DENIED` dan Kontrol
+terkunci, walaupun telemetry di filter lain tetap masuk. Karena itu ketiganya ada di daftar di atas,
+juga `lora/edge` yang hanya dipublish di broker Pi.
+
+LoRa bridge (`run.py lora-bridge`, lihat [LORA_SERIAL.md](LORA_SERIAL.md)), satu user per broker:
+
+| Role | Broker | Client id | Subscribe (baca) | Publish (tulis) |
+|---|---|---|---|---|
+| edge | broker lokal Pi | `<node>-lora-edge` | `telemetry/health`, `telemetry/health/detail`, `telemetry/doa`, `telemetry/angular`, `telemetry/diagnostic/doa`, `telemetry/diagnostic/angular`, `state`, `capabilities`, `availability`, `settings/reported`, `ack/config`, `ack/operation` | `cmd/config/get`, `cmd/config/patch`, `cmd/processing/set`, `cmd/service/restart`, `cmd/service/ppp/restart`, `cmd/system/reboot/prepare`, `cmd/system/reboot/execute`, `cmd/system/shutdown/prepare`, `cmd/system/shutdown/execute`, `cmd/operation/get`, `cmd/stream/set`, dan `lora/edge` |
+| ground | broker Ground | `<node>-lora-ground` | sebelas topik `cmd/...` di atas | dua belas topik Edge di atas (`state`, `capabilities`, `availability` retained) dan `lora/ground` |
+
+Semua topik di bawah prefix node. Jembatan memakai QoS 1 untuk subscribe, `state`, `capabilities`,
+`availability`, `settings/reported`, `ack/*`, dan command. SUBACK yang ditolak atau PUBACK QoS 1 di atas
+`0x80` memutus sesi jembatan: ia reconnect terus dan tidak pernah siap, jadi seluruh link LoRa sisi itu
+gelap. Di broker Pi, Node control juga perlu subscribe `lora/edge` (status jembatan untuk panel Edge).
+Contoh unit LoRa saat ini memakai mosquitto lokal anonim tanpa `acl_file`; aturan ini berlaku bila
+broker itu diberi ACL.
 
 Prefix `sdr/v2/uav-01` harus cocok di konfigurasi agent, receiver dan ACL.
 Broker harus mempertahankan retained state, capabilities, dan availability. Command, telemetry,
@@ -155,6 +179,13 @@ ditolak dengan prefix path (`INTEGER_REQUIRED`, `STRING_REQUIRED`, `STRING_OR_NU
 `PLAINTEXT_ONLY_EXPLICIT_LOOPBACK_TEST`. Perubahan `config.yaml` berlaku setelah
 `sudo systemctl restart rdf-edge.service`.
 
+Console Ground (sdr-doa-ground-control 3.10.x) hanya membuka satu koneksi tanpa TLS ke host
+`localhost` atau alamat IP, dan tidak pindah ke broker cadangan sendiri. Agar Ground bisa memakai
+broker cadangan, arahkan console ke broker itu secara manual. Broker cadangan harus tanpa TLS
+(`tls: false`) di alamat IP. `cmd/config/get` lewat broker itu juga butuh
+`settings_report_plaintext: true`. Tanpa itu Edge menjawab `TLS_REQUIRED_FOR_SETTINGS_REPORT`,
+dan Kontrol memakai Data Out.
+
 ### Panel `Data > Cadangan` dan prioritas pengaturan
 
 Tombol `Cadangan` berada di sebelah `Atur` pada halaman Data dan memerlukan login PIN Admin yang
@@ -179,7 +210,11 @@ Client ID cadangan ditampilkan read-only. Petunjuk TLS menyebut mode trust (CA s
 cadangan lama dihentikan dan client baru dibuat tanpa memutus broker utama. Saat cadangan
 dinonaktifkan atau dipindah ke broker lain, Edge lebih dulu mengirim `availability` retained
 `{online:false, reason:"BACKUP_DISABLED"|"BACKUP_RECONFIGURED"}` ke broker lama (bila masih
-tersambung), supaya consumer di sana tidak melihat node tetap online.
+tersambung), supaya consumer di sana tidak melihat node tetap online. Agent yang berhenti normal
+mengirim `{online:false, reason:"STOPPED"}` ke broker utama dan cadangan yang siap (sejak 1.10.2).
+Lewat LoRa, pesan itu sampai ke Ground bila jembatan tetap berjalan (mis. hanya `rdf-edge` yang
+dihentikan); saat shutdown/reboot sistem jembatan ikut berhenti tanpa menguras antrean, jadi sampainya
+ke Ground hanya best effort.
 
 Panel menyimpan pengaturan di `state_dir` (default `/var/lib/rdf-node`):
 

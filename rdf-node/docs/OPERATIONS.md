@@ -149,6 +149,33 @@ atau `DEVICE_IS_LINK_PORT`), `NO_REPLY` (modul diam: periksa TX/RX, GND, dan VCC
 ada tetapi belum ada satelit cukup; pindahkan antena ke langit terbuka). Nilai basi tidak pernah
 dikirim sebagai angka.
 
+### Heading array dan bearing per sampel DoA (sejak 1.10)
+
+Setiap `telemetry/doa` membawa heading array saat kirim (`h`, `hsrc`), bearing ke pemancar
+`b` dari `h` dan DoA relatif, dan posisi sampel (`lat`/`lon`, dengan `publish_position`). Dengan
+`theta_mirror` DoA relatif adalah theta_0: diukur berlawanan jarum jam dari referensi array, jadi
+`b` = `h` − `a`. `h` harus menunjuk arah referensi
+array itu:
+
+- `nav.compass.offset_deg`: sudut referensi array dikurangi arah yang dibaca kompas (pemasangan +
+  deklinasi magnetik).
+- `nav.heading.travel_offset_deg`: sudut referensi array dikurangi arah gerak kendaraan (0 bila DoA 0°
+  menghadap ke depan kendaraan).
+- `nav.heading.source`: `compass` (default), `gps`, atau `auto` (lihat `config/example.yaml`). Kompas di
+  dalam kendaraan bisa terganggu bodi logam; course GPS hanya dipakai di atas `gps_min_speed_mps`.
+
+Memeriksa offset dengan pemancar yang lokasinya diketahui (misalnya menara FM yang sedang
+ditala), dari tempat terbuka beberapa ratus meter atau lebih darinya:
+
+```bash
+python3 /opt/rdf-node/current/run.py nav-calibrate --tx-lat -6.90000 --tx-lon 107.60000 --seconds 90
+```
+
+Perintah ini membaca API lokal, mencetak selisih rata-rata (benar - terukur) dan sebarannya, lalu
+menyarankan berapa derajat ditambahkan ke offset yang dipakai. Ia tidak menulis config. Putar node di
+tempat selama pengukuran: bearing terukur harus tetap. Bila ikut berputar, tanda sudut atau sumber
+heading salah, bukan offset.
+
 ## Ground writes and broker trust boundary
 
 Semua command write Ground yang didukung berjalan tanpa remote grant dan tanpa approval root

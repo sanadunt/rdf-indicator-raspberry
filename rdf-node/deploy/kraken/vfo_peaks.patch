@@ -1,0 +1,50 @@
+--- a/_sdr/_signal_processing/kraken_sdr_signal_processor.py
++++ b/_sdr/_signal_processing/kraken_sdr_signal_processor.py
+@@ -221,6 +221,8 @@
+         self.doa_result_log_list = []
+         self.confidence_list = []
+         self.max_power_level_list = []
++        # rdf-node: each active VFO's channel peak and the squelch it was compared with, last processed frame
++        self.vfo_peaks = []
+         self.fm_demod_channel_list = []
+ 
+         # TODO: NEED to have a funtion to update the file name if changed in the web ui
+@@ -337,6 +339,9 @@
+             and daq_status.get("iq_sync", False)
+         )
+         status["daq_num_dropped_frames"] = self.dropped_frames
++        # rdf-node: the peak is measured whether or not it clears squelch, so a signal held back by squelch
++        # still shows how far below it is (DOA_value.html only carries power for frames that cleared it).
++        status["vfo_peaks"] = self.vfo_peaks
+ 
+         try:
+             with open(status_file_path, "w", encoding="utf-8") as file:
+@@ -495,6 +500,7 @@
+                             self.freq_list.clear()
+                             self.doa_result_log_list.clear()
+                             self.max_power_level_list.clear()
++                            self.vfo_peaks = []
+                             self.confidence_list.clear()
+                             self.number_of_correlated_sources.clear()
+                             self.snrs.clear()
+@@ -555,6 +561,20 @@
+                                             :,
+                                         ]
+                                     )
++
++                                # rdf-node: finite values only, so status.json stays strict JSON
++                                self.vfo_peaks.append(
++                                    {
++                                        "vfo": i,
++                                        "frequency_hz": int(self.vfo_freq[i]),
++                                        "bandwidth_hz": int(self.vfo_bw[i]),
++                                        "peak_db": round(float(max_amplitude), 1) if np.isfinite(max_amplitude) else None,
++                                        "squelch_db": (
++                                            round(float(self.vfo_squelch[i]), 1) if np.isfinite(self.vfo_squelch[i]) else None
++                                        ),
++                                        "timestamp_ms": int(self.module_receiver.iq_header.time_stamp),
++                                    }
++                                )
+ 
+                                 # *** HERE WE NEED TO PERFORM THE SPECTRUM UPDATE TOO ***
+                                 if self.en_spectrum:

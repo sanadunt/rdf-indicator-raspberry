@@ -174,6 +174,19 @@ class NetworkTests(unittest.TestCase):
         b=self.broker();messages=[];r=self.client(b,[('rdf/data',0,True)],lambda *args:messages.append(args));p=self.client(b)
         self.assertTrue(wait(lambda:r.ready and p.ready));self.assertTrue(p.offer('d','rdf/data',b'payload',expiry=3))
         self.assertTrue(wait(lambda:messages));self.assertEqual(messages[0][1],b'payload');self.assertFalse(b.errors)
+    def test_retain_as_published_is_per_subscription(self):
+        # Commands keep Retain As Published (a live retained command must be seen, then refused); the LoRa
+        # status subscription does without, so only the broker's replay arrives flagged retained.
+        b=self.broker();p=self.client(b);self.assertTrue(wait(lambda:p.ready))
+        p.offer('old','rdf/status',b'old',qos=1,retain=True);self.assertTrue(wait(lambda:'rdf/status' in b.retained))
+        rap=[];plain=[]
+        r1=self.client(b,[('rdf/status',0,False)],lambda *args:rap.append(args))
+        r2=self.client(b,[('rdf/status',0,False,False)],lambda *args:plain.append(args))
+        self.assertTrue(wait(lambda:r1.ready and r2.ready and rap and plain))
+        p.offer('new','rdf/status',b'new',qos=1,retain=True)
+        self.assertTrue(wait(lambda:len(rap)==2 and len(plain)==2))
+        self.assertEqual([(m[1],m[2]) for m in rap],[(b'old',True),(b'new',True)])
+        self.assertEqual([(m[1],m[2]) for m in plain],[(b'old',True),(b'new',False)])
     def test_qos1_callback_after_puback(self):
         b=self.broker();sent=[];c=self.client(b);self.assertTrue(wait(lambda:c.ready))
         c.offer('q','rdf/state',b'{}',qos=1,retain=True,on_sent=lambda:sent.append(True))

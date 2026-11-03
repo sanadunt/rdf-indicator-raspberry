@@ -242,6 +242,16 @@ Re-reading file tidak membuat q baru. Timestamp regresi ditolak sampai sumber/ag
 boolean, dan 0/1 diterima. `settings.json` yang satu field amannya rusak tetap dipakai: field itu
 dikeluarkan dari subset aman dan digest, lalu namanya muncul di `config.invalid_settings`.
 
+Sejak 1.11 `status.json` boleh membawa `vfo_peaks` (patch rdfsdr `deploy/kraken/vfo_peaks.patch`):
+per VFO aktif `vfo`, `frequency_hz`, `bandwidth_hz`, `peak_db` (puncak FFT di lebar VFO: CH1 pada spectrum Single, semua kanal pada Full),
+`squelch_db` (squelch yang dibandingkan KrakenSDR), dan `timestamp_ms` frame yang diukur. KrakenSDR
+mengukurnya setiap frame, juga saat tidak ada yang lolos squelch, padahal `DOA_value.html` hanya
+membawa power untuk frame yang lolos. `vfo_peaks` yang rusak menjadi null (`daq.null_fields`), status
+lainnya tetap dipakai. Edge memilih entri `source.output_vfo` dan menaruhnya di `detection.vfo_peak`
+(`state` `OK` dengan angka, atau `STALE` tanpa angka bila status/pengukuran lebih tua dari
+`freshness.source_status_ms`). `above_squelch` null bila selisihnya 0.0 dB: rdfsdr membandingkan nilai
+sebelum dibulatkan ke 0.1 dB. Tanpa key ini (KrakenSDR stok) `detection.vfo_peak` null.
+
 `doa.xml` diparse terpisah hanya untuk tampilan/relay diagnostik. `TIME` adalah Unix milliseconds,
 `FREQUENCY` dalam MHz, dan `DOA` dipertahankan sebagai nilai raw. Diagnostik tidak mengisi
 `detection` atau mengubah gate control normal. XML hilang/rusak tidak dapat membuat source valid.

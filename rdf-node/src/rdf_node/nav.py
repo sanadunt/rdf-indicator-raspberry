@@ -11,8 +11,10 @@ import os
 import re
 import select
 import stat
+import calendar
 import threading
 import time
+from .timesync import ChronySock
 try:
     import fcntl
     import termios
@@ -123,6 +125,15 @@ def _coord(value,hemi,degree_digits):
     out=deg+minutes/60
     if out>(90 if degree_digits==2 else 180): raise ValueError('NMEA_BAD_COORDINATE')
     return -out if hemi in ('S','W') else out
+
+def rmc_utc(f):
+    """UTC seconds of a valid RMC fix (hhmmss.ss + ddmmyy), or None."""
+    if len(f)<9 or f[1]!='A' or len(f[0])<6 or len(f[8])!=6 or not f[8].isdigit() or not f[0][:6].isdigit(): return None
+    try: frac=float('0'+f[0][6:]) if len(f[0])>6 else 0.0
+    except ValueError: return None
+    h,m,s=int(f[0][0:2]),int(f[0][2:4]),int(f[0][4:6]); d,mo,y=int(f[8][0:2]),int(f[8][2:4]),2000+int(f[8][4:6])
+    if not (h<24 and m<60 and s<61 and 1<=d<=31 and 1<=mo<=12): return None
+    return calendar.timegm((y,mo,d,h,m,s,0,0,0))+frac
 
 def _num(value,lo,hi,signed=False):
     """A plain decimal NMEA number in [lo, hi], None when empty. 'nan', 'inf', '1e999' and the like
@@ -248,7 +259,9 @@ class Compass(_Sensor):
         with self.lock:
             age=round((time.monotonic()-self.mono)*1000) if self.mono is not None else None
             fresh=age is not None and age<=self.cfg['stale_ms']
-            if self.fault: state=self.fault
+            # One missed or garbled reply is not a failure while the last heading is still fresh
+            # (stale_ms); a missing or broken port is.
+            if self.fault and not (fresh and self.fault in ('NO_REPLY','BAD_FRAME')): state=self.fault
             elif fresh: state='OK'
             else: state='STALE' if self.mono is not None else 'STARTING'
             ok=state=='OK'
@@ -264,6 +277,8 @@ class Gps(_Sensor):
     def __init__(self,cfg,link=None):
         super().__init__(cfg,link); self.nmea=NmeaState(); self.data_mono=None; self.bytes_mono=None
         self.open_mono=None; self.bad=0
+        # GPS time for chrony (refclock SOCK): RMC time of a valid fix minus our clock at arrival.
+        self.chrony=ChronySock(cfg.get('chrony_sock')) if cfg['enabled'] and cfg.get('chrony_sock') else None
     def _run(self):
         buf=b''
         with self.lock: self.open_mono=time.monotonic(); self.fault=None
@@ -271,6 +286,7 @@ class Gps(_Sensor):
             r,_,_=select.select([self.fd],[],[],.5)
             if not r: continue
             chunk=os.read(self.fd,512)
+            arrival=time.time()
             if not chunk: raise OSError(0,'SERIAL_EOF')
             with self.lock: self.bytes_mono=time.monotonic()
             buf+=chunk
@@ -281,6 +297,11 @@ class Gps(_Sensor):
                     try:
                         kind,fields,talker=parse_nmea(raw.decode('ascii'))
                         self.nmea.feed(kind,fields,talker)
+                        if self.chrony and kind=='RMC' and self.nmea.valid:
+                            utc=rmc_utc(fields)
+                            # The receiver emits RMC ~0.1-0.5 s after its epoch: chrony's refclock
+                            # `offset` setting corrects that constant delay.
+                            if utc is not None: self.chrony.send(utc-arrival,arrival)
                     except (ValueError,IndexError,UnicodeDecodeError):
                         self.bad+=1; continue
                     self.data_mono=time.monotonic(); self.fault=None
@@ -310,6 +331,7 @@ class Gps(_Sensor):
                     'sats_used':n.sats_used if current else None,'sats_view':n.sats_view(now,stale) if current else None,
                     'hdop':n.hdop if fix else None,'age_ms':round((now-n.fix_mono)*1000) if fix else None,
                     'data_age_ms':data_age,'error':self.error,'errors':self.errors,'bad_sentences':self.bad,
+                    'chrony':None if not self.chrony else {'sent':self.chrony.sent,'errors':self.chrony.errors,'error':self.chrony.error},
                     'device':self.cfg['device'] if self.cfg['enabled'] else None}
 
 class Nav:
@@ -318,3 +340,47 @@ class Nav:
     def start(self): self.compass.start(); self.gps.start()
     def stop(self): self.compass.stop(); self.gps.stop()
     def snapshot(self): return {'compass':self.compass.snapshot(),'gps':self.gps.snapshot()}
+
+def bearing_deg(heading,relative,angle_mode):
+    """Bearing from north (clockwise) of a valid DoA `a` seen with the array reference at `heading`.
+    theta_mirror undoes DOA_value.html's 360 - theta_0, so `a` is theta_0: counter-clockwise from the
+    reference. csv_native keeps the file's value, which already runs clockwise."""
+    turn=-relative if angle_mode=='theta_mirror' else relative
+    return round(heading+turn,1)%360
+
+# Wire codes of the heading sources (telemetry/doa hsrc).
+HEADING_CODES={'compass':'C','gps':'G','hold':'H'}
+HEADING_ORDER={'compass':('compass','gps','hold'),'gps':('gps','hold','compass'),'auto':('gps','compass','hold')}
+
+class Heading:
+    """Picks the array heading a DoA sample turns into a bearing: the compass (already offset to the array
+    reference), or the GPS course while the node moves steadily, held for a while after it slows down."""
+    def __init__(self,cfg):
+        self.cfg=cfg; self.lock=threading.Lock()
+        self.moving_since=None; self.course=None; self.course_mono=None; self.last=None
+    def select(self,nav,now=None):
+        now=time.monotonic() if now is None else now
+        c=nav.get('compass') or {}; g=nav.get('gps') or {}
+        compass=c.get('heading_deg') if c.get('state')=='OK' else None
+        speed=g.get('speed_mps'); course=g.get('course_deg')
+        moving=(g.get('state')=='FIX' and isinstance(speed,(int,float)) and isinstance(course,(int,float))
+                and speed>=self.cfg['gps_min_speed_mps'])
+        with self.lock:
+            if not moving: self.moving_since=None
+            elif self.moving_since is None: self.moving_since=now
+            gps=None
+            # A short burst of speed (or a GPS jump) is not a direction of travel yet.
+            if moving and now-self.moving_since>=self.cfg['gps_min_seconds']:
+                gps=(course+self.cfg['travel_offset_deg'])%360
+                self.course=gps; self.course_mono=now
+            held=(self.course if self.course_mono is not None and now-self.course_mono<=self.cfg['hold_seconds']
+                  else None)
+            values={'compass':compass,'gps':gps,'hold':held}
+            self.last=None
+            for name in HEADING_ORDER[self.cfg['source']]:
+                if values[name] is not None:
+                    self.last={'heading_deg':round(values[name],1)%360,'source':name}
+                    break
+            return self.last
+    def snapshot(self):
+        with self.lock: return dict(self.last) if self.last else None

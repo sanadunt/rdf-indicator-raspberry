@@ -65,7 +65,9 @@ def validate_config(c: dict) -> None:
                              (c['telemetry'],'control_budget_bytes_s',500,1250),
                              (c['telemetry'],'bulk_budget_bytes_s',200,500),
                              (c['telemetry'],'resume_stable_seconds',0,120),
-                             (c['control'],'verify_seconds',1,60),(c['control'],'start_timeout_seconds',5,600)]:
+                             (c['control'],'verify_seconds',1,60),(c['control'],'start_timeout_seconds',5,600),
+                             (c['control'],'retune_live_max_hz',0,2000000000),(c['control'],'retune_live_window_seconds',3,120),
+                             (c['control'],'retune_settle_seconds',1,60)]:
         finite(obj[key],lo,hi)
     validate_mqtt_host(c['mqtt']['host'])
     if c['mqtt']['transport'] not in ('tcp','websocket'): raise ValueError('INVALID_MQTT_TRANSPORT')
@@ -155,6 +157,17 @@ def validate_nav_config(n: dict, link_port: str | None = None) -> None:
     finite(offset, -360, 360)
     if type(n['gps']['publish_position']) is not bool:
         raise ValueError('BOOLEAN_REQUIRED')
+    hd = n['heading']
+    if hd['source'] not in ('compass', 'gps', 'auto'):
+        raise ValueError('INVALID_HEADING_SOURCE')
+    for key, lo, hi in (('gps_min_speed_mps', 0.1, 50), ('gps_min_seconds', 0, 60), ('hold_seconds', 0, 600),
+                        ('travel_offset_deg', -360, 360)):
+        if isinstance(hd[key], bool) or type(hd[key]) not in (int, float):
+            raise ValueError('NUMBER_REQUIRED')
+        finite(hd[key], lo, hi)
+    sock = n['gps']['chrony_sock']
+    if sock is not None and (not isinstance(sock, str) or not Path(sock).is_absolute()):
+        raise ValueError('ABSOLUTE_PATH_REQUIRED')
     # The T900 link port belongs to pppd; two sensors cannot share one port.
     devices = [n[name]['device'] for name in ('compass', 'gps') if n[name]['enabled']]
     if len(set(devices)) != len(devices) or (link_port and link_port in devices):

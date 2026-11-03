@@ -99,6 +99,19 @@ else
  systemctl daemon-reload
  echo 'Ground code installed. Next: sudo bash scripts/provision-ground.sh'
 fi
+# The LoRa bridge unit is installed by hand (docs/LORA_SERIAL.md) and is not touched here. One that runs a
+# copy outside /opt/rdf-node/current keeps its old code after this upgrade; a running one that starts from
+# it keeps the previous release loaded until it restarts. Say which, with the command (read-only check).
+LORA_UNIT="rdf-lora-$ROLE.service"
+LORA_EXEC=$(systemctl show -p ExecStart --value "$LORA_UNIT" 2>/dev/null || true)
+if [ -n "$LORA_EXEC" ] && ! printf '%s' "$LORA_EXEC" | grep -Eq '/opt/rdf-node/current/|/usr/local/bin/rdf-node'; then
+  LORA_RUN=$(printf '%s' "$LORA_EXEC" | grep -o '[^ ]*run\.py' | head -n 1 || true)
+  printf '\nNOTICE: %s runs a bridge outside /opt/rdf-node/current (%s); this install did not update it.\n' "$LORA_UNIT" "${LORA_RUN:-see systemctl cat $LORA_UNIT}"
+  printf 'Point ExecStart at /opt/rdf-node/current/run.py lora-bridge ... (deploy/examples/lora/%s), then: sudo systemctl daemon-reload && sudo systemctl restart %s\n' "$LORA_UNIT" "$LORA_UNIT"
+elif [ -n "$LORA_EXEC" ] && [ "$(systemctl show -p ActiveState --value "$LORA_UNIT" 2>/dev/null || true)" = active ]; then
+  printf '\nNOTICE: %s still runs the previous release; this install did not restart it.\n' "$LORA_UNIT"
+  printf 'Apply this release to the bridge: sudo systemctl restart %s\n' "$LORA_UNIT"
+fi
 if [ -n "$KIOSK_USER" ]; then
  getent passwd "$KIOSK_USER" >/dev/null || { echo 'Desktop user not found.' >&2; exit 1; }
  [ "$(id -u "$KIOSK_USER")" -ne 0 ] || { echo 'Root cannot be the kiosk user.' >&2; exit 1; }

@@ -117,6 +117,20 @@ sampel belum teratribusi ke settings. `clk`: 1 bila jam Edge tersinkron, 0 bila 
 sampel di source (ms) saat dikirim. `reason`: daftar kode alasan sampel belum LIVE; kosong bila
 `ok=1`.
 
+Sejak kontrak 1.10 node dengan kompas atau GPS menambahkan heading array saat kirim ke setiap sampel:
+
+```json
+{"v":2,"sid":"7a8b9c0d","q":1245,"t":1790668800123,"f":433920000,"a":137.4,"c":8.27,"p":-54.2,"rev":7,"ok":1,"clk":1,"age":280,"reason":[],"h":350.2,"hsrc":"C","b":212.8,"lat":-6.92977,"lon":107.71142}
+```
+
+`h`: arah referensi array (DoA 0°) dari utara searah jarum jam, atau `null` bila tidak ada sumber heading.
+`hsrc`: `C` kompas (+`nav.compass.offset_deg`), `G` course GPS saat bergerak (+`nav.heading.travel_offset_deg`),
+`H` course GPS terakhir yang ditahan setelah berhenti. `b`: bearing ke pemancar dari utara searah jarum
+jam, (`h` − `a`) mod 360 dengan `theta_mirror` (`a` = theta_0, berlawanan jarum jam dari referensi array)
+atau (`h` + `a`) mod 360 dengan `csv_native`; hanya pada `ok=1` dengan `h`. `lat`/`lon`: posisi saat sampel dikirim, hanya dengan fix GPS dan
+`nav.gps.publish_position`. Penerima yang menumpuk bearing dari banyak posisi (triangulasi kendaraan)
+memakai `b`, `lat`, `lon` dari sampel yang sama, bukan heading dari `telemetry/health`.
+
 Edge mengirim **setiap sampel baru** dari `DOA_value.html`, valid atau tidak, dengan label. Penerima
 yang menentukan cara menampilkannya; label tidak boleh dipakai untuk membuang data diam-diam.
 `ok=1` berarti kandidat LIVE terverifikasi. Sampel lain dikirim dengan `ok=0`:
@@ -179,6 +193,11 @@ DAQ: 0 degraded, 1 healthy, 2 unknown. `age` ialah umur sampel DoA terakhir yang
 source, bukan latency E2E. Selama `DOA_value.html` kosong atau rusak, sampel terakhir tetap dipakai,
 jadi `age` terus naik. `why` menjelaskan sebabnya (kode di tabel atas; kosong bila DoA LIVE).
 Clock: 0 untrusted, 1 synced. Field unavailable dapat null. Health q tetap maju saat SDR stop.
+
+Sejak kontrak 1.11 health dapat membawa `pk` (puncak VFO output, dB skala FFT KrakenSDR) dan `psq`
+(squelch yang dipakai KrakenSDR) bila KrakenSDR melaporkan `vfo_peaks` (patch rdfsdr). Keduanya
+diukur juga saat squelch menahan DoA, dan `null` bila basi. Lihat
+[MQTT_TOPIC_SUMMARY.md](MQTT_TOPIC_SUMMARY.md#telemetryhealth).
 
 Sejak kontrak 1.6 health dapat membawa field nav opsional dari sensor yang dikonfigurasi di `nav:`:
 `hdg` (heading kompas GY-26, derajat, `null` bila tidak OK) dan `hs` (state kompas); `gs` (state GPS),
@@ -402,7 +421,14 @@ command dengan `COMMAND_QUEUE_FULL`. Semua penolakan tanpa ACK tetap terlihat: m
 di snapshot panel, dihitung di `link.command_drops`, dan jumlahnya ada di `telemetry/health/detail`
 sebagai `crej`.
 
-ACK berisi `v,sid,id,status,t,rev,result`. APPLIED memerlukan bukti sesuai aksi.
+ACK berisi `v,sid,id,status,t,rev,result`. APPLIED memerlukan bukti sesuai aksi. Sejak 1.10.2 ACK
+progress (`ACCEPTED` `config.patch`, `processing.set`, `service.restart`, `system.reboot.*`,
+`system.shutdown.*`, serta `APPLYING`/`VERIFYING` `config.patch` dengan `method` `RESTART` atau `LIVE`)
+membawa `result.final_within_ms`: paling lambat berapa ms setelah ACK itu ACK akhir sudah dikirim.
+`ppp.restart`, `stream.set`, dan operasi baca tidak membawanya. Ground
+menunggu sampai waktu terima + nilai itu + 30 s (maks. 900 s); tanpa field, batas bawaan Ground
+berlaku. Rincian di [CONTROL.md](CONTROL.md#batas-waktu-ack-akhir-final_within_ms). Command yang
+ditolak sebelum jurnal diingat 60 s: ID dan payload sama mendapat `REJECTED` yang sama lagi.
 PERSISTED_UNVERIFIED dan OUTCOME_UNKNOWN bukan sinonim gagal atau berhasil.
 Hasil tersedia lewat jurnal setelah reconnect; tidak bergantung broker offline history.
 

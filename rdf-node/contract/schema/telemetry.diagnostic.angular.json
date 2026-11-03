@@ -73,6 +73,19 @@
       },
       "minItems": 360,
       "maxItems": 360
+    },
+    "heading_deg": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 360,
+      "description": "Edge 1.10+: heading array yang dipakai sampel DoA terakhir; bearing bin theta = (heading_deg + 360 - theta) mod 360 (convention 1)."
+    },
+    "heading_source": {
+      "enum": [
+        "C",
+        "G",
+        "H"
+      ]
     }
   },
   "required": [

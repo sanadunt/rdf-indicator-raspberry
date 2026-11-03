@@ -66,6 +66,9 @@ def errors(value, schema: dict, path: str = '$') -> list[str]:
     if isinstance(value, dict):
         for key in schema.get('required', ()):
             if key not in value: found.append(f'{path}: missing {key}')
+        for key, needed in schema.get('dependentRequired', {}).items():
+            if key in value:
+                found.extend(f'{path}: {key} without {other}' for other in needed if other not in value)
         properties = schema.get('properties', {})
         for key, item in value.items():
             if key in properties: found.extend(errors(item, properties[key], f'{path}.{key}'))

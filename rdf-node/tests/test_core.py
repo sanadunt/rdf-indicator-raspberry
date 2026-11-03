@@ -1,4 +1,4 @@
-import copy,json,math,os,shutil,struct,sys,tempfile,time,unittest
+import copy,json,math,os,shutil,struct,subprocess,sys,tempfile,time,unittest
 from pathlib import Path
 from unittest import mock
 from rdf_node.config import load_config,validate_config
@@ -385,6 +385,39 @@ class SourceTests(unittest.TestCase):
         self.assertIn('DIAGNOSTIC_UNVERIFIED',diagnostic['validation_reasons'])
         self.assertIn('EMPTY_CSV',diagnostic['validation_reasons'])
         self.assertGreater(diagnostic['observed_timestamp_ms'],0)
+    def peaks(self,peak=-78.44,squelch=-70.0,t=None,vfo=0):
+        s=status();s['vfo_peaks']=[{'vfo':vfo,'frequency_hz':420820864,'bandwidth_hz':12500,'peak_db':peak,
+                                    'squelch_db':squelch,'timestamp_ms':now_ms() if t is None else t}]
+        (self.path/'status.json').write_bytes(compact(s))
+    def test_vfo_peak_below_squelch_is_reported_while_doa_is_empty(self):
+        self.peaks();(self.path/'DOA_value.html').write_bytes(b'')
+        self.src.poll(force=True);view=self.src.view(True);vp=view['vfo_peak']
+        self.assertFalse(view['valid']);self.assertIn('EMPTY_CSV',view['reasons'])
+        self.assertEqual((vp['state'],vp['peak_db'],vp['squelch_db'],vp['margin_db'],vp['above_squelch']),
+                         ('OK',-78.4,-70.0,-8.4,False))
+        self.assertEqual((vp['vfo'],vp['frequency_hz'],vp['bandwidth_hz']),(0,420820864,12500))
+    def test_vfo_peak_at_squelch_does_not_say_which_side(self):
+        self.peaks(peak=-70.0,squelch=-70.0);self.src.poll(force=True)
+        vp=self.src.view(True)['vfo_peak']
+        self.assertEqual((vp['margin_db'],vp['above_squelch']),(0.0,None))
+    def test_vfo_peak_absent_with_stock_krakensdr(self):
+        self.src.poll(force=True);self.assertIsNone(self.src.view(True)['vfo_peak'])
+    def test_vfo_peak_goes_stale_without_numbers(self):
+        self.peaks(t=now_ms()-10000);self.src.poll(force=True)
+        vp=self.src.view(True)['vfo_peak']
+        self.assertEqual(vp['state'],'STALE');self.assertIsNone(vp['peak_db']);self.assertIsNone(vp['squelch_db'])
+        # Another VFO's peak is not the output VFO's.
+        self.peaks(vfo=1);self.src.poll(force=True);self.assertEqual(self.src.view(True)['vfo_peak']['state'],'STALE')
+        # Once reported, a status without peaks still reports STALE rather than dropping the field.
+        (self.path/'status.json').write_bytes(compact(status()));self.src.poll(force=True)
+        self.assertEqual(self.src.view(True)['vfo_peak']['state'],'STALE')
+    def test_bad_vfo_peaks_are_named_and_do_not_fail_the_status(self):
+        for bad in ('x',[{'vfo':0}],[{'vfo':0,'frequency_hz':1,'bandwidth_hz':1,'peak_db':'-70','squelch_db':None,'timestamp_ms':now_ms()}],[1]*17):
+            s=status();s['vfo_peaks']=bad;st=parse_status(compact(s))
+            self.assertIsNone(st['vfo_peaks'],bad);self.assertIn('vfo_peaks',st['null_fields'])
+            self.assertTrue(st['vfo_peaks_reported']);self.assertIs(st['daq_ok'],True)
+        s=status();s['vfo_peaks']=[{'vfo':0,'frequency_hz':1,'bandwidth_hz':1,'peak_db':None,'squelch_db':None,'timestamp_ms':now_ms()}]
+        self.assertIsNone(parse_status(compact(s))['vfo_peaks'][0]['peak_db'])
     def test_missing_xml_does_not_block_valid_csv(self):
         self.src.poll(force=True);self.write(2);self.src.poll(force=True)
         detection=self.src.view(True)
@@ -1067,3 +1100,40 @@ class MqttWireTests(unittest.TestCase):
         self.assertTrue(q.offer(Message('a','t',b'a',0,False,None,1,0)))
         self.assertFalse(q.offer(Message('b','t',b'b',0,False,None,1,0,on_error=errors.append)))
         self.assertEqual(errors,['OUTBOX_FULL'])
+
+class InstallerTests(unittest.TestCase):
+    """install.sh never touches the hand-installed LoRa bridge unit; it says when an upgrade skips it."""
+    def notice(self,role,exec_start,active_state='inactive'):
+        text=(Path(__file__).resolve().parents[1]/'install.sh').read_text()
+        start=text.index('# The LoRa bridge unit is installed by hand');end=text.index('\nfi\n',start)+4
+        with tempfile.TemporaryDirectory() as tmp:
+            fake=Path(tmp)/'systemctl'
+            # `systemctl show -p <property> --value <unit>`: $3 is the property, $5 the unit.
+            fake.write_text('#!/bin/sh\n[ "$5" = "rdf-lora-%s.service" ] || exit 0\n'
+                            '[ "$3" = ExecStart ] && printf "%%s" "$EXEC_START"\n'
+                            '[ "$3" = ActiveState ] && [ -n "$EXEC_START" ] && printf "%%s" "$ACTIVE_STATE"\nexit 0\n'%role)
+            fake.chmod(0o755)
+            done=subprocess.run(['bash','-c','set -euo pipefail\nROLE=%s\n'%role+text[start:end]],capture_output=True,text=True,
+                                env={'PATH':tmp+os.pathsep+os.environ.get('PATH',''),'EXEC_START':exec_start,
+                                     'ACTIVE_STATE':active_state},timeout=10)
+        self.assertEqual(done.returncode,0,done.stderr);return done.stdout
+    def test_bridge_outside_current_release_is_named(self):
+        out=self.notice('edge','{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 /opt/rdf-lora/run.py lora-bridge --role edge ; }')
+        self.assertIn('NOTICE: rdf-lora-edge.service runs a bridge outside /opt/rdf-node/current (/opt/rdf-lora/run.py)',out)
+        self.assertIn('sudo systemctl restart rdf-lora-edge.service',out)
+    def test_bridge_from_current_release_or_no_unit_is_quiet(self):
+        self.assertEqual(self.notice('edge','{ argv[]=/usr/bin/python3 /opt/rdf-node/current/run.py lora-bridge ; }'),'')
+        self.assertEqual(self.notice('ground','{ argv[]=/usr/local/bin/rdf-node lora-bridge --role ground ; }'),'')
+        self.assertEqual(self.notice('edge',''),'')
+        self.assertEqual(self.notice('edge','',active_state='active'),'')
+    def test_running_bridge_from_current_release_is_told_to_restart(self):
+        # The new code under /opt/rdf-node/current reaches a running bridge only when it restarts.
+        for role,exec_start in (('edge','{ argv[]=/usr/bin/python3 /opt/rdf-node/current/run.py lora-bridge ; }'),
+                                ('ground','{ argv[]=/usr/local/bin/rdf-node lora-bridge --role ground ; }')):
+            out=self.notice(role,exec_start,active_state='active')
+            self.assertIn('NOTICE: rdf-lora-%s.service still runs the previous release'%role,out)
+            self.assertIn('sudo systemctl restart rdf-lora-%s.service'%role,out)
+            self.assertNotIn('outside /opt/rdf-node/current',out)
+        # A bridge outside the release keeps its own notice, whether running or not.
+        out=self.notice('edge','{ argv[]=/usr/bin/python3 /opt/rdf-lora/run.py lora-bridge ; }',active_state='active')
+        self.assertIn('runs a bridge outside /opt/rdf-node/current',out);self.assertNotIn('previous release',out)

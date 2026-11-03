@@ -12,9 +12,9 @@ from . import __version__, CONTRACT
 from .util import now_ms, compact, strict_json, read_boot_id, atomic_write, stable_read
 from .config import PROFILES
 from .journal import Journal
-from .source import Source
+from .source import Source, FIELD_MAP, squelch_is_auto
 from .monitor import Monitor
-from .nav import Nav
+from .nav import Nav, Heading, HEADING_CODES, bearing_deg
 from .control import CommandManager, OPS, READ_OPS
 from .helper import call_helper
 from .mqtt import Client
@@ -25,21 +25,25 @@ UNVERIFIED_REASONS=frozenset(('SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'))
 # makes new DoA samples (valid or labelled); the smaller one once it has gone stale.
 ANGULAR_CONTROL_BASELINE_VALID=800
 ANGULAR_CONTROL_BASELINE_INVALID=510
-# Extra Control cost-byte/s of the nav fields in telemetry/health (compass + GPS fix with position).
-NAV_CONTROL_RESERVE=110
+# Extra Control cost-byte/s of the nav fields in telemetry/health (compass + GPS fix with position)
+# plus the heading, bearing and position stamped on each telemetry/doa sample.
+NAV_CONTROL_RESERVE=170
 # Bulk yields the shared PPP link while a Control PUBACK is this late or this many Bulk bytes are unACKed.
 BULK_YIELD_PENDING_MS=1000
 DIAGNOSTIC_ANGULAR_MIN_GAP_S=6
 # Commands above COMMAND_MAX_BYTES are refused; up to COMMAND_READ_MAX_BYTES they are parsed to ACK the id.
 COMMAND_MAX_BYTES=4096; COMMAND_READ_MAX_BYTES=65536
 BULK_YIELD_BACKLOG_BYTES=2048
+# The LoRa serial bridge (run.py lora-bridge --role edge) publishes its status retained on <prefix>/lora/edge
+# every 5 s. While it is fresh the radio link is LoRa and the PPP/T900 rows no longer apply.
+LORA_STATUS_FRESH_S=20
 
 class Agent:
     def __init__(self,cfg,demo=False):
         self.cfg=cfg; self.demo=demo; self.boot=read_boot_id(); self.instance=str(uuid.uuid4()); self.sid=uuid.uuid4().hex[:8]
         self.prefix=('sdr/demo/v2/' if demo else 'sdr/v2/')+cfg['node_id']
         self.journal=Journal(Path(cfg['state_dir'])/'state.sqlite3'); self.journal.recover(self.boot)
-        self.source=Source(cfg,self.journal); self.monitor=Monitor(cfg); self.nav=Nav(cfg['nav'],cfg['link']); self.commands=CommandManager(self)
+        self.source=Source(cfg,self.journal); self.monitor=Monitor(cfg); self.nav=Nav(cfg['nav'],cfg['link']); self.heading=Heading(cfg['nav']['heading']); self.commands=CommandManager(self)
         self.nav_enabled=cfg['nav']['compass']['enabled'] or cfg['nav']['gps']['enabled']
         self.profile=self.journal.get('profile',cfg['telemetry']['profile'])
         if self.profile not in PROFILES: self.profile=cfg['telemetry']['profile']
@@ -51,8 +55,9 @@ class Agent:
         self.bulk_resume_after=time.monotonic()+cfg['telemetry']['resume_stable_seconds']
         self.hq=0; self.last_doa_q=0; self.last_angular_q=0; self.publish_errors={}; self.inbound_rejects={}
         self.diagnostic_q=0; self.diagnostic_angular_q=0
-        self.angular_abort=0; self.bulk_reason='BOOTSTRAP'; self.helper_status={}
+        self.angular_abort=0; self.bulk_reason='BOOTSTRAP'; self.helper_status={}; self.helper_misses=0
         self.clients={}; self._generation=-1; self.last_config_rev=None; self.last_sent_state=None
+        self.caps_sent={}  # link -> capabilities bytes last offered there
         self.mqtt_state_path=Path(cfg['state_dir'])/'mqtt-ui-settings.json'
         self.mqtt_credentials_paths={name:Path(cfg['state_dir'])/f'mqtt-ui-{name}.json' for name in ('control','bulk')}
         self.mqtt_base_credentials={name:cfg['mqtt'].get(f'{name}_credentials_file') for name in ('control','bulk')}
@@ -73,6 +78,7 @@ class Agent:
         # Operator-visible command history and PPP link recovery state (panel only; no extra radio traffic).
         self.operation_seq=0; self.remote_rejects=deque(maxlen=5)
         self.ppp_recovery=None; self._last_ppp=None; self._last_probe=None
+        self.lora=None; self.lora_seen=None; self.lora_prev=None; self.lora_rates={}
         self.backup_desired=self._load_backup_settings()
         self.backup_active=self.backup_desired
         self.backup_client=self._new_backup_client(self.backup_desired)
@@ -147,7 +153,10 @@ class Agent:
     def _new_mqtt_clients(self,settings):
         if not self.cfg['mqtt']['enabled']: return {}
         m=self.cfg['mqtt']; demo_suffix='-demo' if self.demo else ''
-        subs=self._command_subscriptions(); will=self._will()
+        # The primary also hears the LoRa bridge status on its (local) broker; retained, so it arrives at once.
+        # Without Retain As Published only that replay comes flagged retained; live statuses do not, so a
+        # clock step between the bridge's stamp and now never ages a live one.
+        subs=self._command_subscriptions()+[(self.prefix+'/lora/edge',0,False,False)]; will=self._will()
         epoch=self.link_epoch['primary']
         return {
             'control':Client(cfg=m,client_id=settings['client_id']+'-control'+demo_suffix,
@@ -417,19 +426,77 @@ class Agent:
         self.commands.stop()
         with self.mqtt_apply_lock:
             self.mqtt_running=False
+            self._farewell()
             for c in self.clients.values(): c.stop()
             if self.backup_client: self.backup_client.stop()
         self.monitor.stop(); self.nav.stop()
         for t in self.threads: t.join(3)
         # A long lifecycle worker may still be reconciling; daemon exits without replay.
         if not self.commands.thread.is_alive(): self.journal.close()
+    def _farewell(self,timeout=2.0):
+        # A clean stop sends DISCONNECT, which makes the broker drop the Will: without this the retained
+        # availability (and what the LoRa bridge resends from it) would say online until the next start.
+        farewell={'v':2,'sid':self.sid,'contract':CONTRACT,'online':False,'t':now_ms(),'reason':'STOPPED'}
+        clients=[c for c in (self.clients.get('control'),self.backup_client) if c and c.ready]; pending=set()
+        for i,c in enumerate(clients):
+            # Wait for the PUBACK: the broker then holds the farewell retained before the session closes.
+            pending.add(i)
+            if not c.offer('offline',self.prefix+'/availability',farewell,qos=1,retain=True,priority=0,
+                           on_sent=lambda i=i:pending.discard(i),on_error=lambda reason,i=i:pending.discard(i)):
+                pending.discard(i)
+        deadline=time.monotonic()+timeout
+        while pending and time.monotonic()<deadline: time.sleep(.05)
     def _command_dropped(self,topic,link,code):
         # A command that never reaches CommandManager still shows up in the panel and in health/detail.
         with self.lock: self.inbound_rejects[code]=self.inbound_rejects.get(code,0)+1
         suffix=topic[len(self.prefix)+1:] if isinstance(topic,str) and topic.startswith(self.prefix+'/') else ''
         op=next((name for name,path in OPS.items() if path==suffix),'unknown')
         self.remote_rejected(CommandManager.origin('ground-controller',link),op,code)
+    def _lora_status(self,payload,retained=False):
+        try: j=strict_json(payload)
+        except (ValueError,RecursionError): return
+        if not isinstance(j,dict) or j.get('v')!=1 or j.get('role')!='edge': return
+        now=time.monotonic()
+        # A retained copy (only the replay when rdf-edge or the broker reconnects: the subscription has no
+        # Retain As Published) is as old as the bridge's own stamp `t` (same host clock); one without a usable
+        # stamp counts as stale, so a dead bridge never shows UP for LORA_STATUS_FRESH_S after a restart.
+        seen=now
+        if retained:
+            t=j.get('t'); age_ms=now_ms()-t if isinstance(t,int) and not isinstance(t,bool) else None
+            seen=now-(age_ms/1000 if age_ms is not None and 0<=age_ms<=600_000 else LORA_STATUS_FRESH_S+1)
+        with self.lock:
+            prev=self.lora
+            if prev and isinstance(j.get('t'),int) and isinstance(prev.get('t'),int) and j['t']>prev['t']:
+                # Rates between two statuses (5 s apart): what really crossed the radio.
+                dt=(j['t']-prev['t'])/1000
+                def delta(a,b,k):
+                    x,y=(a or {}).get(k),(b or {}).get(k)
+                    return y-x if isinstance(x,int) and isinstance(y,int) and y>=x else None
+                tx=delta(prev.get('tx'),j.get('tx'),'sent_bytes'); msg=delta(prev.get('tx'),j.get('tx'),'sent_messages')
+                rx=delta(prev.get('rx'),j.get('rx'),'messages')
+                self.lora_rates={'tx_kbit_s':None if tx is None else round(tx*8/1000/dt,2),
+                                 'tx_msg_s':None if msg is None else round(msg/dt,2),
+                                 'rx_msg_s':None if rx is None else round(rx/dt,2)}
+            self.lora=j; self.lora_seen=seen
+    def _lora_view(self):
+        with self.lock: j=self.lora; seen=self.lora_seen; rates=dict(self.lora_rates)
+        if not j: return None
+        age=round((time.monotonic()-seen)*1000)
+        rx=j.get('rx') or {}; tx=j.get('tx') or {}; peer=j.get('peer') or {}; tm=j.get('time') or {}
+        frames=rx.get('frames') or 0; lost=(rx.get('lost_frames') or 0)+(rx.get('crc_errors') or 0)
+        peer_frames=peer.get('rx_frames') or 0; peer_lost=(peer.get('lost_frames') or 0)+(peer.get('crc_errors') or 0)
+        fresh=age<=LORA_STATUS_FRESH_S*1000
+        return {'fresh':fresh,'status_age_ms':age,'link':j.get('link') if fresh else 'STALE','last_rx_ms':j.get('last_rx_ms'),
+                'port':j.get('port'),'port_error':j.get('port_error'),'mqtt':j.get('mqtt'),'queue':j.get('queue'),
+                'tx_messages':tx.get('sent_messages'),'tx_expired':tx.get('expired'),
+                'rx_messages':rx.get('messages'),
+                # Ground's own counters (from its heartbeats): what the Edge sent and Ground lost.
+                'uplink_loss_pct':round(100*peer_lost/(peer_frames+peer_lost),1) if peer_frames+peer_lost else None,
+                'downlink_loss_pct':round(100*lost/(frames+lost),1) if frames+lost else None,
+                'clock_offset_ms':tm.get('offset_ms'),'clock_delay_ms':tm.get('delay_ms'),
+                'link_changes':j.get('link_changes'),**rates}
     def _incoming(self,topic,payload,retained,link='primary',epoch=None):
+        if topic==self.prefix+'/lora/edge': return self._lora_status(payload,retained)
         # Larger payloads are still read far enough to answer them; only absurd ones go unanswered.
         if len(payload)>COMMAND_READ_MAX_BYTES: return self._command_dropped(topic,link,'COMMAND_TOO_LARGE')
         # Keep half of the queue for the primary (Ground) link.
@@ -457,15 +524,21 @@ class Agent:
         while not self.stop_event.is_set():
             try:
                 self.source.poll()
-                if count%20==0 and not self.demo:
-                    try: self.helper_status=call_helper(self.cfg['control']['helper_socket'],{'op':'status'},timeout=1)
-                    except Exception: self.helper_status={}
+                if count%20==0 and not self.demo: self._poll_helper()
                 self._snapshot()
                 if count%240==0: self.journal.prune()
             except Exception as e:
                 with self.lock:
                     self.snapshot_data['collector_error']=type(e).__name__
             count+=1; self.stop_event.wait(self.cfg['source']['poll_ms']/1000)
+    def _poll_helper(self):
+        # The helper serves one RPC at a time, so this 1 s poll fails while another RPC holds it. One miss keeps
+        # the last status; the second in a row clears it. A blip then neither flips capabilities (republished
+        # to Ground on change) nor what the panel offers.
+        try: self.helper_status=call_helper(self.cfg['control']['helper_socket'],{'op':'status'},timeout=1); self.helper_misses=0
+        except Exception:
+            self.helper_misses+=1
+            if self.helper_misses>=2: self.helper_status={}
     def _snapshot(self):
         host=self.monitor.snapshot()
         if self.demo: host['clock_trusted']=True; host['clock_state']='DEMO'
@@ -499,9 +572,16 @@ class Agent:
         except Exception as e:
             # A sensor bug must not freeze the snapshot (and with it health and DoA).
             nav={name:{'state':'ERROR','error':type(e).__name__.upper()[:64]} for name in ('compass','gps')}
+        # The heading the last DoA sample went out with (chosen by the scheduler, not here).
+        nav['array_heading']=self.heading.snapshot() if self.nav_enabled else None
+        lora=self._lora_view()
         alerts=[]
         if self.demo: alerts.append({'severity':'warning','code':'DEMO','text':'DEMO - bukan data perangkat'})
         if not self.source.path: alerts.append({'severity':'warning','code':'SETUP_REQUIRED','text':'Pilih folder output SDR terlebih dahulu'})
+        if lora and lora['fresh'] and lora['link']!='UP':
+            alerts.append({'severity':'error','code':'LORA_LINK_DOWN','text':'Link LoRa ke Ground terputus'})
+        elif lora and not lora['fresh']:
+            alerts.append({'severity':'warning','code':'LORA_BRIDGE_STALE','text':'Jembatan LoRa tidak melapor: cek rdf-lora-edge'})
         if host.get('undervoltage'): alerts.append({'severity':'error','code':'UNDERVOLTAGE','text':'Tegangan rendah: periksa power'})
         if host.get('temperature_c') is not None and host['temperature_c']>=80: alerts.append({'severity':'error','code':'HOT','text':'Suhu tinggi: periksa pendinginan'})
         if host.get('disk_free_percent') is not None and host['disk_free_percent']<5: alerts.append({'severity':'error','code':'DISK_LOW','text':'Storage hampir penuh'})
@@ -520,6 +600,7 @@ class Agent:
                       'mqtt_backup':self._backup_status(),
                       'ppp_service':{k:v for k,v in (host.get('ppp_service') or {}).items() if k!='since'} or None,
                       'ppp_recovery':self._ppp_recovery_view(),
+                      'lora':lora,'transport':'LORA' if lora and lora['fresh'] else 'PPP',
                       'tx_kbit_s':host['tx_kbit_s'],'rx_kbit_s':host['rx_kbit_s'],
                       'traffic_layer':'PPP_IP_COUNTERS','profile':self.profile,'bulk_pause':self.bulk_reason,'angular_aborted':self.angular_abort,
                       'publish_errors':dict(self.publish_errors),'command_drops':dict(self.inbound_rejects)},
@@ -550,8 +631,11 @@ class Agent:
                 'remote_commands':remote,
                 # Sensors this node reads for telemetry/nav; position is sent only when publish_position is on.
                 'nav':{'compass':self.cfg['nav']['compass']['enabled'],'gps':self.cfg['nav']['gps']['enabled'],
-                       'position':self.cfg['nav']['gps']['enabled'] and self.cfg['nav']['gps']['publish_position']},
+                       'position':self.cfg['nav']['gps']['enabled'] and self.cfg['nav']['gps']['publish_position'],
+                       'heading':self.cfg['nav']['heading']['source'] if self.nav_enabled else None},
                 'remote_config_patch':remote and settings_target,
+                # Fields config.patch accepts (since contract 1.8); Ground sends only what is listed.
+                'config_fields':sorted(FIELD_MAP),
                 'remote_processing':remote and lifecycle_target,
                 'remote_restart':remote and lifecycle_target,
                 'remote_reboot':remote and helper_available,
@@ -700,10 +784,21 @@ class Agent:
             active=self.backup_active
             return bool(self.backup_client and (active['tls'] or active['settings_report_plaintext']))
         return True
+    RF_KEYS=(('f','center_frequency_hz'),('vfo','vfo0_frequency_hz'),('g','gain_db'),('bw','vfo0_bandwidth_hz'),
+             ('sq','vfo0_squelch_db'),('uca','ant_spacing_m'),('sqm','vfo0_squelch_mode'))
     def _state(self,s):
-        return {'v':2,'sid':self.sid,'contract':CONTRACT,'boot':self.boot,'instance':self.instance,'t':now_ms(),
-                'run':s.get('processing',{}).get('observed','UNKNOWN'),'daq':s.get('daq',{}).get('healthy',False),
-                'cfg':self.source.revision,'profile':self.profile,'clock':s.get('host',{}).get('clock_state','UNTRUSTED')}
+        state={'v':2,'sid':self.sid,'contract':CONTRACT,'boot':self.boot,'instance':self.instance,'t':now_ms(),
+               'run':s.get('processing',{}).get('observed','UNKNOWN'),'daq':s.get('daq',{}).get('healthy',False),
+               'cfg':self.source.revision,'profile':self.profile,'clock':s.get('host',{}).get('clock_state','UNTRUSTED')}
+        # What the SDR is set to (settings.json, revision cfg). Ground needs it without Data Out; it is the
+        # setting, not proof of what the radio runs (that is DoA `f` and config.patch APPLIED).
+        safe=self.source.safe or {}
+        rf={short:safe[key] for short,key in self.RF_KEYS
+            if (isinstance(safe.get(key),(int,float)) and not isinstance(safe.get(key),bool)) or (short=='sqm' and isinstance(safe.get(key),str))}
+        # With an automatic squelch the file's level is not what decides detection: leave it out.
+        if squelch_is_auto(safe): rf.pop('sq',None)
+        if rf: state['rf']=rf
+        return state
     def _publish_failed(self,topic,error):
         # One topic failing (an unexpected value from the source, say) must not stop the others.
         self.publish_errors[topic]=type(error).__name__.upper()
@@ -722,7 +817,29 @@ class Agent:
             # every other case carries the list once, in reason (T900 budget).
             if all(reason in UNVERIFIED_REASONS for reason in d['reasons']):
                 payload['validation_reasons']=list(d['reasons'])
+        if self.nav_enabled:
+            # A nav problem only drops the nav fields, never the DoA sample.
+            try: payload.update(self._nav_doa_fields(self.nav.snapshot(),payload['a'] if d['valid'] else None))
+            except Exception as e: self._publish_failed('telemetry/doa:nav',e)
+            else: self._publish_ok('telemetry/doa:nav')
         return payload
+    def _nav_doa_fields(self,nav,relative):
+        # The array heading at send time (h, hsrc) and, for a valid sample, the bearing it makes
+        # (b, clockwise from north); where the sample was taken only with publish_position.
+        sel=self.heading.select(nav)
+        out={'h':sel['heading_deg'] if sel else None,'hsrc':HEADING_CODES[sel['source']] if sel else None}
+        if sel and relative is not None: out['b']=bearing_deg(sel['heading_deg'],relative,self.cfg['source']['angle_mode'])
+        g=nav.get('gps') or {}
+        lat=g.get('lat'); lon=g.get('lon')
+        if (self.cfg['nav']['gps']['enabled'] and self.cfg['nav']['gps']['publish_position'] and g.get('state')=='FIX'
+                and isinstance(lat,(int,float)) and isinstance(lon,(int,float))
+                and math.isfinite(lat) and math.isfinite(lon) and -90<=lat<=90 and -180<=lon<=180):
+            out.update(lat=round(lat,5),lon=round(lon,5))
+        return out
+    def _nav_angular_fields(self):
+        # The heading the latest DoA sample went out with, so Ground can turn every bin into a bearing.
+        sel=self.heading.snapshot() if self.nav_enabled else None
+        return {'heading_deg':sel['heading_deg'],'heading_source':HEADING_CODES[sel['source']]} if sel else {}
     def _nav_health_fields(self,nav):
         # Optional telemetry/health fields, only for configured sensors (health stays byte-identical without).
         # A sensor that is silent or stale sends its state and no number.
@@ -763,7 +880,7 @@ class Agent:
             'timestamp_ms':r['timestamp_ms'],'frequency_hz':r['frequency_hz'],
             'revision':d['revision'],'vfo':self.cfg['source']['output_vfo'],
             'convention':1,'flags':self._angular_flags(d,r,h,daq),'raw_doa_deg':r['raw_doa_deg'],
-            'confidence_native_db':r['confidence_native_db'],'values':r['values']})
+            'confidence_native_db':r['confidence_native_db'],**self._nav_angular_fields(),'values':r['values']})
     def _diagnostic_angular(self,d,r,h,daq):
         self.diagnostic_angular_q+=1
         if self.diagnostic_angular_q>0xffffffff:
@@ -773,7 +890,7 @@ class Agent:
             'revision':d['revision'] if d['config_attributed'] else None,
             'vfo':self.cfg['source']['output_vfo'],'convention':1,'flags':self._angular_flags(d,r,h,daq),
             'raw_doa_deg':r['raw_doa_deg'],'confidence_native_db':r['confidence_native_db'],
-            'values':r['values']})
+            **self._nav_angular_fields(),'values':r['values']})
     def _schedule(self):
         due={}
         while not self.stop_event.is_set():
@@ -797,7 +914,7 @@ class Agent:
                     self.bulk_resume_after=now+self.cfg['telemetry']['resume_stable_seconds']
                     self._offer('available','availability',{'v':2,'sid':self.sid,'contract':CONTRACT,'online':True,'t':now_ms()},1,True,priority=0,
                                 links=('primary',))
-                    self._offer('caps','capabilities',self.capabilities(),1,True,priority=3,links=('primary',))
+                    self.caps_sent.pop('primary',None)
                     due['state']=0; due['diagnostic-angular-invalid']=0; due['diagnostic-angular-blocked']=0
                 backup_hello=False
                 if b_ready and bk.generation!=self._backup_generation:
@@ -805,8 +922,14 @@ class Agent:
                     self._backup_generation=bk.generation; backup_hello=True
                     self._offer('available','availability',{'v':2,'sid':self.sid,'contract':CONTRACT,'online':True,'t':now_ms()},1,True,priority=0,
                                 links=('backup',))
-                    self._offer('caps','capabilities',self.capabilities(),1,True,priority=3,links=('backup',))
+                    self.caps_sent.pop('backup',None)
                     due['diagnostic-angular-invalid:backup']=0; due['diagnostic-angular-blocked:backup']=0
+                # Capabilities go out at connect and again whenever they change (a helper that came up after
+                # the agent, a new approval): the retained copy, and what the LoRa bridge resends, stays true.
+                caps=compact(self.capabilities())
+                for link in ready:
+                    if self.caps_sent.get(link)!=caps and self._offer('caps','capabilities',caps,1,True,priority=3,links=(link,)):
+                        self.caps_sent[link]=caps
                 def tick(key,seconds):
                     if now>=due.get(key,0): due[key]=now+seconds; return True
                     return False
@@ -824,6 +947,10 @@ class Agent:
                                  # Why DoA is not live (empty when it is): Ground can tell an empty DOA file
                                  # (EMPTY_CSV) from one that stopped changing (DOA_FILE_NOT_UPDATING).
                                  'why':list(d['reasons'])}
+                        vp=d.get('vfo_peak')
+                        if vp is not None:
+                            # Only once KrakenSDR reports peaks (rdfsdr patch): health stays byte-identical without.
+                            payload.update(pk=vp['peak_db'],psq=vp['squelch_db'])
                         if self.nav_enabled:
                             # Read the sensors now, not the collector's cached snapshot, so nothing stale is sent;
                             # a nav problem only drops the nav fields, never the health message.
@@ -836,7 +963,8 @@ class Agent:
                 try:
                     if tick('detail',10):
                         self._offer('detail','telemetry/health/detail',{'v':2,'sid':self.sid,'t':now_ms(),
-                            'usb':h['usb_count'],'sync':list(daq['sync'].values()),'cpu':h['cpu_percent'],'mem':h['memory_percent'],
+                            'usb':h['usb_count'],'sync':list(daq['sync'].values()),'ovr':daq.get('adc_overdrive'),
+                            'cpu':h['cpu_percent'],'mem':h['memory_percent'],
                             'disk_free':h['disk_free_percent'],'throt':h['throttled'],'uv':h['undervoltage'],
                             'tx':h['tx_kbit_s'],'rx':h['rx_kbit_s'],'adrop':self.angular_abort,'parse':self.source.parse_errors,
                             'ppp':h.get('ppp'),'peer':h.get('ppp_probe'),
