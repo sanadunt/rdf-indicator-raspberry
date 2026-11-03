@@ -15,7 +15,8 @@ Contract `1.11` (two optional `telemetry/health` fields).
   still counts.
 - `telemetry/health` carries `pk` (peak, dB on KrakenSDR's FFT scale, not dBm) and `psq` (squelch), 0.1 dB,
   null when stale. They are there only once KrakenSDR has reported `vfo_peaks`: with stock KrakenSDR health is
-  byte-identical to 1.10. `pk` well under `psq` with `why: EMPTY_CSV` means squelch is holding the signal back.
+  byte-identical to 1.10. `pk` well under `psq` while `why` says no fresh sample (`EMPTY_CSV`, or `DOA_FILE_NOT_UPDATING` with rdfsdr, which
+  writes `DOA_value.html` only when DoA ran) means squelch is holding the signal back.
 - Panel: without a fresh sample (`NO_RECORD`, `NO_FRESH_DOA`, `EMPTY_CSV`, `DOA_FILE_NOT_UPDATING`) the line
   under the frequency reads `Puncak … dB / SQ … dB` instead of the last sample's PAPR/P. A fresh sample held
   back only by approval keeps its PAPR/P.

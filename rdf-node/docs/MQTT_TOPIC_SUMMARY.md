@@ -351,8 +351,10 @@ payload tidak berubah.
 | `pk` | Puncak spektrum di lebar VFO output, dB skala FFT KrakenSDR (bukan dBm, ikut gain), 0.1 dB. Diukur setiap frame, juga saat di bawah squelch. `null` bila pengukuran basi. |
 | `psq` | Squelch VFO output yang dipakai KrakenSDR pada frame itu (Manual, atau hasil Auto/Auto Channel), 0.1 dB. DoA hanya dihitung bila `pk` > `psq`. `null` bila basi atau tidak diketahui. |
 
-`pk` jauh di bawah `psq` dengan `why` `EMPTY_CSV` berarti squelch menahan sinyal (atau memang tidak
-ada sinyal); `pk` di atas `psq` tetapi tetap `EMPTY_CSV` berarti yang menahan bukan squelch.
+`pk` jauh di bawah `psq` sementara `why` menyebut tidak ada sampel baru (`EMPTY_CSV`, atau
+`DOA_FILE_NOT_UPDATING` pada rdfsdr yang hanya menulis `DOA_value.html` saat DoA dihitung) berarti squelch
+menahan sinyal (atau memang tidak ada sinyal); `pk` terus di atas `psq` tetapi tetap tanpa sampel baru
+berarti yang menahan bukan squelch.
 
 Contoh dengan kompas dan GPS berposisi:
 
