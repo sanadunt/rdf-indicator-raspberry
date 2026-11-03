@@ -7,6 +7,7 @@ const good=['UP','CONNECTED','HEALTHY','SYNCED','APPLIED','REPLY','PRESENT'];
 const bad=['ERROR','LOST','DEGRADED','FAILED','UNAVAILABLE'];
 const ADMIN_SESSION_REFRESH_MS=20000, ADMIN_SESSION_ACTIVITY_MS=30000, ADMIN_SESSION_CHECK_MS=10000;
 function label(id,text,code){const el=$(id);if(!el)return;el.textContent=text;el.classList.remove('good','warn','bad','neutral');el.classList.add(good.includes(code)?'good':bad.includes(code)?'bad':code?'warn':'neutral');}
+const NO_SAMPLE_REASONS=new Set(['NO_RECORD','NO_FRESH_DOA','EMPTY_CSV','DOA_FILE_NOT_UPDATING']);
 function fmt(v,dec=1){return typeof v==='number'&&Number.isFinite(v)?v.toFixed(dec):'--';}
 function age(ms){return typeof ms==='number'?`${fmt(ms/1000)} dtk`:'--';}
 // Stroke icons on a 24-unit grid, drawn as single paths so they inherit currentColor.
@@ -604,7 +605,11 @@ function render(s){
  const sampleFreq=showDiagnostic?diag.frequency_mhz:d.frequency_hz?d.frequency_hz/1e6:null;
  $('frequency-label').textContent=showDiagnostic?'FREKUENSI XML':d.frequency_hz?'FREKUENSI VFO':'FREKUENSI SETELAN';
  $('freq').textContent=sampleFreq!=null?fmt(sampleFreq,3):typeof setFreq==='number'?fmt(setFreq/1e6,3):'--';
- $('quality').textContent=showDiagnostic?`Gate: ${diagnosticReason}`:`PAPR ${fmt(d.confidence_native_db,2)} dB / P ${fmt(d.power_native_db)} dB`;
+ // Without a fresh sample, the VFO peak against squelch (rdfsdr patch) tells no signal from a squelch set too
+ // high; a fresh sample only held back by approval keeps its own PAPR/P.
+ const noSample=(d.reasons||[]).some(r=>NO_SAMPLE_REASONS.has(r));
+ const vp=d.vfo_peak,peakText=noSample&&vp?.state==='OK'?`Puncak ${fmt(vp.peak_db)} dB / SQ ${fmt(vp.squelch_db)} dB`:null;
+ $('quality').textContent=showDiagnostic?`Gate: ${diagnosticReason}`:peakText||`PAPR ${fmt(d.confidence_native_db,2)} dB / P ${fmt(d.power_native_db)} dB`;
  label('daq',q.state==='HEALTHY'?'SINKRON':q.state||'UNKNOWN',q.state);
  label('sync',c.sdr_revision==null?'--':`r${c.sdr_revision}`,'');
  renderOperation(s.last_operation,s);

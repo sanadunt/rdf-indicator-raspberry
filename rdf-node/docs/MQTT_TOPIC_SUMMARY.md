@@ -342,6 +342,18 @@ di `nav:`; tanpa sensor, payload sama persis dengan 1.5. Consumer harus menerima
 | `lat`, `lon` | Posisi WGS84, 5 desimal (~1 m). Hanya ada bila fix dan `nav.gps.publish_position: true`. |
 | `alt` | Ketinggian MSL meter (fix 3D); `sog` kecepatan m/s; `cog` arah gerak derajat true (dari RMC, dapat `null`). Hanya bersama `lat`/`lon`. |
 
+Sejak kontrak 1.11 health juga dapat membawa `pk` dan `psq`. Keduanya hanya ada bila KrakenSDR
+melaporkan `vfo_peaks` di `status.json` (patch rdfsdr `deploy/kraken/vfo_peaks.patch`); tanpa patch,
+payload tidak berubah.
+
+| Field | Makna |
+|---|---|
+| `pk` | Puncak spektrum di lebar VFO output, dB skala FFT KrakenSDR (bukan dBm, ikut gain), 0.1 dB. Diukur setiap frame, juga saat di bawah squelch. `null` bila pengukuran basi. |
+| `psq` | Squelch VFO output yang dipakai KrakenSDR pada frame itu (Manual, atau hasil Auto/Auto Channel), 0.1 dB. DoA hanya dihitung bila `pk` > `psq`. `null` bila basi atau tidak diketahui. |
+
+`pk` jauh di bawah `psq` dengan `why` `EMPTY_CSV` berarti squelch menahan sinyal (atau memang tidak
+ada sinyal); `pk` di atas `psq` tetapi tetap `EMPTY_CSV` berarti yang menahan bukan squelch.
+
 Contoh dengan kompas dan GPS berposisi:
 
 ```json

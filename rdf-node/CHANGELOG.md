@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.11.0 - Unreleased
+
+Contract `1.11` (two optional `telemetry/health` fields).
+
+- The output VFO's peak against squelch reaches the panel and Ground also while squelch holds DoA back.
+  `deploy/kraken/vfo_peaks.patch` makes rdfsdr write `vfo_peaks` to `status.json` every frame: per active VFO
+  the FFT peak inside its bandwidth (CH1 with the Single spectrum, every channel with Full: the value KrakenSDR
+  compares with squelch), the squelch it was compared
+  with (Manual, or what Auto/Auto Channel computed), frequency, bandwidth and the frame time. Edge reads the
+  `source.output_vfo` entry into `detection.vfo_peak` (`OK` with numbers, `STALE` without once older than
+  `freshness.source_status_ms`; `above_squelch` null at a 0.0 dB margin, since rdfsdr compares unrounded values
+  and writes 0.1 dB); a malformed `vfo_peaks` is null in `daq.null_fields` and the rest of the status
+  still counts.
+- `telemetry/health` carries `pk` (peak, dB on KrakenSDR's FFT scale, not dBm) and `psq` (squelch), 0.1 dB,
+  null when stale. They are there only once KrakenSDR has reported `vfo_peaks`: with stock KrakenSDR health is
+  byte-identical to 1.10. `pk` well under `psq` with `why: EMPTY_CSV` means squelch is holding the signal back.
+- Panel: without a fresh sample (`NO_RECORD`, `NO_FRESH_DOA`, `EMPTY_CSV`, `DOA_FILE_NOT_UPDATING`) the line
+  under the frequency reads `Puncak … dB / SQ … dB` instead of the last sample's PAPR/P. A fresh sample held
+  back only by approval keeps its PAPR/P.
+
 ## 1.10.2 - Unreleased
 
 Contract `1.10` (unchanged; one optional ACK field and one availability reason added).

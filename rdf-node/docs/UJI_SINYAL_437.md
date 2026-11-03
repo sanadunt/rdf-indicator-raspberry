@@ -47,7 +47,7 @@ done
 | Yang terlihat di `why` | Arti | Lanjut ke |
 |---|---|---|
 | Hanya `SOURCE_UNVERIFIED` dan/atau `ANGLE_UNVERIFIED` | Sampel segar dan sehat, tetapi persetujuan sumber/sudut belum diberikan di config. Bukan masalah sinyal. Inilah kasus 2026-10-22. | Langkah 5 |
-| `EMPTY_CSV` (dan `NO_FRESH_DOA`), `DOA_value.html` tetap ditulis ulang, `status.json` segar, DAQ sehat | KrakenSDR berjalan, tetapi tidak ada sinyal di atas squelch di VFO. Kemungkinan besar ini kasus 2026-10-26. | Langkah 3 dan 4 |
+| `EMPTY_CSV` (dan `NO_FRESH_DOA`), `DOA_value.html` tetap ditulis ulang, `status.json` segar, DAQ sehat | KrakenSDR berjalan, tetapi tidak ada sinyal di atas squelch di VFO. Kemungkinan besar ini kasus 2026-10-26. Dengan patch `vfo_peaks` (1.11), panel menulis "Puncak … dB / SQ … dB" dan Ground menerima `pk`/`psq`: selisihnya menunjukkan seberapa jauh sinyal di bawah squelch. | Langkah 3 dan 4 |
 | `DOA_FILE_NOT_UPDATING` dan/atau `STATUS_STALE_OR_UNAVAILABLE`, `DAQ_NOT_HEALTHY` | Pengolahan KrakenSDR berhenti atau DAQ bermasalah. Bukan soal sinyal. | Langkah 6 |
 | `CLOCK_UNTRUSTED` | Jam Raspberry belum sinkron (umum tanpa RTC sebelum PPP/NTP naik). | Tunggu NTP, cek `timedatectl` |
 | `CONFIG_UNAVAILABLE` atau `CONFIG_ATTRIBUTION_UNVERIFIED` | `settings.json` tidak terbaca atau baru berubah. | Ulangi langkah 1 setelah beberapa detik |

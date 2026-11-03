@@ -385,6 +385,39 @@ class SourceTests(unittest.TestCase):
         self.assertIn('DIAGNOSTIC_UNVERIFIED',diagnostic['validation_reasons'])
         self.assertIn('EMPTY_CSV',diagnostic['validation_reasons'])
         self.assertGreater(diagnostic['observed_timestamp_ms'],0)
+    def peaks(self,peak=-78.44,squelch=-70.0,t=None,vfo=0):
+        s=status();s['vfo_peaks']=[{'vfo':vfo,'frequency_hz':420820864,'bandwidth_hz':12500,'peak_db':peak,
+                                    'squelch_db':squelch,'timestamp_ms':now_ms() if t is None else t}]
+        (self.path/'status.json').write_bytes(compact(s))
+    def test_vfo_peak_below_squelch_is_reported_while_doa_is_empty(self):
+        self.peaks();(self.path/'DOA_value.html').write_bytes(b'')
+        self.src.poll(force=True);view=self.src.view(True);vp=view['vfo_peak']
+        self.assertFalse(view['valid']);self.assertIn('EMPTY_CSV',view['reasons'])
+        self.assertEqual((vp['state'],vp['peak_db'],vp['squelch_db'],vp['margin_db'],vp['above_squelch']),
+                         ('OK',-78.4,-70.0,-8.4,False))
+        self.assertEqual((vp['vfo'],vp['frequency_hz'],vp['bandwidth_hz']),(0,420820864,12500))
+    def test_vfo_peak_at_squelch_does_not_say_which_side(self):
+        self.peaks(peak=-70.0,squelch=-70.0);self.src.poll(force=True)
+        vp=self.src.view(True)['vfo_peak']
+        self.assertEqual((vp['margin_db'],vp['above_squelch']),(0.0,None))
+    def test_vfo_peak_absent_with_stock_krakensdr(self):
+        self.src.poll(force=True);self.assertIsNone(self.src.view(True)['vfo_peak'])
+    def test_vfo_peak_goes_stale_without_numbers(self):
+        self.peaks(t=now_ms()-10000);self.src.poll(force=True)
+        vp=self.src.view(True)['vfo_peak']
+        self.assertEqual(vp['state'],'STALE');self.assertIsNone(vp['peak_db']);self.assertIsNone(vp['squelch_db'])
+        # Another VFO's peak is not the output VFO's.
+        self.peaks(vfo=1);self.src.poll(force=True);self.assertEqual(self.src.view(True)['vfo_peak']['state'],'STALE')
+        # Once reported, a status without peaks still reports STALE rather than dropping the field.
+        (self.path/'status.json').write_bytes(compact(status()));self.src.poll(force=True)
+        self.assertEqual(self.src.view(True)['vfo_peak']['state'],'STALE')
+    def test_bad_vfo_peaks_are_named_and_do_not_fail_the_status(self):
+        for bad in ('x',[{'vfo':0}],[{'vfo':0,'frequency_hz':1,'bandwidth_hz':1,'peak_db':'-70','squelch_db':None,'timestamp_ms':now_ms()}],[1]*17):
+            s=status();s['vfo_peaks']=bad;st=parse_status(compact(s))
+            self.assertIsNone(st['vfo_peaks'],bad);self.assertIn('vfo_peaks',st['null_fields'])
+            self.assertTrue(st['vfo_peaks_reported']);self.assertIs(st['daq_ok'],True)
+        s=status();s['vfo_peaks']=[{'vfo':0,'frequency_hz':1,'bandwidth_hz':1,'peak_db':None,'squelch_db':None,'timestamp_ms':now_ms()}]
+        self.assertIsNone(parse_status(compact(s))['vfo_peaks'][0]['peak_db'])
     def test_missing_xml_does_not_block_valid_csv(self):
         self.src.poll(force=True);self.write(2);self.src.poll(force=True)
         detection=self.src.view(True)

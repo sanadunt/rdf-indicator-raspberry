@@ -947,6 +947,10 @@ class Agent:
                                  # Why DoA is not live (empty when it is): Ground can tell an empty DOA file
                                  # (EMPTY_CSV) from one that stopped changing (DOA_FILE_NOT_UPDATING).
                                  'why':list(d['reasons'])}
+                        vp=d.get('vfo_peak')
+                        if vp is not None:
+                            # Only once KrakenSDR reports peaks (rdfsdr patch): health stays byte-identical without.
+                            payload.update(pk=vp['peak_db'],psq=vp['squelch_db'])
                         if self.nav_enabled:
                             # Read the sensors now, not the collector's cached snapshot, so nothing stale is sent;
                             # a nav problem only drops the nav fields, never the health message.

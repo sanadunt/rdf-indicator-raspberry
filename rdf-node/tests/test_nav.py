@@ -282,13 +282,14 @@ class TelemetryTests(unittest.TestCase):
                 'gps':{'state':state,'fix':3 if fix else 0,'sats_used':7 if fix else 0,
                        'lat':-6.205764 if fix else None,'lon':106.81 if fix else None,'alt_m':15.5 if fix else None,
                        'speed_mps':2.57 if fix else None,'course_deg':90.0 if fix else None}}
-    def health(self,a,nav_snapshot,live=True):
+    def health(self,a,nav_snapshot,live=True,vfo_peak=None):
         messages=[]
         from rdf_node.mqtt import Client
         control=Client(cfg={},client_id='nav-capture');control.ready=True
         control.offer=lambda key,topic,payload,**o:messages.append((topic,payload)) or True
         a.clients={'control':control};a._generation=-1
         snap=a.snapshot();snap['nav']=nav_snapshot
+        if vfo_peak is not None: snap['detection']['vfo_peak']=vfo_peak
         # The scheduler reads the sensors at send time; tests stand in for them.
         if live: a.nav.snapshot=lambda:nav_snapshot
         def once():
@@ -312,6 +313,15 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(contract.errors(h,contract.schema_for('telemetry/health')),[])
         h=self.health(a,self.nav_snapshot(state='NO_FIX'))
         self.assertEqual((h['gs'],h['fix']),('NO_FIX',0));self.assertNotIn('lat',h)
+    def test_vfo_peak_rides_on_health_only_once_reported(self):
+        h=self.health(self.agent(),self.nav_snapshot())
+        self.assertFalse({'pk','psq'}&set(h))
+        h=self.health(self.agent(),self.nav_snapshot(),vfo_peak={'state':'OK','peak_db':-78.4,'squelch_db':-70.0})
+        self.assertEqual((h['pk'],h['psq']),(-78.4,-70.0))
+        self.assertEqual(contract.errors(h,contract.schema_for('telemetry/health')),[])
+        h=self.health(self.agent(),self.nav_snapshot(),vfo_peak={'state':'STALE','peak_db':None,'squelch_db':None})
+        self.assertEqual((h['pk'],h['psq']),(None,None))
+        self.assertEqual(contract.errors(h,contract.schema_for('telemetry/health')),[])
     def test_silent_compass_sends_null_heading(self):
         a=self.agent(compass={'enabled':True,'device':'/dev/ttyUSB1'})
         h=self.health(a,self.nav_snapshot(heading=None))
