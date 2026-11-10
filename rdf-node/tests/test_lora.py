@@ -1,5 +1,5 @@
 import hashlib
-import json,os,select,tempfile,threading,time,unittest
+import json,os,select,struct,tempfile,threading,time,unittest
 from unittest import mock
 from pathlib import Path
 from rdf_node import lora
@@ -11,6 +11,15 @@ from broker_fixture import Broker,wait
 ANGULAR=json.dumps({'v':2,'encoding':'json','sid':'a3da8b3b','q':1,'timestamp_ms':1793446155142,'frequency_hz':433920000,
                     'revision':1,'vfo':0,'convention':1,'flags':63,'raw_doa_deg':137.0,'confidence_native_db':8.27,
                     'values':[round((d*7919%1000)/50,2) for d in range(360)]},separators=(',',':')).encode()
+def angular_1_12(values=None):
+    if values is None:
+        import math
+        values=[round(0.6+0.7*math.exp(-(((2*k-137+180)%360-180)/14)**2),2) for k in range(180)]
+    return json.dumps({'v':2,'encoding':'json','sid':'a3da8b3b','q':7,'timestamp_ms':1793446155142,
+                       'frequency_hz':433920000,'revision':1,'vfo':0,'convention':1,'flags':63,'raw_doa_deg':137.0,
+                       'confidence_native_db':8.27,'heading_deg':96.5,'heading_source':'C','step_deg':2,
+                       'values':values},separators=(',',':')).encode()
+ANGULAR_180=angular_1_12()
 HEALTH=b'{"v":2,"sid":"7a8b9c0d","q":86,"t":1793445697776,"run":1,"daq":1,"drop":12,"age":280,"temp":61.4,"clk":1,"rev":7,"why":[]}'
 
 class CodecTests(unittest.TestCase):
@@ -162,6 +171,18 @@ class SenderTests(unittest.TestCase):
         s.offer(11,b'{"ack":2}',now=t+.5)
         self.assertEqual(s.next_frames(air_end+.29),[])
         self.assertTrue(s.next_frames(air_end+.31))
+    def test_quiet_window_outlasts_a_curve_at_the_back_to_back_rate(self):
+        # Back to back the radio moves only ~1.2-1.5 KB/s: after a whole curve the edge must still leave the
+        # full quiet window from the moment the curve really ends on the air (2026-11-10: 0.5 ms/byte did not).
+        s=Sender(100000,200,burst=5000,turn_every_s=1.0,quiet_s=.45);t=1000.0
+        s.last_turn=t-.5
+        s.offer(4,b''.join(hashlib.sha256(bytes([i])).digest() for i in range(30)),now=t)  # ~1 KB, 5+ frames
+        burst=s.next_frames(t)
+        s.offer(11,b'{"ack":1}',now=t+.5)
+        turn=s.next_frames(t+.5)
+        self.assertTrue(decode_frame(turn[0][:-1])[4]&lora.F_TURN)
+        on_air=sum(len(f) for f in burst+turn)/1250
+        self.assertGreaterEqual(s.next_at,t+on_air+.45)
     def test_time_frames_are_stamped_when_sent_not_when_queued(self):
         s=Sender(100000,200)
         s.urgent(lora.TIME,lora.TIME_REQ.pack(1,1));s.urgent(lora.TIME,lora.TIME_RESP.pack(2,5,6,7))
@@ -194,6 +215,241 @@ class SenderTests(unittest.TestCase):
         r=Receiver();out=r.feed(b''.join(first+rest))
         self.assertEqual(out[0][1],ANGULAR);self.assertEqual((r.stats['heartbeats'],r.stats['lost_frames']),(1,0))
         self.assertEqual(decode_frame(rest[0][:-1])[0],lora.HEARTBEAT)
+
+def _frames(kind,seq,msg,topic,payload,**kw):
+    return [lora.frame_bytes(seq+i,p) for i,p in enumerate(lora.split_message(kind,msg,topic,payload,**kw))]
+
+class ReceiptTests(unittest.TestCase):
+    """Commands (Ground->Edge) and ACKs (Edge->Ground) are resent until the other bridge sends a receipt."""
+    def test_heartbeat_carries_the_receipt_feature_and_old_heartbeats_still_parse(self):
+        s=Sender(100000,200);s.heartbeat(5,Receiver().stats,0.0)
+        r=Receiver();r.feed(s.next_frames(1.0)[0],10.0)
+        self.assertTrue(r.peer['features']&lora.FEATURE_RECEIPTS)
+        old=struct.pack('!IIHHQ',5,0,0,0,1793446155142)  # a bridge before 1.12.1: 20 bytes, no feature byte
+        r=Receiver();r.feed(_frames(lora.HEARTBEAT,0,0,0,old)[0],10.0)
+        self.assertEqual((r.peer['uptime_s'],r.peer['features']),(5,0))
+    def test_receipt_frame_is_read(self):
+        r=Receiver();out=r.feed(_frames(lora.RECEIPT,0,0,0,bytes([7,64,9,11]))[0])
+        self.assertEqual(out,[]);self.assertEqual(r.receipts_in,[(7,64),(9,11)])
+        self.assertEqual((r.stats['receipts'],r.stats['bad_frames']),(1,0))
+    def test_a_flagged_message_and_each_copy_get_a_receipt_unflagged_none(self):
+        r=Receiver();cmd=b'{"id":"c1"}'
+        self.assertEqual(len(r.feed(_frames(DATA,0,7,65,cmd,qos1=True,receipt=True)[0])),1)
+        self.assertEqual(r.receipts_due,[(7,65)])
+        self.assertEqual(r.feed(_frames(DATA,1,7,65,cmd,qos1=True,receipt=True)[0]),[])  # a copy
+        self.assertEqual(r.receipts_due,[(7,65),(7,65)])  # the first receipt may have been lost
+        r.receipts_due.clear();r.feed(_frames(DATA,2,8,65,cmd,qos1=True)[0])
+        self.assertEqual(r.receipts_due,[])
+    def _sent(self,s,t0,t1,step=.05):
+        out=[];t=t0
+        while t<=t1: out+=[(round(t,2),f) for f in s.next_frames(t)];t+=step
+        return out
+    def test_command_is_resent_until_its_receipt_then_stops(self):
+        s=Sender(100000,200,resend_s=.9);s.peer_receipts=True;t=1000.0
+        s.offer(65,b'{"op":"config.patch"}',qos1=True,now=t)
+        first=s.next_frames(t);self.assertEqual(len(first),1)
+        kind,_,msg,topic,flags,*_=decode_frame(first[0][:-1])
+        self.assertTrue(flags&lora.F_RECEIPT);self.assertEqual(topic,65)
+        self.assertEqual(self._sent(s,t+.05,t+.85),[])  # no blind copy while the receipt may be on its way
+        again=self._sent(s,t+.9,t+1.0);self.assertEqual(len(again),1)
+        self.assertEqual(decode_frame(again[0][1][:-1])[2],msg);self.assertEqual(s.stats['resent'],1)
+        s.confirm([(msg,65)])
+        self.assertEqual(self._sent(s,t+1.05,t+12),[]);self.assertEqual(s.depth(),0)
+        self.assertEqual((s.stats['confirmed'],s.stats['unconfirmed']),(1,0))
+    def test_an_unconfirmed_command_gives_up_after_max_sends(self):
+        s=Sender(100000,200,resend_s=.9);s.peer_receipts=True;t=1000.0
+        s.offer(64,b'{"op":"config.get"}',qos1=True,now=t)
+        sent=self._sent(s,t,t+12)
+        self.assertEqual(len(sent),lora.RELIABLE_MAX_SENDS)
+        self.assertEqual(len({decode_frame(f[:-1])[2] for _,f in sent}),1)  # one message id
+        self.assertEqual((s.stats['unconfirmed'],s.stats['resent'],s.depth()),(1,lora.RELIABLE_MAX_SENDS-1,0))
+    def test_an_unconfirmed_command_gives_up_at_its_age(self):
+        s=Sender(100000,200,resend_s=3.0);s.peer_receipts=True;t=1000.0
+        s.offer(64,b'{"op":"config.get"}',qos1=True,now=t)
+        sent=self._sent(s,t,t+12)
+        self.assertEqual([round(x) for x,_ in sent],[1000,1003,1006,1009])  # nothing after 10 s
+        self.assertEqual((s.stats['unconfirmed'],s.depth()),(1,0))
+    def test_an_ack_from_the_edge_waits_longer_for_ground_s_turn(self):
+        s=Sender(100000,200,resend_s=1.6);s.peer_receipts=True;t=1000.0
+        s.offer(11,b'{"id":"c1","status":"APPLIED"}',qos1=True,now=t)
+        self.assertEqual(len(s.next_frames(t)),1)
+        self.assertEqual(self._sent(s,t+.05,t+1.55),[])
+        self.assertEqual(len(self._sent(s,t+1.6,t+1.7)),1)
+    def test_without_the_peer_feature_the_old_copies_go_unflagged(self):
+        s=Sender(100000,200);t=1000.0;s.offer(65,b'{"op":"config.patch"}',qos1=True,now=t)
+        sent=self._sent(s,t,t+3)
+        self.assertEqual(len(sent),lora.COMMAND_SENDS)
+        self.assertFalse(any(decode_frame(f[:-1])[4]&lora.F_RECEIPT for _,f in sent))
+        self.assertEqual(s.stats['resent'],0)
+    def test_telemetry_is_never_held_for_a_receipt(self):
+        s=Sender(100000,200);s.peer_receipts=True;t=1000.0
+        s.offer(1,HEALTH,now=t);s.offer(10,b'{"settings":1}',qos1=True,now=t)
+        sent=self._sent(s,t,t+5)
+        self.assertFalse(any(decode_frame(f[:-1])[4]&lora.F_RECEIPT for _,f in sent))
+    def test_a_queued_heartbeat_does_not_push_a_command_to_the_next_window(self):
+        # Ground's window is short: heartbeat first, then the command, both in the same call.
+        s=Sender(100000,200);t=1000.0
+        s.offer(65,b'{"op":"config.patch"}',qos1=True,now=t);s.heartbeat(5,Receiver().stats,t)
+        sent=s.next_frames(t,max_bytes=lora.GROUND_WINDOW_BYTES)
+        self.assertEqual([decode_frame(f[:-1])[0] for f in sent],[lora.HEARTBEAT,DATA])
+        self.assertLessEqual(sum(map(len,sent)),lora.GROUND_WINDOW_BYTES)
+        # ...but never more than the window holds.
+        s=Sender(100000,200);s.offer(65,os.urandom(150),qos1=True,now=t);s.heartbeat(5,Receiver().stats,t)
+        self.assertEqual(len(s.next_frames(t,max_bytes=100)),1)
+    def test_heartbeats_queued_between_windows_never_look_like_a_peer_restart(self):
+        # Ground can only talk in the edge's windows. Two heartbeats queued meanwhile used to leave newest
+        # first; the older uptime then read as a restart, the receiver forgot what it had delivered, and the
+        # next copy of a command was delivered again.
+        s=Sender(100000,200);r=Receiver();t=1000.0
+        s.heartbeat(4.9,Receiver().stats,t);r.feed(b''.join(s.next_frames(t)),t)
+        cmd=_frames(DATA,500,7,64,b'{"id":"c1"}',qos1=True,receipt=True)[0]
+        self.assertEqual(len(r.feed(cmd,t)),1)
+        s.heartbeat(5.4,Receiver().stats,t+.5);s.heartbeat(6.1,Receiver().stats,t+1.2)
+        beats=s.next_frames(t+1.3)
+        self.assertEqual(len(beats),1)  # the stale one is replaced, not stacked
+        r.feed(b''.join(beats),t+1.3)
+        self.assertEqual((r.stats['peer_restarts'],r.peer['uptime_s']),(0,6))
+        self.assertEqual(r.feed(_frames(DATA,501,7,64,b'{"id":"c1"}',qos1=True,receipt=True)[0],t+1.4),[])
+    def test_a_stray_or_late_receipt_is_harmless(self):
+        s=Sender(100000,200);s.peer_receipts=True
+        s.confirm([(1,64),(255,11)]);self.assertEqual(s.stats['confirmed'],0)
+    # Final review fixes: the resend clock, what a receipt means, and stale heartbeats from an old Ground.
+    def _ground_windows(self,s,times,confirm_at=None,max_bytes=lora.GROUND_WINDOW_BYTES):
+        sent=[]
+        for t in times:
+            if confirm_at and t>=confirm_at[0]:
+                s.confirm(confirm_at[1]);confirm_at=None
+            sent+=[decode_frame(f[:-1]) for f in s.next_frames(t,max_bytes=max_bytes)]
+        return sent
+    def test_the_resend_clock_starts_when_the_message_really_leaves(self):
+        # A command that does not fit its first window (heartbeat + TIME reply ahead of it) leaves a turn
+        # later; its receipt then comes in time and nothing is resent.
+        s=Sender(100000,200,resend_s=.9);s.peer_receipts=True;t=1000.0
+        s.offer(65,os.urandom(170),qos1=True,now=t)
+        s.heartbeat(5,Receiver().stats,t);s.urgent(lora.TIME,lora.TIME_RESP.pack(2,1,2,3))
+        w0=[decode_frame(f[:-1]) for f in s.next_frames(t,max_bytes=lora.GROUND_WINDOW_BYTES)]
+        self.assertEqual(sorted(f[0] for f in w0),sorted([lora.HEARTBEAT,lora.TIME]))
+        w1=[decode_frame(f[:-1]) for f in s.next_frames(t+1.05,max_bytes=lora.GROUND_WINDOW_BYTES)]
+        self.assertEqual([f[0] for f in w1],[DATA])
+        s.confirm([(w1[0][2],65)])  # the receipt, ~0.55 s later
+        self.assertEqual(self._ground_windows(s,[t+2.1,t+3.15,t+4.2]),[])
+        self.assertEqual((s.stats['resent'],s.stats['confirmed'],s.depth()),(0,1,0))
+    def test_a_receipt_cancels_a_resend_already_queued(self):
+        s=Sender(100000,200,resend_s=.9);s.peer_receipts=True;t=1000.0
+        s.offer(65,b'{"op":"config.patch"}',qos1=True,now=t)
+        msg=decode_frame(s.next_frames(t)[0][:-1])[2]
+        self.assertEqual(s.next_frames(t+1.0,max_bytes=10),[])  # resend due but the window is too small
+        s.confirm([(msg,65)])
+        self.assertEqual(s.next_frames(t+2.0),[]);self.assertEqual(s.depth(),0)
+        self.assertEqual((s.stats['confirmed'],s.stats['resent']),(1,0))
+    def test_a_window_adds_at_most_one_message_after_its_control_frames(self):
+        s=Sender(100000,200);t=1000.0
+        for i in range(3): s.offer(64,b'{"i":%d}'%i,qos1=True,now=t)
+        s.heartbeat(5,Receiver().stats,t)
+        kinds=[decode_frame(f[:-1])[0] for f in s.next_frames(t,max_bytes=lora.GROUND_WINDOW_BYTES)]
+        self.assertEqual(kinds,[lora.HEARTBEAT,DATA])
+    def test_counters_and_depth_follow_the_message(self):
+        s=Sender(100000,200,resend_s=.9);s.peer_receipts=True;t=1000.0
+        s.offer(64,b'{"op":"config.get"}',qos1=True,now=t)
+        msg=decode_frame(s.next_frames(t)[0][:-1])[2]
+        self.assertEqual(s.depth(),1)  # waiting for its receipt
+        self.assertEqual(len(s.next_frames(t+.95)),1)
+        self.assertEqual((s.stats['sent_messages'],s.stats['resent']),(1,1))
+        # Gives up only resend_s after the last send: a receipt just before that still counts.
+        s=Sender(100000,200,resend_s=.9);s.peer_receipts=True
+        s.offer(64,b'{"op":"config.get"}',qos1=True,now=t)
+        sent=self._sent(s,t,t+7.0)
+        self.assertEqual(len(sent),lora.RELIABLE_MAX_SENDS)
+        s.confirm([(decode_frame(sent[0][1][:-1])[2],64)])
+        self.assertEqual((s.stats['confirmed'],s.stats['unconfirmed']),(1,0))
+    def test_a_message_that_fails_to_decode_is_not_receipted_and_a_resend_can_still_deliver_it(self):
+        r=Receiver();good=b'{"id":"c1"}'
+        bad=lora.frame_bytes(0,(DATA,7,65,lora.F_ZLIB|lora.F_RECEIPT|lora.F_QOS1,0,1,b'not zlib'))
+        self.assertEqual(r.feed(bad),[]);self.assertEqual((r.stats['bad_frames'],r.receipts_due),(1,[]))
+        out=r.feed(_frames(DATA,1,7,65,good,qos1=True,receipt=True)[0])
+        self.assertEqual(out,[(65,good,False,True)]);self.assertEqual(r.receipts_due,[(7,65)])
+    def test_a_message_the_bridge_could_not_hand_to_mqtt_is_forgotten_and_not_receipted(self):
+        class Client:
+            def __init__(self): self.ok=[False,True]; self.got=[]
+            def offer(self,key,topic,payload,**kw): self.got.append(payload); return self.ok.pop(0)
+        b=object.__new__(Bridge);b.role='edge';b.prefix='sdr/v2/uav-01';b.ignored=0;b.mqtt_dropped=0
+        b.receiver=Receiver();b.sender=Sender(100000,200);b.client=Client()
+        cmd=b'{"id":"c1"}'
+        b._dispatch(b.receiver.feed(_frames(DATA,0,7,65,cmd,qos1=True,receipt=True)[0]))
+        self.assertEqual((b.mqtt_dropped,b.sender.depth()),(1,0))  # dropped: no receipt queued
+        b._dispatch(b.receiver.feed(_frames(DATA,1,7,65,cmd,qos1=True,receipt=True)[0]))
+        self.assertEqual(b.client.got,[cmd,cmd])  # the resend is delivered this time
+        self.assertEqual(decode_frame(b.sender.next_frames(1.0)[0][:-1])[0],lora.RECEIPT)
+    def test_an_old_peer_heartbeat_switches_receipts_off(self):
+        b=object.__new__(Bridge);b.receiver=Receiver();b.sender=Sender(100000,200);b.sender.peer_receipts=True
+        old=struct.pack('!IIHHQ',5,0,0,0,1793446155142)
+        b.receiver.feed(_frames(lora.HEARTBEAT,0,0,0,old)[0],10.0);b._receipts()
+        self.assertFalse(b.sender.peer_receipts)
+        b.sender.offer(65,b'{"op":"config.patch"}',qos1=True,now=11.0)
+        self.assertEqual(len(self._sent(b.sender,11.0,14.0)),lora.COMMAND_SENDS)
+    def test_a_stale_heartbeat_from_an_old_ground_is_not_a_restart(self):
+        # A Ground bridge before 1.12.1 still sends two queued heartbeats newest first.
+        def beat(up):
+            return _frames(lora.HEARTBEAT,0,0,0,struct.pack('!IIHHQ',up,0,0,0,1793446155142))[0]
+        r=Receiver();t=100.0
+        r.feed(beat(100),t);r.feed(beat(110),t+10);r.feed(beat(105),t+10.05)
+        self.assertEqual((r.stats['peer_restarts'],r.peer['uptime_s']),(0,110))
+        r.feed(beat(3),t+30)  # a real restart: its uptime fits the time since the last heartbeat
+        self.assertEqual(r.stats['peer_restarts'],1)
+
+class PackedAngularTests(unittest.TestCase):
+    def test_pack_angular_round_trip_180_and_360(self):
+        p360=json.dumps({**json.loads(ANGULAR),'values':[round(0.5+(d%40)/100,2) for d in range(360)]},
+                        separators=(',',':')).encode()
+        for p in (ANGULAR_180,p360):
+            body=lora.pack_angular(p);self.assertIsNotNone(body)
+            self.assertEqual(lora.unpack_angular(body),p)
+        self.assertLessEqual(len(lora.compress(lora.pack_angular(ANGULAR_180))[0]),400)
+    def test_pack_angular_refuses_lossy(self):
+        self.assertIsNone(lora.pack_angular(angular_1_12([0.123]*180)))         # not on the 0.01 grid
+        self.assertIsNone(lora.pack_angular(angular_1_12([0.0]*179+[3.0])))     # range over 2.55
+        self.assertIsNone(lora.pack_angular(ANGULAR))                           # range over 2.55 (0..19.98)
+        last=json.dumps({'values':[0.1]*180,'q':1},separators=(',',':')).encode()
+        self.assertIsNone(lora.pack_angular(last))                              # values not the last key
+    def test_pack_angular_non_finite_falls_back(self):
+        # json.loads reads NaN/Infinity; a stray publisher on the Edge broker must not break the MQTT reader.
+        for bad in ('NaN','Infinity','-Infinity'):
+            p=angular_1_12([0.5]*180).replace(b'[0.5,',b'['+bad.encode()+b',',1)
+            self.assertIsNone(lora.pack_angular(p),bad)
+    def test_bridge_packs_live_and_diagnostic_angular(self):
+        import math,random
+        rnd=random.Random(7)
+        noisy=angular_1_12([round(0.6+0.7*math.exp(-(((2*k-137+180)%360-180)/14)**2)+rnd.uniform(0,.08),2)
+                            for k in range(180)])
+        offers=[]
+        class Stub:
+            def offer(self,tid,payload,**kw): offers.append((tid,payload,kw['packed']))
+        b=object.__new__(lora.Bridge)
+        b.prefix='sdr/v2/uav-01';b.role='edge';b.ignored=0;b.lock=threading.Lock();b.retained={};b.sender=Stub()
+        for suffix in ('telemetry/angular','telemetry/diagnostic/angular'):
+            offers.clear();b._from_mqtt(b.prefix+'/'+suffix,noisy,False)
+            (tid,body,packed),=offers
+            self.assertTrue(packed,suffix);self.assertEqual(body[0],lora.PACKED_V1,suffix)
+            self.assertEqual(lora.unpack_angular(body),noisy,suffix)
+            self.assertLess(len(lora.compress(body)[0]),len(lora.compress(noisy)[0]),suffix)
+        wide=angular_1_12([0.0]*179+[3.0])
+        for suffix,payload in (('telemetry/angular',wide),('telemetry/health',HEALTH)):
+            offers.clear();b._from_mqtt(b.prefix+'/'+suffix,payload,False)
+            self.assertEqual(offers,[(offers[0][0],payload,False)],suffix)
+    def test_bridge_sends_packed_angular_in_two_frames(self):
+        parts=lora.split_message(DATA,1,TOPIC_IDS['telemetry/angular'],lora.pack_angular(ANGULAR_180),packed=True)
+        self.assertLessEqual(len(parts),2)
+        self.assertTrue(all(p[3]&lora.F_PACKED for p in parts))
+    def test_receiver_unpacks_packed_angular(self):
+        s=Sender(100000,200,burst=10000);s.offer(TOPIC_IDS['telemetry/angular'],lora.pack_angular(ANGULAR_180),packed=True,now=1.0)
+        frames=s.next_frames(1.0);r=Receiver();out=[]
+        for f in frames: out+=r.feed(f)
+        self.assertEqual([(t,p) for t,p,_,_ in out],[(TOPIC_IDS['telemetry/angular'],ANGULAR_180)])
+    def test_unpacked_angular_still_passes_through(self):
+        s=Sender(100000,200,burst=10000);s.offer(TOPIC_IDS['telemetry/angular'],ANGULAR,now=1.0)
+        r=Receiver();out=[]
+        for f in s.next_frames(1.0): out+=r.feed(f)
+        self.assertEqual(out[0][1],ANGULAR)
 
 class TimeSyncTests(unittest.TestCase):
     def bridge(self,role,**kw):
@@ -342,7 +598,10 @@ class BridgeTests(unittest.TestCase):
         m1,s1=os.openpty();m2,s2=os.openpty()
         self.fds=[m1,s1,m2,s2];self.radio_on=threading.Event();self.radio_on.set();self.stop=threading.Event()
         self.addCleanup(self._close)
-        self.relay=[threading.Thread(target=self._relay,args=(a,b),daemon=True) for a,b in ((m1,m2),(m2,m1))]
+        # m1->m2 carries what the edge sends (up), m2->m1 what Ground sends (down); each can be cut alone.
+        self.up_on=threading.Event();self.up_on.set();self.down_on=threading.Event();self.down_on.set()
+        self.relay=[threading.Thread(target=self._relay,args=(a,b,on),daemon=True)
+                    for a,b,on in ((m1,m2,self.up_on),(m2,m1,self.down_on))]
         for t in self.relay: t.start()
         self.edge=self._bridge('edge',os.ttyname(s1),self.edge_broker,'tcp')
         self.ground=self._bridge('ground',os.ttyname(s2),self.ground_broker,'websocket')
@@ -354,7 +613,7 @@ class BridgeTests(unittest.TestCase):
         for fd in self.fds:
             try: os.close(fd)
             except OSError: pass
-    def _relay(self,src,dst,rate=1400):
+    def _relay(self,src,dst,on,rate=1400):
         # A half-duplex-ish radio: paced to ~1.4 KB/s, bytes dropped while the "link" is off.
         while not self.stop.is_set():
             try:
@@ -362,7 +621,7 @@ class BridgeTests(unittest.TestCase):
                 if not r: continue
                 data=os.read(src,256)
             except (OSError,ValueError): return
-            if not self.radio_on.is_set(): continue
+            if not (self.radio_on.is_set() and on.is_set()): continue
             time.sleep(len(data)/rate)
             try: os.write(dst,data)
             except OSError: return
@@ -393,6 +652,11 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual((st['payload'],st['retain']),(state,True))
         self.assertEqual(self.ground_broker.retained.get('sdr/v2/uav-01/state'),state)
         self.assertFalse(self.published(self.ground_broker,'telemetry/health')[-1]['retain'])
+    def test_packed_180_angular_arrives_byte_identical(self):
+        self.edge_pub.offer('a','sdr/v2/uav-01/telemetry/angular',ANGULAR_180)
+        self.assertTrue(wait(lambda:self.published(self.ground_broker,'telemetry/angular'),10),self.ground.status())
+        self.assertEqual(self.published(self.ground_broker,'telemetry/angular')[-1]['payload'],ANGULAR_180)
+        self.assertLessEqual(self.edge.sender.stats['sent_frames'],6)  # curve + a heartbeat or two
     def test_command_goes_down_once_and_ack_comes_back(self):
         cmd=b'{"v":2,"id":"c1","op":"config.get","expires_ms":9999999999999}'
         self.ground_pub.offer('c','sdr/v2/uav-01/cmd/config/get',cmd,qos=1)
@@ -404,6 +668,40 @@ class BridgeTests(unittest.TestCase):
         # The bridges never echo their own direction back.
         self.assertFalse(self.published(self.ground_broker,'cmd/config/get')[1:] )
         self.assertFalse(self.published(self.edge_broker,'ack/config')[1:])
+    def test_a_lost_command_is_resent_until_the_edge_confirms_it(self):
+        self.assertTrue(wait(lambda:self.ground.sender.peer_receipts and self.edge.sender.peer_receipts,5))
+        cmd=b'{"v":2,"id":"c2","op":"config.get","expires_ms":9999999999999}'
+        self.down_on.clear()  # Ground -> edge loses everything for a while: the first send is gone
+        self.ground_pub.offer('c','sdr/v2/uav-01/cmd/config/get',cmd,qos=1)
+        self.assertTrue(wait(lambda:self.ground.sender.stats['sent_messages']>=1,5))
+        time.sleep(1.5);self.down_on.set()
+        self.assertTrue(wait(lambda:self.published(self.edge_broker,'cmd/config/get'),8),self.ground.status())
+        self.assertTrue(wait(lambda:self.ground.sender.stats['confirmed']>=1,5),self.ground.status())
+        time.sleep(1.5)
+        self.assertEqual([m['payload'] for m in self.published(self.edge_broker,'cmd/config/get')],[cmd])
+        self.assertGreaterEqual(self.ground.sender.stats['resent'],1)
+        self.assertEqual(self.ground.sender.stats['unconfirmed'],0)
+        self.assertGreaterEqual(self.ground.status()['rx']['receipts'],1)
+        self.assertEqual((self.ground.sender.resend_s,self.edge.sender.resend_s),(lora.RESEND_GROUND_S,lora.RESEND_EDGE_S))
+        self.assertEqual(self.edge.status()['rx']['peer_restarts'],0)
+    def test_an_ack_is_confirmed_by_ground(self):
+        self.assertTrue(wait(lambda:self.edge.sender.peer_receipts,5))
+        self.edge_pub.offer('k','sdr/v2/uav-01/ack/operation',b'{"v":2,"id":"c3","status":"APPLIED"}',qos=1)
+        self.assertTrue(wait(lambda:self.published(self.ground_broker,'ack/operation'),5))
+        self.assertTrue(wait(lambda:self.edge.sender.stats['confirmed']>=1,5),self.edge.status())
+        time.sleep(2);self.assertEqual(len(self.published(self.ground_broker,'ack/operation')),1)
+    def test_a_lost_ack_is_resent_until_ground_confirms_it(self):
+        self.assertTrue(wait(lambda:self.edge.sender.peer_receipts,5))
+        self.up_on.clear()  # edge -> Ground loses everything for a while: the first ACK is gone
+        self.edge_pub.offer('k','sdr/v2/uav-01/ack/config',b'{"v":2,"id":"c4","status":"APPLIED"}',qos=1)
+        self.assertTrue(wait(lambda:self.edge.sender.stats['sent_messages']>=1,5))
+        time.sleep(2);self.up_on.set()
+        self.assertTrue(wait(lambda:self.published(self.ground_broker,'ack/config'),8),self.edge.status())
+        self.assertTrue(wait(lambda:self.edge.sender.stats['confirmed']>=1,8),self.edge.status())
+        time.sleep(2)
+        self.assertEqual(len(self.published(self.ground_broker,'ack/config')),1)
+        self.assertGreaterEqual(self.edge.sender.stats['resent'],1)
+        self.assertEqual(self.ground.status()['rx']['peer_restarts'],0)
     def test_link_loss_is_reported_and_retained_topics_are_resent(self):
         avail=b'{"v":2,"sid":"7a8b9c0d","contract":"1.6","online":true,"t":1}'
         self.edge_pub.offer('v','sdr/v2/uav-01/availability',avail,qos=1,retain=True)

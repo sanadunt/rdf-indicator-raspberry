@@ -1,4 +1,5 @@
 """JSON contract for Angular MQTT frames."""
+from .angular import upsample_pairs
 from .util import finite, integer, strict_json
 
 FLAG_PARSED=1
@@ -31,10 +32,14 @@ def decode(payload: bytes) -> dict:
     confidence=j.get('confidence_native_db')
     if confidence is not None: confidence=finite(confidence,-327.67,327.67)
     samples=j.get('values')
-    if not isinstance(samples,list) or len(samples)!=360:
+    # Contract 1.12: 180 points two degrees apart ("Seimbang") are rebuilt into 360 smooth values.
+    half=isinstance(samples,list) and len(samples)==180 and j.get('step_deg')==2
+    if not isinstance(samples,list) or (len(samples)!=360 and not half):
         raise ValueError('EXPECTED_360_SAMPLES')
     values=[finite(value,-1e8,1e8) for value in samples]
-    return dict(version=2,encoding='json',flags=flags,sid=sid,q=q,
+    extra={}
+    if half: values=upsample_pairs(values); extra['upsampled_from']=180
+    return dict(**extra,version=2,encoding='json',flags=flags,sid=sid,q=q,
                 timestamp_ms=timestamp,frequency_hz=frequency,revision=revision,
                 vfo=vfo,convention=convention,values=values,raw_doa_deg=raw_doa,
                 confidence_native_db=confidence,

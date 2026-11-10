@@ -29,23 +29,64 @@ Setiap frame: `header(9) | chunk | CRC-16 (2)`, lalu di-COBS-encode dan diakhiri
 | Byte | Isi |
 |---|---|
 | 0 | magic `0xA1` |
-| 1 | tipe: `1` DATA, `2` HEARTBEAT, `4` TIME (sinkron jam, lihat bawah); `3` dipakai frame TEST `lora-test` |
+| 1 | tipe: `1` DATA, `2` HEARTBEAT, `4` TIME (sinkron jam, lihat bawah), `5` RECEIPT (tanda terima, sejak 1.12.1); `3` dipakai frame TEST `lora-test` |
 | 2–3 | nomor urut frame pengirim (uint16 BE), naik 1 per frame yang benar-benar dikirim |
 | 4 | id pesan (uint8); fragmen satu pesan dan salinannya memakai id yang sama |
 | 5 | id topik (tabel di bawah) |
-| 6 | flag: bit0 retain, bit1 QoS 1, bit2 zlib, bit3 TURN (giliran bicara) |
+| 6 | flag: bit0 retain, bit1 QoS 1, bit2 zlib, bit3 TURN (giliran bicara), bit4 Angular terkemas (lihat bawah), bit5 minta tanda terima (sejak 1.12.1) |
 | 7 | indeks fragmen |
 | 8 | jumlah fragmen (1–255) |
 | … | potongan payload |
 | akhir | CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) atas header + potongan, big-endian |
+
+**Angular terkemas (bit4, sejak 1.12).** Untuk `telemetry/angular` dan `telemetry/diagnostic/angular`
+jembatan Edge mengganti `values` dengan satu byte per nilai: body = versi `1` (u8), nilai terkecil dalam
+perseratus (int32 BE), panjang JSON sebelum `,"values":[` (u16 BE), JSON itu, lalu `nilai×100 − terkecil`
+per byte. Jembatan Ground menyusun ulang JSON yang byte-identik. Hanya dipakai bila `values` key terakhir,
+semua nilai tepat di kelipatan 0.01, dan rentangnya ≤ 2.55; selain itu payload dikirim apa adanya. Kurva
+180 titik (Edge 1.12) jadi ~130–250 B di udara, 1–2 frame, dibanding ~860 B (5 frame) untuk 360 nilai JSON.
+Jembatan Ground lama tidak mengenal bit4, jadi **pasang jembatan Ground dulu**, baru jembatan Edge.
 
 Payload dikompres raw deflate (`wbits -15`, level 9) dengan kamus bersama `ZDICT` di
 `src/rdf_node/lora.py` bila hasilnya lebih kecil (flag zlib). Kamus itu bagian dari protokol: ubah hanya
 bersama versi protokol baru.
 
 HEARTBEAT (tiap 5 s dari kedua sisi) berisi `uptime_s` (u32), frame diterima (u32), error CRC (u16),
-frame hilang (u16), dan jam dinding pengirim dalam ms (u64). Dari situ tiap sisi tahu kualitas link
-arah sebaliknya dan selisih jam (`peer.clock_offset_ms`, termasuk latensi satu arah ~0.1 s).
+frame hilang (u16), dan jam dinding pengirim dalam ms (u64). Sejak 1.12.1 ada byte ke-21: bit fitur
+(bit0 = mengirim tanda terima). Jembatan lama hanya membaca 20 byte pertama. Dari heartbeat tiap sisi tahu
+kualitas link arah sebaliknya, selisih jam (`peer.clock_offset_ms`, termasuk latensi satu arah ~0.1 s), dan
+fitur lawan (`peer.features`).
+
+**Tanda terima (sejak 1.12.1).** Command (Ground→Edge, topik 64–74) dan ACK (Edge→Ground, `ack/config`,
+`ack/operation`) yang hilang dulu hanya terlihat sebagai "tidak ada ACK". Pada 2026-11-10, satu command
+hilang walau dikirim 3 kali, karena ketiga salinannya hilang. Cara kerjanya sekarang:
+
+- Pengirim memakai cara baru hanya bila heartbeat lawan memuat bit fitur. Pesan itu diberi flag bit5 dan
+  dikirim **sekali**.
+- Penerima membalas setiap pesan ber-bit5, juga setiap salinannya, dengan frame RECEIPT. Body-nya pasangan
+  byte (id pesan, id topik).
+- Tanpa tanda terima, pesan yang sama (id sama) dikirim lagi. Ground mengirim ulang tiap 0.9 s, yaitu di
+  giliran Edge berikutnya. Edge mengirim ulang ACK tiap 1.6 s, satu giliran penuh Ground.
+- Pengiriman ulang berhenti setelah 8 kali atau setelah umur topiknya habis (command 10 s, ACK 30 s).
+- Laporan settings (`settings/reported`, ~8 KB) tetap dikirim dua kali, karena terlalu besar untuk diulang.
+- Bila lawan belum mengumumkan fitur, cara lama tetap dipakai: command 3×, ACK 2×. Jembatan lama membuang
+  frame RECEIPT sebagai `bad_frames` dan tidak terganggu, jadi urutan pasang bebas.
+- Jam kirim ulang mulai saat fragmen terakhir pesan benar-benar keluar, bukan saat masuk antrean.
+  Tanda terima yang datang saat salinan masih antre ikut membuang salinan itu.
+- Tanda terima hanya dikirim setelah pesan utuh terbaca dan diteruskan ke broker lokal. Pesan yang gagal
+  dibaca, atau ditolak broker (MQTT putus), tidak dicatat sebagai sudah diterima, sehingga kiriman ulang
+  berikutnya masih bisa lewat.
+- `tx.resent` menghitung kirim ulang, `tx.confirmed` pesan yang dikonfirmasi, dan `tx.unconfirmed` pesan
+  yang menyerah. `rx.receipts` menghitung frame RECEIPT yang diterima.
+- Terukur 2026-11-10, sebelum fitur ini, dengan 10 perintah frekuensi/squelch: 1 perintah hilang walau
+  dikirim 3 kali, ACCEPTED 1.0–3.4 s. Dengan 1.12.1, 8 dari 8 perintah diterapkan, ACCEPTED 0.6–1.7 s.
+  Perintah dummy 34/36 dibalas, RTT p50 1.3 s (sebelumnya 2.3–2.7 s).
+  - Ground: 44 command, 42 dikonfirmasi, 23 kirim ulang.
+  - Edge: 58 ACK dikonfirmasi, 4 kirim ulang.
+  - Kedua command yang menyerah jatuh dalam satu putus link >10 s: Edge tidak menerima apa pun, link DOWN.
+- Heartbeat yang uptime-nya turun tetapi lebih besar dari waktu sejak heartbeat terakhir lawan (+3 s)
+  tidak dihitung restart, melainkan heartbeat basi. Jembatan Ground sebelum 1.12.1 bisa mengirim dua
+  heartbeat terbalik.
 
 Id pesan memakai satu penghitung untuk semua topik dan mulai dari nilai acak setiap jembatan start.
 Penerima membuang pesan dengan (id, topik, jumlah fragmen) yang sudah utuh dalam 30 s terakhir (salinan).
@@ -62,9 +103,9 @@ pertama setelah restart hilang, id awal yang acak yang mencegah sebagian besar b
 | 1 | `telemetry/health` | Edge→Ground | 2 | 6 s | terbaru menang, min. tiap 2 s (`--health-every`) |
 | 2 | `telemetry/health/detail` | Edge→Ground | 4 | 15 s | terbaru menang, min. tiap 30 s |
 | 3 | `telemetry/doa` | Edge→Ground | 1 | 3 s | terbaru menang, **dikirim 2×** (prioritas data tertinggi) |
-| 4 | `telemetry/angular` | Edge→Ground | 5 | 8 s | terbaru menang, min. tiap 20 s |
+| 4 | `telemetry/angular` | Edge→Ground | 5 | 8 s | terbaru menang, min. tiap 1.5 s (`--angular-every`), terkemas |
 | 5 | `telemetry/diagnostic/doa` | Edge→Ground | 2 | 3 s | terbaru menang |
-| 6 | `telemetry/diagnostic/angular` | Edge→Ground | 5 | 8 s | terbaru menang, min. tiap 20 s |
+| 6 | `telemetry/diagnostic/angular` | Edge→Ground | 5 | 8 s | terbaru menang, min. tiap 1.5 s (`--angular-every`), terkemas |
 | 7 | `state` | Edge→Ground | 0 | – | retained, terbaru menang |
 | 8 | `capabilities` | Edge→Ground | 3 | – | retained, terbaru menang |
 | 9 | `availability` | Edge→Ground | 0 | – | retained, terbaru menang |
@@ -89,10 +130,14 @@ ACK 20 s kemudian; tiga kali kirim menurunkan kehilangan command satu frame dari
 
 Radio LoRa tidak bisa kirim dan terima bersamaan. Kira-kira sekali per detik Edge menandai satu frame
 dengan flag `TURN` (bit3), lalu diam `0.45 s`. Jeda itu dihitung dari perkiraan saat frame `TURN` dan
-semua frame yang ditulis ke modul sebelumnya selesai di udara (~0.5 ms/byte), bukan dari saat ditulis.
+semua frame yang ditulis ke modul sebelumnya selesai di udara (0.8 ms/byte, laju frame beruntun;
+0.5 ms/byte dari frame tunggal terlalu optimis), bukan dari saat ditulis.
 Ground hanya memancar dalam `0.08 s` setelah menerima frame `TURN` (maks. 250 B per giliran), atau bebas
-bila Edge diam lebih dari 3 s. Frame TIME diberi timestamp saat benar-benar dikirim, jadi menunggu giliran
-tidak merusak ukuran jam. Terukur dengan DoA dan Angular berjalan (1.10.1): hilang ~4% Edge→Ground dan
+bila Edge diam lebih dari 3 s. Sejak 1.12.1, bila frame kontrol yang menunggu (heartbeat, TIME, tanda
+terima) sudah memakai awal giliran, satu pesan berikutnya ikut di giliran yang sama selama muat.
+Sebelumnya pesan itu menunggu satu giliran penuh. Frame TIME diberi timestamp saat benar-benar dikirim, jadi menunggu giliran
+tidak merusak ukuran jam. Dengan kurva Angular tiap ~4.5 s dan perkiraan 0.5 ms/byte, ~92% frame
+Ground→Edge hilang; dengan 0.8 ms/byte ~3% (2026-11-10). Terukur dengan DoA dan Angular berjalan (1.10.1): hilang ~4% Edge→Ground dan
 ~13% Ground→Edge (sebelumnya, dengan jeda 0.3 s dari saat tulis, ~62% Ground→Edge).
 
 ## Status jembatan
@@ -103,9 +148,10 @@ Setiap sisi mempublish status retained ke broker lokalnya: `sdr/v2/<node>/lora/e
 ```json
 {"v":1,"role":"ground","t":1793500000000,"link":"UP","last_rx_ms":420,"port":"OPEN","port_error":null,
  "mqtt":"CONNECTED","rx":{"frames":812,"crc_errors":1,"bad_frames":0,"lost_frames":3,"messages":640,
- "duplicates":12,"incomplete":0,"heartbeats":160,"peer_restarts":0},"tx":{"queued":20,"superseded":0,"expired":0,
- "sent_messages":20,"sent_frames":200,"sent_bytes":2400,"too_large":0},"queue":0,
- "peer":{"uptime_s":812,"rx_frames":198,"crc_errors":0,"lost_frames":2,"clock_offset_ms":-35},
+ "duplicates":12,"incomplete":0,"heartbeats":160,"peer_restarts":0,"receipts":4},"tx":{"queued":20,"superseded":0,
+ "expired":0,"sent_messages":20,"sent_frames":200,"sent_bytes":2400,"too_large":0,"resent":1,"confirmed":4,
+ "unconfirmed":0},"queue":0,
+ "peer":{"uptime_s":812,"rx_frames":198,"crc_errors":0,"lost_frames":2,"clock_offset_ms":-35,"features":1},
  "mqtt_dropped":0,"ignored":0,"link_changes":1}
 ```
 
@@ -115,9 +161,47 @@ Ground melihat link putus dari topik ini dan dari health yang berhenti.
 ## Anggaran
 
 Dengan kompresi: `health` lengkap (kompas + GPS) 232 B JSON → 126 B di udara; kurva Angular 2078 B →
-861 B (5 frame). Perkiraan rata-rata: health ~130 B/s, DoA ~100 B/s, diagnostic DoA ~40 B/s, detail
-~8 B/s, Angular ~45 B/s → sekitar 320 B/s dari 1000 B/s. Arah Ground→Edge hanya command dan heartbeat,
-supaya tabrakan half-duplex tetap jarang.
+861 B (5 frame). Perkiraan rata-rata: health ~65 B/s (tiap 2 s), DoA ~100 B/s, diagnostic DoA ~40 B/s,
+detail ~8 B/s, Angular ~215 B/s (tiap 4 s) → sekitar 450 B/s dari 1000 B/s. Arah Ground→Edge hanya
+command dan heartbeat, supaya tabrakan half-duplex tetap jarang.
+
+Jembatan meneruskan tiap kurva Angular yang dibuat Edge (`--angular-every` 1.5 s, di bawah `angular_s`
+2 s profil `graph_u8` dan 4 s `balanced`, supaya kurva yang datang sedikit lebih awal tidak tertahan). Edge
+sendiri menjarakkan kurva `max(angular_s, ukuran JSON kurva / telemetry.bulk_budget_bytes_s)`: kurva 180
+titik ~1.1 KB JSON, jadi kurva tiap 2 s butuh `bulk_budget_bytes_s` ≥ ~650 (pakai 1000).
+
+`control_budget_bytes_s` juga harus 1250 (batas atas). Edge menganggap DoA + health sudah memakai ~800 B/s
+Control. Selama kurva ditahan, kurva diagnostik (~1.1–1.4 KB) ikut lewat Control. Dengan 1000, antrean
+Control sering melewati 3 s (`CONTROL_BACKLOG`). Jeda 20 s (`resume_stable_seconds`) lalu terus diulang,
+sehingga kurva hanya jalan ~28 s dari 170 s. Dengan 1250, `CONTROL_BACKLOG` tidak muncul dalam 3 menit
+(antrean paling lama 2.8 s). Yang tersisa hanya `SOURCE_NOT_ELIGIBLE` sesaat bila sinyal dekat squelch.
+
+### Terukur 2026-11-10: kurva 180 terkemas, 2 s vs 4 s
+
+Edge 1.12.0, kedua jembatan 1.12, console 3.21.0, Control 1250 / Bulk 1000. Setiap uji berlangsung 180 s.
+Selama uji, Ground mengirim `operation.get` dummy tiap 5 s (`tools/lora_bench/`). Sinyal −80 dB, sekitar
+5 dB di atas squelch.
+
+| | 2 s (`graph_u8`) #1 | 2 s #2 | 4 s (`balanced`) |
+|---|---|---|---|
+| Kurva sampai di Ground | 70 | 56 (termasuk jeda ganti profil 29 s) | 33 |
+| Jarak kurva: median / terlama | 2.1 s / 6.7 s | 2.1 s / 8.7 s | 4.1 s / 20.3 s |
+| Kurva `PEAK_MOVED` | 50% | 52% | 33% |
+| Edge → udara | 564 B/s, 4.4 frame/s | 553 B/s | 487 B/s |
+| Frame Edge→Ground hilang | 7.8% | 9.2% | 6.9% |
+| Frame Ground→Edge hilang | 7.8% | 16.5% | 19.5% |
+| ACK command dummy | 35/36, RTT p50 2.7 s / maks 7.0 s | 32/36, 2.3 / 7.5 s | 28/36, 2.3 / 5.9 s |
+
+Pembanding (1.11, kurva 360, jembatan 3.5 s, 2 menit): kurva tiap ~4.5 s, Edge 413 B/s, Ground→Edge 3%.
+
+Baris `PEAK_MOVED` terutama mengukur goyangan DoA di sinyal 5 dB di atas squelch. Angka itu tidak mengukur
+galat upsampling. Ground menilai frame kurva yang lebih lama terhadap DoA yang lebih baru. Belum ada
+pembanding 360 titik pada sinyal yang sama. Pada kurva sintetis (lobus Gaussian lebar 5–60°), upsampling
+180→360 tidak menambah satu pun `PEAK_MOVED`.
+
+2 s mengirim kurva dua kali lebih sering dan hanya menambah ~70 B/s di udara. ACK command tidak memburuk:
+kedua uji 2 s lebih baik daripada uji 4 s. Selisih kehilangan Ground→Edge antar-uji lebih dipengaruhi
+kondisi radio, karena pagi harinya Ground→Edge hilang ~3% di jarak yang sama. Pakai `graph_u8`.
 
 ## Pemasangan
 

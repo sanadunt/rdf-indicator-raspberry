@@ -1,5 +1,67 @@
 # Changelog
 
+## 1.12.2 - Unreleased
+
+Contract `1.12` (unchanged).
+
+- A config.patch that takes the restart path (a gain change, a large jump, or a failed live retune) never
+  leaves the SDR engine stopped because the helper refused the write.
+  - The center now always goes with its VFO0, even when that VFO0 is what the file already has. Moving the
+    center onto the old VFO0 together with a gain change used to fail with
+    `CENTER_CHANGE_REQUIRES_VFO0_TARGET` after the engine had been stopped.
+  - Any refusal after the stop (a gain outside the approved table, a frequency outside the helper's range)
+    now starts the engine again on its old settings. The result is `FAILED` with the helper's code,
+    `persisted: false` and `engine: RESTARTED`, or `OUTCOME_UNKNOWN` with
+    `engine: NOT_HEALTHY_AFTER_RESTART` when that start does not come back healthy.
+- `ERROR_MESSAGES` lost four duplicate codes whose first text was never used; the texts sent stay the same.
+
+## 1.12.1 - Unreleased
+
+Contract `1.12` (unchanged). Changes to the LoRa bridge only.
+
+- Receipts for commands and ACKs. The heartbeat gains a feature byte, bit0 = "sends receipts". When the
+  other bridge sets it:
+  - Commands (Ground→Edge) and `ack/config` / `ack/operation` (Edge→Ground) carry flag bit5 and go once.
+  - The receiver answers every such message, and every copy of one, with a RECEIPT frame (type 5).
+  - The sender repeats the same message every 0.9 s (Ground) or 1.6 s (Edge) until its receipt arrives:
+    at most 8 sends, and never past the topic's age.
+  - A bridge without the feature still gets the old 3 / 2 copies.
+
+  On 2026-11-10 one retune command was lost although all three copies were sent.
+- Status `tx.resent`, `tx.confirmed`, `tx.unconfirmed`, `rx.receipts`, `peer.features`.
+- The resend clock starts when a message's last fragment really leaves, and a receipt also drops a resend
+  still queued.
+- A message is receipted only after it decodes and the local broker takes it. A failed decode or an MQTT
+  drop is not recorded as delivered, so a resend still gets through.
+- A Ground window that starts with queued control frames (heartbeat, TIME, receipts) now also carries one
+  message while it fits, instead of leaving it for the next turn.
+- The receiver treats a lower uptime that is older than the time since the peer's last heartbeat (+3 s)
+  as a stale heartbeat, not a restart. This covers Ground bridges before 1.12.1.
+- One queued heartbeat at most. Before, two heartbeats queued while Ground waited for a turn left newest
+  first; the older uptime read as a peer restart, the receiver forgot what it had delivered, and the next
+  copy of a command was delivered twice.
+- `pack_angular` returns `None` (plain JSON) for NaN/Infinity instead of raising inside the MQTT reader.
+
+## 1.12.0 - Unreleased
+
+Contract `1.12` (Angular may carry 180 points).
+
+- Angular "Seimbang": with `telemetry.angular_points: 180` (the new default) `telemetry/angular` and
+  `telemetry/diagnostic/angular` carry 180 points, each the mean of two neighbouring degrees rounded to 0.01,
+  with `step_deg: 2` just before `values`. `angular_points: 360` keeps the 1.11 payload byte for byte.
+  Capabilities `count` follows the setting and gain `angular_step_deg`. The local panel still reads 360.
+- `rdf_node.angular.upsample_pairs` rebuilds 360 smooth values (periodic PCHIP, no overshoot); the Ground
+  companion's decoder uses it, so it accepts both shapes.
+- `telemetry.bulk_budget_bytes_s` may go up to 2000 and Control + Bulk up to 3000 B/s: the 1500 B/s cap was
+  the T900 link's; MQTT is now local and the LoRa bridge paces the radio. A curve every 2 s needs ~1000.
+  Keep `control_budget_bytes_s` at 1250 on LoRa. At 1000 the diagnostic curve waits too long in the
+  Control queue, `CONTROL_BACKLOG` keeps restarting the 20 s resume, and live curves stall.
+- LoRa bridge: frame flag bit 4 (`F_PACKED`) carries topics 4 and 6 as a lossless binary body, with the
+  JSON header and one byte per value. It is used only when it rebuilds the JSON byte for byte; otherwise
+  the curve goes as plain JSON. `--angular-every` default 3.5 → 1.5 s. A bridge before 1.12 forwards a
+  packed body unread, so install the Ground bridge first, then the Edge bridge, then Ground console
+  3.21.0, then this Edge (`docs/LORA_SERIAL.md`).
+
 ## 1.11.0 - Unreleased
 
 Contract `1.11` (two optional `telemetry/health` fields).
@@ -20,6 +82,12 @@ Contract `1.11` (two optional `telemetry/health` fields).
 - Panel: without a fresh sample (`NO_RECORD`, `NO_FRESH_DOA`, `EMPTY_CSV`, `DOA_FILE_NOT_UPDATING`) the line
   under the frequency reads `Puncak … dB / SQ … dB` instead of the last sample's PAPR/P. A fresh sample held
   back only by approval keeps its PAPR/P.
+- LoRa bridge (edge): every Angular curve Edge publishes now goes over the link (`--angular-every` 3.5 s instead
+  of 20 s), so Ground gets a curve about every 4.5 s with `telemetry.bulk_budget_bytes_s` 500 (every ~9 s at 250).
+- LoRa bridge (edge): air time is estimated at 0.8 ms/byte instead of 0.5. Back to back the radio moves only
+  ~1.2-1.5 KB/s, so after a 5-frame curve the edge came back inside Ground's reply: with curves every 4.5 s the
+  edge lost ~92% of Ground's frames and showed the link DOWN. Measured after the change on the Pi and
+  groundstation: Ground to Edge ~3%, Edge to Ground ~5% at ~410 B/s.
 
 ## 1.10.2 - Unreleased
 

@@ -496,8 +496,9 @@ Ground memprosesnya.
 
 ### `telemetry/angular` (JSON)
 
-Setiap PUBLISH berisi satu object JSON dengan metadata dan seluruh 360 sampel. Tidak ada
-envelope chunk; `values` memakai index source dan tidak diquantize.
+Setiap PUBLISH berisi satu object JSON dengan metadata dan 360 sampel, atau sejak contract 1.12
+(`telemetry.angular_points: 180`, default) 180 titik rata-rata dua derajat dengan `step_deg: 2`.
+Tidak ada envelope chunk; `values` memakai index source.
 
 | Field | Format dan batas |
 |---|---|
@@ -507,7 +508,8 @@ envelope chunk; `values` memakai index source dan tidak diquantize.
 | `revision`, `vfo`, `convention` | `revision`: `null` atau integer `0..0xfffffffe`; `vfo`: `0..15`; `convention`: `0` atau `1`. |
 | `flags` | Integer `0..63`; bitmask bukti parse, freshness/clock, DAQ, convention, config, authority. |
 | `raw_doa_deg`, `confidence_native_db` | Keduanya dapat `null`; bila ada, finite dengan batas `0..360` dan `-327.67..327.67` dB. |
-| `values` | JSON array tepat 360 angka finite dalam rentang `-1e8..1e8`, urutan index native. |
+| `values` | JSON array 360 angka finite (atau 180 bila `step_deg` 2) dalam rentang `-1e8..1e8`, urutan index native; selalu key terakhir. |
+| `step_deg` | Contract 1.12: `2` bila `values` berisi 180 titik (titik `k` = rata-rata index `2k`,`2k+1`, dibulatkan 0.01). |
 
 Ground menerima satu payload bytes dan langsung memvalidasinya:
 

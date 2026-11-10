@@ -49,6 +49,7 @@ telemetry:
   resume_stable_seconds: 20
   control_budget_bytes_s: 850
   bulk_budget_bytes_s: 350
+  angular_points: 180      # 180 (rata-rata tiap 2 derajat, "Seimbang") atau 360
 freshness:
   source_status_ms: 3000
   doa_ms: 2500

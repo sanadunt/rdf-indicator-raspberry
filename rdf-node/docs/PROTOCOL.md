@@ -214,11 +214,16 @@ command masuk yang dibuang sebelum diproses (lihat [Command envelope](#command-e
 menerima field yang tidak ada dari Edge lama. Lihat
 [MQTT_TOPIC_SUMMARY.md](MQTT_TOPIC_SUMMARY.md#telemetryhealthdetail).
 
-## Grafik lengkap 360 titik
+## Grafik Angular (360 nilai atau 180 titik)
 
 `telemetry/angular` dan `telemetry/diagnostic/angular` masing-masing membawa satu object JSON
-compact per MQTT message. `values` berisi semua 360 sampel dalam urutan index native. Edge tidak
-memecah frame menjadi chunk dan tidak mengkuantisasi sampel menjadi Q16 atau U8.
+compact per MQTT message. Dengan `telemetry.angular_points: 360`, `values` berisi semua 360 sampel
+dalam urutan index native. Sejak contract 1.12 default-nya `180` ("Seimbang"): `values` berisi 180
+titik, titik `k` = rata-rata index `2k` dan `2k+1` dibulatkan 0.01, dan field `step_deg: 2` berada
+tepat sebelum `values` (`values` selalu key terakhir). Consumer yang butuh 360 nilai membangunnya
+kembali dengan PCHIP periodik (titik `k` di index `2k+0.5`), seperti `rdf_node.angular.upsample_pairs`.
+Edge tidak memecah frame menjadi chunk; di jalur LoRa bridge mengemas `values` biner tanpa kehilangan
+data (lihat [LORA_SERIAL.md](LORA_SERIAL.md)).
 
 | Field | Bentuk |
 |---|---|
@@ -229,7 +234,8 @@ memecah frame menjadi chunk dan tidak mengkuantisasi sampel menjadi Q16 atau U8.
 | `vfo`, `convention` | VFO `0..15`; convention `0` atau `1`. Index native tetap dipakai, tidak otomatis menjadi true north. |
 | `flags` | Bitmask bukti `0..63`, didefinisikan di bawah. |
 | `raw_doa_deg`, `confidence_native_db` | Nilai metadata native; keduanya dapat `null`. |
-| `values` | Tepat 360 angka JSON finite, tanpa kuantisasi, dalam batas decoder `-1e8..1e8`. |
+| `values` | 360 angka JSON finite (atau 180 bila `step_deg` 2), dalam batas decoder `-1e8..1e8`. |
+| `step_deg` | Contract 1.12, hanya bila 180 titik: `2`. |
 
 Contoh decode:
 

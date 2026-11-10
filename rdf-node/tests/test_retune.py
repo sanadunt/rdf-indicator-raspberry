@@ -10,13 +10,15 @@ from rdf_node.journal import Journal
 from rdf_node.util import now_ms
 
 class FakeEngine:
-    def __init__(self,*,running=True,live='keep',start_healthy=True):
+    def __init__(self,*,running=True,live='keep',start_healthy=True,strict=False):
         self.lock=threading.Lock(); self.running=running; self.healthy=running; self.live=live
         self.start_healthy=start_healthy; self.digest=1; self.status_ts=now_ms()
         self.safe={'center_frequency_hz':105900000,'vfo0_frequency_hz':105900000,'gain_db':12.5,
                    'vfo0_bandwidth_hz':12500,'vfo0_squelch_db':-100.0,'ant_spacing_m':0.3,
                    'ant_arrangement':'UCA','vfo0_squelch_mode':'Manual','vfo_default_squelch_mode':'Auto'}
         self.calls=[]; self.writes_while_running=0; self.revision=1
+        # strict: the helper's own checks (policy table, center == VFO0 in one write) refuse before writing.
+        self.strict=strict
     # ---- what CommandManager reads ----
     @property
     def raw_digest(self):
@@ -37,6 +39,13 @@ class FakeEngine:
         self.calls.append((r['op'],r.get('desired'),dict(r.get('changes') or {})))
         if r['op']=='config.patch':
             assert r['expected_digest']==self.raw_digest,'stale digest'
+            if self.strict:
+                from rdf_node.helper import DEFAULT_POLICY,HelperError,validate_changes
+                ch=validate_changes(r['changes'],DEFAULT_POLICY)
+                if 'center_frequency_hz' in ch and 'vfo0_frequency_hz' not in ch:
+                    raise HelperError('CENTER_CHANGE_REQUIRES_VFO0_TARGET')
+                if 'center_frequency_hz' in ch and ch['center_frequency_hz']!=ch['vfo0_frequency_hz']:
+                    raise HelperError('MVP_CENTER_MUST_EQUAL_VFO0')
             with self.lock:
                 self.safe.update(r['changes']); self.digest+=1; self.revision+=1
                 running=self.running
@@ -218,6 +227,40 @@ class RetuneTests(unittest.TestCase):
         stage,result,_,_=self.run_patch(e,{'gain_db':7.7})
         self.assertEqual((stage,result['error']),('OUTCOME_UNKNOWN','DAQ_NOT_HEALTHY_AFTER_RESTART'))
         self.assertTrue(result['persisted'])
+
+    # A refused write must never leave the engine stopped (found 2026-11-10 in a read-only audit).
+    def offset_engine(self,**kw):
+        e=FakeEngine(strict=True,**kw)
+        e.safe.update(center_frequency_hz=400000000,vfo0_frequency_hz=399999712,ant_spacing_m=0.128)
+        return e
+    def test_restart_onto_the_old_vfo_also_writes_the_vfo(self):
+        # Center moves onto the VFO0 it already had, with a gain change: VFO0 equals the file, but the helper
+        # needs it in the same write as the center.
+        e=self.offset_engine()
+        stage,result,_,_=self.run_patch(e,{'center_frequency_hz':399999712,'vfo0_frequency_hz':399999712,'gain_db':15.7})
+        self.assertEqual((stage,result['method'],result['reason']),('APPLIED','RESTART','GAIN_CHANGE'))
+        self.assertEqual((e.safe['center_frequency_hz'],e.safe['vfo0_frequency_hz'],e.safe['gain_db']),(399999712,399999712,15.7))
+        self.assertEqual(self.lifecycle(e),['STOPPED','RUNNING'])
+    def test_a_write_the_helper_refuses_after_the_stop_starts_the_engine_again(self):
+        e=self.offset_engine()
+        stage,result,_,_=self.run_patch(e,{'gain_db':13.0})  # not in the approved gain table
+        self.assertEqual((stage,result['error'],result['persisted']),('FAILED','GAIN_NOT_IN_APPROVED_TABLE',False))
+        self.assertEqual(result['engine'],'RESTARTED')
+        self.assertEqual(self.lifecycle(e),['STOPPED','RUNNING'])
+        self.assertTrue(e.running);self.assertEqual(e.safe['gain_db'],12.5)
+    def test_a_refused_write_whose_restart_fails_is_outcome_unknown(self):
+        e=self.offset_engine(start_healthy=False)
+        stage,result,_,_=self.run_patch(e,{'gain_db':13.0})
+        self.assertEqual((stage,result['error'],result['engine']),('OUTCOME_UNKNOWN','GAIN_NOT_IN_APPROVED_TABLE','NOT_HEALTHY_AFTER_RESTART'))
+        self.assertFalse(result['persisted'])
+    def test_error_messages_have_no_duplicate_codes(self):
+        import ast,inspect
+        from rdf_node import control
+        tree=ast.parse(inspect.getsource(control))
+        for node in ast.walk(tree):
+            if isinstance(node,ast.Assign) and any(getattr(t,'id',None)=='ERROR_MESSAGES' for t in node.targets):
+                keys=[k.value for k in node.value.keys]
+                self.assertEqual(sorted({k for k in keys if keys.count(k)>1}),[])
 
 class RfStatePayloadTests(unittest.TestCase):
     """state.rf and health/detail.ovr (contract 1.7): Ground's frequency/gain/overdrive without Data Out."""

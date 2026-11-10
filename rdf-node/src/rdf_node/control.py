@@ -51,10 +51,6 @@ ERROR_MESSAGES={
     'INTERNAL_ERROR':'Error internal di agent Edge; lihat detail.',
     'INVALID_COMMAND_FIELD':'Ada field perintah yang tipe atau nilainya tidak valid.',
     'SPACING_SET_BY_ENGINE_BAND':'Di band ini KrakenSDR sendiri memasang jarak UCA (VHF 0,3 m, UHF 0,128 m); jarak lain tidak akan dipakai. Tidak ada yang ditulis.',
-    'NUMBER_OUT_OF_RANGE':'Nilai di luar rentang yang diizinkan; tidak ada yang ditulis.',
-    'CENTER_CHANGE_REQUIRES_VFO0_TARGET':'Frekuensi center harus dikirim bersama frekuensi VFO0.',
-    'MVP_CENTER_MUST_EQUAL_VFO0':'Frekuensi center dan VFO0 harus sama.',
-    'INTEGER_OUT_OF_RANGE':'Nilai bilangan bulat di luar rentang yang diizinkan.',
     'SQUELCH_MODE_INVALID':'Mode squelch harus Manual, Auto, Auto Channel, atau Default.',
     'JOURNAL_UNAVAILABLE':'Journal perintah di Edge tidak bisa ditulis; perintah tidak dijalankan.',
     'COMMAND_TOO_LARGE':'Perintah lebih besar dari 4.096 byte dan tidak diproses.',
@@ -489,7 +485,16 @@ class CommandManager:
             return 'OUTCOME_UNKNOWN',{'method':'RESTART','reason':reason,'error':'ENGINE_DID_NOT_STOP','persisted':False}
         safe=a.source.safe
         missing={k:v for k,v in intended.items() if safe.get(k)!=v}
-        if missing: self._write_settings(actor,missing)
+        # The helper takes a center only together with its VFO0, even when that VFO0 is what the file has
+        # (a center moved onto the old VFO0): leaving it out had the write refused with the engine stopped.
+        if 'center_frequency_hz' in missing and 'vfo0_frequency_hz' in intended:
+            missing['vfo0_frequency_hz']=intended['vfo0_frequency_hz']
+        if missing:
+            try: self._write_settings(actor,missing)
+            except Exception as error:
+                # The engine is stopped and nothing new was written (or it is unknown): never leave it
+                # stopped because of a refused write; start it again on the settings it had.
+                return self._restart_after_refused_write(actor,reason,error)
         progress('VERIFYING',{'method':'RESTART','reason':reason,'persisted':True})
         if not self._lifecycle(actor,'RUNNING',c['start_timeout_seconds']):
             return 'OUTCOME_UNKNOWN',{'method':'RESTART','reason':reason,'persisted':True,
@@ -503,6 +508,16 @@ class CommandManager:
         a.config_proof='runtime'
         return 'APPLIED',{'method':'RESTART','reason':reason,'persisted':True,'revision':a.source.revision,
                           'proof':{'daq':'FRESH_HEALTHY_AFTER_RESTART','settings':'INTACT_AFTER_START'}}
+    def _restart_after_refused_write(self,actor,reason,error):
+        stage,code=classify_failure(error)
+        result={**error_result(code,error),'method':'RESTART','reason':reason,'persisted':False if stage=='FAILED' else None}
+        if result['persisted'] is None: del result['persisted']
+        try: started=self._lifecycle(actor,'RUNNING',self.cfg['control']['start_timeout_seconds'])
+        except Exception: started=None
+        if started:
+            result['engine']='RESTARTED'; return stage,result
+        result['engine']='NOT_HEALTHY_AFTER_RESTART' if started is False else 'START_REQUEST_FAILED'
+        return 'OUTCOME_UNKNOWN',result
     @staticmethod
     def _band_spacing(safe,center_hz):
         """The UCA radius rdfsdr sets itself on every retune and at start, or None where it keeps the file's.
