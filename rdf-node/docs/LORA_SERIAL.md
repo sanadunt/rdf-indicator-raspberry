@@ -78,6 +78,12 @@ hilang walau dikirim 3 kali, karena ketiga salinannya hilang. Cara kerjanya seka
   berikutnya masih bisa lewat.
 - `tx.resent` menghitung kirim ulang, `tx.confirmed` pesan yang dikonfirmasi, dan `tx.unconfirmed` pesan
   yang menyerah. `rx.receipts` menghitung frame RECEIPT yang diterima.
+- Terukur 2026-11-10, sebelum fitur ini, dengan 10 perintah frekuensi/squelch: 1 perintah hilang walau
+  dikirim 3 kali, ACCEPTED 1.0–3.4 s. Dengan 1.12.1, 8 dari 8 perintah diterapkan, ACCEPTED 0.6–1.7 s.
+  Perintah dummy 34/36 dibalas, RTT p50 1.3 s (sebelumnya 2.3–2.7 s).
+  - Ground: 44 command, 42 dikonfirmasi, 23 kirim ulang.
+  - Edge: 58 ACK dikonfirmasi, 4 kirim ulang.
+  - Kedua command yang menyerah jatuh dalam satu putus link >10 s: Edge tidak menerima apa pun, link DOWN.
 - Heartbeat yang uptime-nya turun tetapi lebih besar dari waktu sejak heartbeat terakhir lawan (+3 s)
   tidak dihitung restart, melainkan heartbeat basi. Jembatan Ground sebelum 1.12.1 bisa mengirim dua
   heartbeat terbalik.
