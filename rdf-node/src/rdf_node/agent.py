@@ -9,6 +9,7 @@ import uuid
 from collections import deque
 from pathlib import Path
 from . import __version__, CONTRACT
+from .angular import average_pairs
 from .util import now_ms, compact, strict_json, read_boot_id, atomic_write, stable_read
 from .config import PROFILES
 from .journal import Journal
@@ -626,7 +627,8 @@ class Agent:
         lifecycle_target=self.helper_status.get('lifecycle_target_available') is True
         return {'v':2,'sid':self.sid,'boot':self.boot,'instance':self.instance,'version':__version__,'contract':CONTRACT,
                 'mode':'DEMO' if self.demo else self.cfg['runtime_mode'],'codecs':['json'],
-                'angle':self.cfg['source']['angle_mode'],'native_axis':1,'count':360,
+                'angle':self.cfg['source']['angle_mode'],'native_axis':1,'count':self.cfg['telemetry']['angular_points'],
+                'angular_step_deg':360//self.cfg['telemetry']['angular_points'],
                 'profiles':list(PROFILES),'scope':'SDR_STACK','helper_available':helper_available,
                 'remote_commands':remote,
                 # Sensors this node reads for telemetry/nav; position is sent only when publish_position is on.
@@ -880,7 +882,12 @@ class Agent:
             'timestamp_ms':r['timestamp_ms'],'frequency_hz':r['frequency_hz'],
             'revision':d['revision'],'vfo':self.cfg['source']['output_vfo'],
             'convention':1,'flags':self._angular_flags(d,r,h,daq),'raw_doa_deg':r['raw_doa_deg'],
-            'confidence_native_db':r['confidence_native_db'],**self._nav_angular_fields(),'values':r['values']})
+            'confidence_native_db':r['confidence_native_db'],**self._nav_angular_fields(),**self._angular_values(r)})
+    def _angular_values(self,r):
+        # Contract 1.12: "Seimbang" sends 180 points, each the mean of two degrees; values stay the last key.
+        if self.cfg['telemetry']['angular_points']==180:
+            return {'step_deg':2,'values':average_pairs(r['values'])}
+        return {'values':r['values']}
     def _diagnostic_angular(self,d,r,h,daq):
         self.diagnostic_angular_q+=1
         if self.diagnostic_angular_q>0xffffffff:
@@ -890,7 +897,7 @@ class Agent:
             'revision':d['revision'] if d['config_attributed'] else None,
             'vfo':self.cfg['source']['output_vfo'],'convention':1,'flags':self._angular_flags(d,r,h,daq),
             'raw_doa_deg':r['raw_doa_deg'],'confidence_native_db':r['confidence_native_db'],
-            **self._nav_angular_fields(),'values':r['values']})
+            **self._nav_angular_fields(),**self._angular_values(r)})
     def _schedule(self):
         due={}
         while not self.stop_event.is_set():

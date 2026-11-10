@@ -55,7 +55,11 @@
       "const": 1
     },
     "count": {
-      "const": 360
+      "enum": [
+        180,
+        360
+      ],
+      "description": "Jumlah nilai Angular per frame (contract 1.12: 180 bila Seimbang)."
     },
     "profiles": {
       "type": "array",
@@ -119,6 +123,12 @@
         "type": "string"
       },
       "description": "Field yang diterima config.patch (sejak kontrak 1.8). Ground hanya mengirim field yang ada di sini."
+    },
+    "angular_step_deg": {
+      "enum": [
+        1,
+        2
+      ]
     }
   },
   "required": [

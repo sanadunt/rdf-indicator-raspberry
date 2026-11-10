@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/sanadunt/rdf-indicator-raspberry/rdf-node/contract/schema/telemetry.angular.json",
   "title": "telemetry/angular",
-  "description": "Frame 360 nilai lewat Bulk. LIVE hanya bila flags=63. Field tambahan boleh ada dan harus diabaikan consumer.",
+  "description": "Frame 360 nilai (atau 180 titik, step_deg 2) lewat Bulk. LIVE hanya bila flags=63. Field tambahan boleh ada dan harus diabaikan consumer.",
   "x-topic": "telemetry/angular",
   "type": "object",
   "properties": {
@@ -71,8 +71,9 @@
         "minimum": -100000000.0,
         "maximum": 100000000.0
       },
-      "minItems": 360,
-      "maxItems": 360
+      "minItems": 180,
+      "maxItems": 360,
+      "description": "360 nilai per derajat, atau 180 titik (rata-rata dua derajat) bila step_deg=2 (contract 1.12)."
     },
     "heading_deg": {
       "type": "number",
@@ -86,6 +87,12 @@
         "G",
         "H"
       ]
+    },
+    "step_deg": {
+      "enum": [
+        2
+      ],
+      "description": "Contract 1.12: ada bila values berisi 180 titik; titik k = rata-rata derajat 2k dan 2k+1."
     }
   },
   "required": [

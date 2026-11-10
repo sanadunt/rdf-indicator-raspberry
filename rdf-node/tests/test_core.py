@@ -235,12 +235,12 @@ class BackupConfigTests(unittest.TestCase):
         validate_config(self.backup(enabled=True,host='backup.example.net',tls=False,transport='websocket',port=80))
     def test_backup_budget_is_not_counted_in_t900_aggregate(self):
         c=self.backup(budget_bytes_s=200000)
-        c['telemetry'].update(control_budget_bytes_s=1000,bulk_budget_bytes_s=500)
+        c['telemetry'].update(control_budget_bytes_s=1000,bulk_budget_bytes_s=2000)
         validate_config(c)
         c['telemetry']['control_budget_bytes_s']=1001
         with self.assertRaisesRegex(ValueError,'AGGREGATE_BUDGET_TOO_HIGH'):validate_config(c)
         c=self.backup(budget_bytes_s=1000)
-        c['telemetry'].update(control_budget_bytes_s=1001,bulk_budget_bytes_s=500)
+        c['telemetry'].update(control_budget_bytes_s=1001,bulk_budget_bytes_s=2000)
         with self.assertRaisesRegex(ValueError,'AGGREGATE_BUDGET_TOO_HIGH'):validate_config(c)
 
 class ParserTests(unittest.TestCase):

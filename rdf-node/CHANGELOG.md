@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.12.0 - Unreleased
+
+Contract `1.12` (Angular may carry 180 points).
+
+- Angular "Seimbang": with `telemetry.angular_points: 180` (the new default) `telemetry/angular` and
+  `telemetry/diagnostic/angular` carry 180 points, each the mean of two neighbouring degrees rounded to 0.01,
+  with `step_deg: 2` just before `values`. `angular_points: 360` keeps the 1.11 payload byte for byte.
+  Capabilities `count` follows the setting and gain `angular_step_deg`. The local panel still reads 360.
+- `rdf_node.angular.upsample_pairs` rebuilds 360 smooth values (periodic PCHIP, no overshoot); the Ground
+  companion's decoder uses it, so it accepts both shapes.
+- `telemetry.bulk_budget_bytes_s` may go up to 2000 and Control + Bulk up to 3000 B/s: the 1500 B/s cap was
+  the T900 link's; MQTT is now local and the LoRa bridge paces the radio. A curve every 2 s needs ~1000.
+
 ## 1.11.0 - Unreleased
 
 Contract `1.11` (two optional `telemetry/health` fields).

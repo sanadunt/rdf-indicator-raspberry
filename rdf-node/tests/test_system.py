@@ -2,6 +2,7 @@ import copy,http.client,json,os,socket,stat,tempfile,threading,time,unittest,uui
 from pathlib import Path
 from unittest import mock
 from rdf_node import CONTRACT
+from rdf_node.angular import average_pairs
 from rdf_node.agent import Agent
 from rdf_node.ground import Ground
 from rdf_node.mqtt import Client,Message
@@ -418,8 +419,8 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual((doa['reason'],doa['clk'],doa['age']),
                          (['SOURCE_UNVERIFIED','ANGLE_UNVERIFIED'],1,snapshot['detection']['source_age_ms']))
         angular=json.loads(next(payload for key,topic,payload in offers if key=='angular'))
-        self.assertEqual((angular['encoding'],angular['flags'],len(angular['values'])),('json',23,360))
-        self.assertEqual(angular['values'],agent.source.record['values'])
+        self.assertEqual((angular['encoding'],angular['flags'],len(angular['values'])),('json',23,180))
+        self.assertEqual(angular['values'],average_pairs(agent.source.record['values']))
         agent.last_doa_q=0;agent.last_angular_q=0
         blocked=copy.deepcopy(snapshot);blocked['detection']['reasons'].append('NO_FRESH_DOA')
         blocked_offers=self._run_agent_scheduler_once(agent,blocked)
@@ -1695,7 +1696,7 @@ class EndToEndTests(unittest.TestCase):
                 for messages in (health,doa,angular):
                     self.assertTrue(all(m['qos']==0 and not m['retain'] for m in messages))
                 frame=json.loads(angular[0]['payload'])
-                self.assertEqual((frame['encoding'],len(frame['values']),frame['flags']),('json',360,63))
+                self.assertEqual((frame['encoding'],len(frame['values']),frame['flags']),('json',180,63))
                 self.assertFalse(broker.errors)
             finally:
                 stop.set();thread.join(2);agent.stop();broker.stop()
@@ -1824,7 +1825,7 @@ class EndToEndTests(unittest.TestCase):
                 self.assertEqual((doa['ok'],doa['trust'],doa['angle_reference'],doa['a']),
                                  (0,'UNVERIFIED','RAW',10.0))
                 frame=json.loads(received('telemetry/angular')[-1]['payload'])
-                self.assertEqual((frame['encoding'],len(frame['values']),frame['flags']),('json',360,23))
+                self.assertEqual((frame['encoding'],len(frame['values']),frame['flags']),('json',180,23))
                 self.assertTrue(wait(lambda:
                     ground.diagnostic_angular_view() is not None and
                     ground.diagnostic_angular_view()['q']>=frame['q'],5),
@@ -1950,6 +1951,7 @@ class EndToEndTests(unittest.TestCase):
     def test_stopped_angles_flow_as_diagnostic(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp);initial=make_agent(path);cfg=initial.cfg;initial.journal.close()
+            cfg['telemetry']['angular_points']=360  # the exact last value must survive the trip
             timestamp=now_ms();bad_status=status(timestamp,idx=4);bad_status['daq_ok']=False
             atomic_write(path/'share'/'status.json',compact(bad_status))
             angle_record=record(timestamp);angle_record[-1]=50000
@@ -2117,7 +2119,7 @@ class BackupLinkTests(unittest.TestCase):
             self.assertEqual(self.payloads(control,suffix),self.payloads(backup,suffix),suffix)
         primary_frame=self.payloads(bulk,'telemetry/angular')[0];backup_frame=self.payloads(backup,'telemetry/angular')[0]
         self.assertEqual(primary_frame,backup_frame)
-        self.assertEqual((backup_frame['encoding'],len(backup_frame['values']),backup_frame['flags']),('json',360,63))
+        self.assertEqual((backup_frame['encoding'],len(backup_frame['values']),backup_frame['flags']),('json',180,63))
         self.assertEqual(self.payloads(backup,'availability')[0]['online'],True)
         self.assertIsNone(a.bulk_reason);self.assertIsNone(a.backup_bulk_reason)
         self.assertEqual(a.backup_last_angular_q,a.last_angular_q)
@@ -2137,7 +2139,7 @@ class BackupLinkTests(unittest.TestCase):
                 self.assertNotIn('telemetry/angular',self.suffixes(bulk))
                 self.assertIn('telemetry/angular',self.suffixes(backup))
                 self.assertNotIn('telemetry/diagnostic/angular',self.suffixes(backup))
-                self.assertEqual(len(self.payloads(backup,'telemetry/angular')[0]['values']),360)
+                self.assertEqual(len(self.payloads(backup,'telemetry/angular')[0]['values']),180)
 
     def test_control_backlog_waits_for_queued_age_not_one_slow_puback(self):
         a=self.a
@@ -2768,7 +2770,7 @@ class BackupBrokerEndToEndTests(unittest.TestCase):
         self.assertEqual(set(primary_frame),set(backup_frame))
         for key in ('v','encoding','sid','flags','values','frequency_hz','revision','vfo','convention'):
             self.assertEqual(primary_frame[key],backup_frame[key],key)
-        self.assertEqual((backup_frame['flags'],len(backup_frame['values'])),(63,360))
+        self.assertEqual((backup_frame['flags'],len(backup_frame['values'])),(63,180))
         # Primary (PPP/T900) broker goes away: the backup keeps health and angular flowing.
         primary.stop()
         self.assertTrue(wait(lambda:not agent.clients['control'].ready,5))
@@ -2801,7 +2803,7 @@ class BackupBrokerEndToEndTests(unittest.TestCase):
         self.assertEqual((snapshot['link']['mqtt_control']['state'],snapshot['link']['bulk_pause']),('DISABLED','MQTT_NOT_READY'))
         self.assertEqual((snapshot['config']['mqtt_configured'],snapshot['config']['mqtt_backup_configured']),(False,True))
         frame=json.loads(self.received(backup,agent,'telemetry/angular')[0]['payload'])
-        self.assertEqual((frame['flags'],len(frame['values'])),(63,360))
+        self.assertEqual((frame['flags'],len(frame['values'])),(63,180))
         self.assertFalse(backup.errors)
 
     def test_backup_commands_execute_and_ack_on_their_own_link(self):

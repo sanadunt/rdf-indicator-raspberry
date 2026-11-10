@@ -54,6 +54,8 @@ def validate_config(c: dict) -> None:
         raise ValueError('INVALID_NODE_ID')
     if c['telemetry']['profile'] not in PROFILES:
         raise ValueError('UNKNOWN_PROFILE')
+    if c['telemetry']['angular_points'] not in (180, 360):
+        raise ValueError('INVALID_ANGULAR_POINTS')
     if c['source']['angle_mode'] not in ('theta_mirror', 'csv_native'):
         raise ValueError('UNKNOWN_ANGLE_CONVENTION')
     if not 0 <= c['source']['output_vfo'] <= 15:
@@ -63,7 +65,7 @@ def validate_config(c: dict) -> None:
                              (c['api'],'max_clients',2,64),(c['mqtt'],'port',1,65535),
                              (c['mqtt'],'keepalive',5,120),(c['mqtt'],'reconnect_max',5,120),
                              (c['telemetry'],'control_budget_bytes_s',500,1250),
-                             (c['telemetry'],'bulk_budget_bytes_s',200,500),
+                             (c['telemetry'],'bulk_budget_bytes_s',200,2000),
                              (c['telemetry'],'resume_stable_seconds',0,120),
                              (c['control'],'verify_seconds',1,60),(c['control'],'start_timeout_seconds',5,600),
                              (c['control'],'retune_live_max_hz',0,2000000000),(c['control'],'retune_live_window_seconds',3,120),
@@ -72,7 +74,8 @@ def validate_config(c: dict) -> None:
     validate_mqtt_host(c['mqtt']['host'])
     if c['mqtt']['transport'] not in ('tcp','websocket'): raise ValueError('INVALID_MQTT_TRANSPORT')
     validate_websocket_path(c['mqtt']['websocket_path'])
-    if c['telemetry']['control_budget_bytes_s']+c['telemetry']['bulk_budget_bytes_s']>1500:
+    # The T900 link once capped both at 1500 B/s; MQTT is now local and the LoRa bridge paces the radio.
+    if c['telemetry']['control_budget_bytes_s']+c['telemetry']['bulk_budget_bytes_s']>3000:
         raise ValueError('AGGREGATE_BUDGET_TOO_HIGH')
     validate_backup_config(c['mqtt']['backup'], c['mqtt']['allow_insecure_loopback'])
     for k,v in c['freshness'].items():
