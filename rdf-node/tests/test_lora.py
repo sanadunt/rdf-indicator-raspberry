@@ -11,6 +11,15 @@ from broker_fixture import Broker,wait
 ANGULAR=json.dumps({'v':2,'encoding':'json','sid':'a3da8b3b','q':1,'timestamp_ms':1793446155142,'frequency_hz':433920000,
                     'revision':1,'vfo':0,'convention':1,'flags':63,'raw_doa_deg':137.0,'confidence_native_db':8.27,
                     'values':[round((d*7919%1000)/50,2) for d in range(360)]},separators=(',',':')).encode()
+def angular_1_12(values=None):
+    if values is None:
+        import math
+        values=[round(0.6+0.7*math.exp(-(((2*k-137+180)%360-180)/14)**2),2) for k in range(180)]
+    return json.dumps({'v':2,'encoding':'json','sid':'a3da8b3b','q':7,'timestamp_ms':1793446155142,
+                       'frequency_hz':433920000,'revision':1,'vfo':0,'convention':1,'flags':63,'raw_doa_deg':137.0,
+                       'confidence_native_db':8.27,'heading_deg':96.5,'heading_source':'C','step_deg':2,
+                       'values':values},separators=(',',':')).encode()
+ANGULAR_180=angular_1_12()
 HEALTH=b'{"v":2,"sid":"7a8b9c0d","q":86,"t":1793445697776,"run":1,"daq":1,"drop":12,"age":280,"temp":61.4,"clk":1,"rev":7,"why":[]}'
 
 class CodecTests(unittest.TestCase):
@@ -206,6 +215,35 @@ class SenderTests(unittest.TestCase):
         r=Receiver();out=r.feed(b''.join(first+rest))
         self.assertEqual(out[0][1],ANGULAR);self.assertEqual((r.stats['heartbeats'],r.stats['lost_frames']),(1,0))
         self.assertEqual(decode_frame(rest[0][:-1])[0],lora.HEARTBEAT)
+
+class PackedAngularTests(unittest.TestCase):
+    def test_pack_angular_round_trip_180_and_360(self):
+        p360=json.dumps({**json.loads(ANGULAR),'values':[round(0.5+(d%40)/100,2) for d in range(360)]},
+                        separators=(',',':')).encode()
+        for p in (ANGULAR_180,p360):
+            body=lora.pack_angular(p);self.assertIsNotNone(body)
+            self.assertEqual(lora.unpack_angular(body),p)
+        self.assertLessEqual(len(lora.compress(lora.pack_angular(ANGULAR_180))[0]),400)
+    def test_pack_angular_refuses_lossy(self):
+        self.assertIsNone(lora.pack_angular(angular_1_12([0.123]*180)))         # not on the 0.01 grid
+        self.assertIsNone(lora.pack_angular(angular_1_12([0.0]*179+[3.0])))     # range over 2.55
+        self.assertIsNone(lora.pack_angular(ANGULAR))                           # range over 2.55 (0..19.98)
+        last=json.dumps({'values':[0.1]*180,'q':1},separators=(',',':')).encode()
+        self.assertIsNone(lora.pack_angular(last))                              # values not the last key
+    def test_bridge_sends_packed_angular_in_two_frames(self):
+        parts=lora.split_message(DATA,1,TOPIC_IDS['telemetry/angular'],lora.pack_angular(ANGULAR_180),packed=True)
+        self.assertLessEqual(len(parts),2)
+        self.assertTrue(all(p[3]&lora.F_PACKED for p in parts))
+    def test_receiver_unpacks_packed_angular(self):
+        s=Sender(100000,200,burst=10000);s.offer(TOPIC_IDS['telemetry/angular'],lora.pack_angular(ANGULAR_180),packed=True,now=1.0)
+        frames=s.next_frames(1.0);r=Receiver();out=[]
+        for f in frames: out+=r.feed(f)
+        self.assertEqual([(t,p) for t,p,_,_ in out],[(TOPIC_IDS['telemetry/angular'],ANGULAR_180)])
+    def test_unpacked_angular_still_passes_through(self):
+        s=Sender(100000,200,burst=10000);s.offer(TOPIC_IDS['telemetry/angular'],ANGULAR,now=1.0)
+        r=Receiver();out=[]
+        for f in s.next_frames(1.0): out+=r.feed(f)
+        self.assertEqual(out[0][1],ANGULAR)
 
 class TimeSyncTests(unittest.TestCase):
     def bridge(self,role,**kw):
@@ -405,6 +443,11 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual((st['payload'],st['retain']),(state,True))
         self.assertEqual(self.ground_broker.retained.get('sdr/v2/uav-01/state'),state)
         self.assertFalse(self.published(self.ground_broker,'telemetry/health')[-1]['retain'])
+    def test_packed_180_angular_arrives_byte_identical(self):
+        self.edge_pub.offer('a','sdr/v2/uav-01/telemetry/angular',ANGULAR_180)
+        self.assertTrue(wait(lambda:self.published(self.ground_broker,'telemetry/angular'),10),self.ground.status())
+        self.assertEqual(self.published(self.ground_broker,'telemetry/angular')[-1]['payload'],ANGULAR_180)
+        self.assertLessEqual(self.edge.sender.stats['sent_frames'],6)  # curve + a heartbeat or two
     def test_command_goes_down_once_and_ack_comes_back(self):
         cmd=b'{"v":2,"id":"c1","op":"config.get","expires_ms":9999999999999}'
         self.ground_pub.offer('c','sdr/v2/uav-01/cmd/config/get',cmd,qos=1)

@@ -290,7 +290,7 @@ def main():
     s.add_argument('--rate',type=int,default=1000,help='byte/s ke radio (default 1000; terukur ~1.2-1.5 KB/s)')
     s.add_argument('--frame-max',type=int,default=200,help='byte per frame di kabel (default 200)')
     s.add_argument('--heartbeat',type=float,default=5.0);s.add_argument('--link-timeout',type=float,default=15.0)
-    s.add_argument('--angular-every',type=float,default=3.5,help='jarak minimum kurva angular, detik (Edge membuat paling cepat tiap 4 s)')
+    s.add_argument('--angular-every',type=float,default=1.5,help='jarak minimum kurva angular, detik (Edge: tiap 2 s graph_u8, 4 s balanced)')
     s.add_argument('--detail-every',type=float,default=30.0,help='jarak minimum health/detail, detik')
     s.add_argument('--health-every',type=float,default=2.0,help='jarak minimum telemetry/health, detik (Ground: segar <= 8 s)')
     s.add_argument('--status-every',type=float,default=30.0)

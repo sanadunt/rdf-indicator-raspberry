@@ -33,11 +33,19 @@ Setiap frame: `header(9) | chunk | CRC-16 (2)`, lalu di-COBS-encode dan diakhiri
 | 2–3 | nomor urut frame pengirim (uint16 BE), naik 1 per frame yang benar-benar dikirim |
 | 4 | id pesan (uint8); fragmen satu pesan dan salinannya memakai id yang sama |
 | 5 | id topik (tabel di bawah) |
-| 6 | flag: bit0 retain, bit1 QoS 1, bit2 zlib, bit3 TURN (giliran bicara) |
+| 6 | flag: bit0 retain, bit1 QoS 1, bit2 zlib, bit3 TURN (giliran bicara), bit4 Angular terkemas (lihat bawah) |
 | 7 | indeks fragmen |
 | 8 | jumlah fragmen (1–255) |
 | … | potongan payload |
 | akhir | CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) atas header + potongan, big-endian |
+
+**Angular terkemas (bit4, sejak 1.12).** Untuk `telemetry/angular` dan `telemetry/diagnostic/angular`
+jembatan Edge mengganti `values` dengan satu byte per nilai: body = versi `1` (u8), nilai terkecil dalam
+perseratus (int32 BE), panjang JSON sebelum `,"values":[` (u16 BE), JSON itu, lalu `nilai×100 − terkecil`
+per byte. Jembatan Ground menyusun ulang JSON yang byte-identik. Hanya dipakai bila `values` key terakhir,
+semua nilai tepat di kelipatan 0.01, dan rentangnya ≤ 2.55; selain itu payload dikirim apa adanya. Kurva
+180 titik (Edge 1.12) jadi ~130–250 B di udara, 1–2 frame, dibanding ~860 B (5 frame) untuk 360 nilai JSON.
+Jembatan Ground lama tidak mengenal bit4, jadi **pasang jembatan Ground dulu**, baru jembatan Edge.
 
 Payload dikompres raw deflate (`wbits -15`, level 9) dengan kamus bersama `ZDICT` di
 `src/rdf_node/lora.py` bila hasilnya lebih kecil (flag zlib). Kamus itu bagian dari protokol: ubah hanya
@@ -62,9 +70,9 @@ pertama setelah restart hilang, id awal yang acak yang mencegah sebagian besar b
 | 1 | `telemetry/health` | Edge→Ground | 2 | 6 s | terbaru menang, min. tiap 2 s (`--health-every`) |
 | 2 | `telemetry/health/detail` | Edge→Ground | 4 | 15 s | terbaru menang, min. tiap 30 s |
 | 3 | `telemetry/doa` | Edge→Ground | 1 | 3 s | terbaru menang, **dikirim 2×** (prioritas data tertinggi) |
-| 4 | `telemetry/angular` | Edge→Ground | 5 | 8 s | terbaru menang, min. tiap 3.5 s (`--angular-every`) |
+| 4 | `telemetry/angular` | Edge→Ground | 5 | 8 s | terbaru menang, min. tiap 1.5 s (`--angular-every`), terkemas |
 | 5 | `telemetry/diagnostic/doa` | Edge→Ground | 2 | 3 s | terbaru menang |
-| 6 | `telemetry/diagnostic/angular` | Edge→Ground | 5 | 8 s | terbaru menang, min. tiap 3.5 s (`--angular-every`) |
+| 6 | `telemetry/diagnostic/angular` | Edge→Ground | 5 | 8 s | terbaru menang, min. tiap 1.5 s (`--angular-every`), terkemas |
 | 7 | `state` | Edge→Ground | 0 | – | retained, terbaru menang |
 | 8 | `capabilities` | Edge→Ground | 3 | – | retained, terbaru menang |
 | 9 | `availability` | Edge→Ground | 0 | – | retained, terbaru menang |
@@ -121,10 +129,10 @@ Dengan kompresi: `health` lengkap (kompas + GPS) 232 B JSON → 126 B di udara; 
 detail ~8 B/s, Angular ~215 B/s (tiap 4 s) → sekitar 450 B/s dari 1000 B/s. Arah Ground→Edge hanya
 command dan heartbeat, supaya tabrakan half-duplex tetap jarang.
 
-Jembatan meneruskan tiap kurva Angular yang dibuat Edge (`--angular-every` 3.5 s, sedikit di bawah
-`angular_s` 4 s profil `balanced`, supaya kurva yang datang sedikit lebih awal tidak tertahan). Edge
-sendiri menjarakkan kurva `max(angular_s, ukuran kurva / telemetry.bulk_budget_bytes_s)`: dengan kurva
-~2.1 KB dan `bulk_budget_bytes_s` 250 jaraknya ~9 s, dengan 500 ~4.5 s.
+Jembatan meneruskan tiap kurva Angular yang dibuat Edge (`--angular-every` 1.5 s, di bawah `angular_s`
+2 s profil `graph_u8` dan 4 s `balanced`, supaya kurva yang datang sedikit lebih awal tidak tertahan). Edge
+sendiri menjarakkan kurva `max(angular_s, ukuran JSON kurva / telemetry.bulk_budget_bytes_s)`: kurva 180
+titik ~1.1 KB JSON, jadi kurva tiap 2 s butuh `bulk_budget_bytes_s` ≥ ~650 (pakai 1000).
 
 ## Pemasangan
 

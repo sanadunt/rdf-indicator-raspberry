@@ -44,6 +44,8 @@ F_RETAIN=1; F_QOS1=2; F_ZLIB=4
 # for EDGE_QUIET_S; the ground transmits only right after such a frame (or freely when the edge has been
 # silent for GROUND_FREE_AFTER_S), so the two radios rarely talk at once.
 F_TURN=8
+# An Angular curve (topics 4, 6) whose values went over as one byte each; the receiver rebuilds the JSON.
+F_PACKED=16
 # Air time per byte while frames go back to back: a single frame takes ~0.48 ms/byte, but a run of frames
 # only moves ~1.2-1.5 KB/s. With 0.5 ms the estimate fell 0.2-0.3 s short after a 5-frame Angular curve,
 # the edge came back inside Ground's reply and ~92% of Ground->edge frames were lost (2026-11-10).
@@ -144,11 +146,39 @@ def decompress(packed: bytes, limit=16384) -> bytes:
     if d.unconsumed_tail or not d.eof: raise ValueError('ZLIB_BAD_OR_TOO_LARGE')
     return out
 
-def split_message(kind,msg,topic,payload,*,retain=False,qos1=False,frame_max=200):
+# Packed Angular body: version, the smallest value in hundredths, the JSON up to its values array, then one
+# byte per value (hundredths above that smallest). Only when it rebuilds the original bytes exactly.
+PACKED_HEAD=struct.Struct('!BiH'); PACKED_V1=1; VALUES_KEY=b',"values":['
+
+def _angular_json(header,low,steps):
+    return header+VALUES_KEY+b','.join(json.dumps((low+d)/100).encode() for d in steps)+b']}'
+
+def pack_angular(payload: bytes):
+    """The packed body of an Angular JSON payload, or None when it cannot go over losslessly."""
+    cut=payload.rfind(VALUES_KEY)
+    if cut<0 or not payload.endswith(b']}'): return None
+    try: values=json.loads(payload[cut+len(VALUES_KEY)-1:-1])
+    except ValueError: return None
+    if not values or not all(type(v) is float for v in values): return None
+    hundredths=[round(v*100) for v in values]
+    if any(n/100!=v for n,v in zip(hundredths,values)): return None
+    low=min(hundredths); steps=[n-low for n in hundredths]
+    if max(steps)>255 or not -2**31<=low<2**31 or cut>0xFFFF: return None
+    if _angular_json(payload[:cut],low,steps)!=payload: return None
+    return PACKED_HEAD.pack(PACKED_V1,low,cut)+payload[:cut]+bytes(steps)
+
+def unpack_angular(body: bytes) -> bytes:
+    if len(body)<PACKED_HEAD.size: raise ValueError('PACKED_SHORT')
+    version,low,cut=PACKED_HEAD.unpack_from(body)
+    if version!=PACKED_V1 or len(body)<PACKED_HEAD.size+cut: raise ValueError('PACKED_BAD')
+    start=PACKED_HEAD.size+cut
+    return _angular_json(body[PACKED_HEAD.size:start],low,body[start:])
+
+def split_message(kind,msg,topic,payload,*,retain=False,qos1=False,frame_max=200,packed=False):
     """Unsent frames of one message: (kind, msg, topic, flags, index, count, chunk). The sequence number
     is given at send time, so frames that are sent later (a heartbeat in between) keep the order."""
-    body,packed=compress(payload) if kind==DATA else (payload,False)
-    flags=(F_RETAIN if retain else 0)|(F_QOS1 if qos1 else 0)|(F_ZLIB if packed else 0)
+    body,zipped=compress(payload) if kind==DATA else (payload,False)
+    flags=(F_RETAIN if retain else 0)|(F_QOS1 if qos1 else 0)|(F_ZLIB if zipped else 0)|(F_PACKED if packed else 0)
     # Worst-case COBS adds one byte per 254, plus the code byte and the 0x00 delimiter.
     room=frame_max-HEADER.size-CRC_LEN-2-(frame_max//254+1)
     if room<16: raise ValueError('FRAME_MAX_TOO_SMALL')
@@ -234,8 +264,10 @@ class Receiver:
         if len(pieces)<count: return None
         del self.parts[key]; self.recent[key]=now
         body=b''.join(pieces[i] for i in range(count))
-        try: payload=decompress(body) if flags&F_ZLIB else body
-        except (ValueError,zlib.error): self.stats['bad_frames']+=1; return None
+        try:
+            payload=decompress(body) if flags&F_ZLIB else body
+            if flags&F_PACKED: payload=unpack_angular(payload)
+        except (ValueError,zlib.error,struct.error): self.stats['bad_frames']+=1; return None
         self.stats['messages']+=1
         return topic,payload,bool(flags&F_RETAIN),bool(flags&F_QOS1)
 
@@ -244,9 +276,9 @@ class Receiver:
 REPEAT_GAP_S=0.5
 
 class Pending:
-    __slots__=('topic','payload','retain','qos1','priority','created','repeat','msg','not_before')
-    def __init__(self,topic,payload,retain,qos1,priority,created,repeat,msg=None,not_before=0.0):
-        self.topic=topic; self.payload=payload; self.retain=retain; self.qos1=qos1
+    __slots__=('topic','payload','retain','qos1','priority','created','repeat','msg','not_before','packed')
+    def __init__(self,topic,payload,retain,qos1,priority,created,repeat,msg=None,not_before=0.0,packed=False):
+        self.topic=topic; self.payload=payload; self.retain=retain; self.qos1=qos1; self.packed=packed
         self.priority=priority; self.created=created; self.repeat=repeat; self.msg=msg; self.not_before=not_before
 
 class Sender:
@@ -265,7 +297,7 @@ class Sender:
         self.lock=threading.Lock(); self.box={}; self.fifo=0; self.seq=0; self.msg=os.urandom(1)[0]
         self.wire=deque(); self.last_sent={}; self.tokens=float(self.burst); self.refilled=time.monotonic()
         self.stats=dict(queued=0,superseded=0,expired=0,sent_messages=0,sent_frames=0,sent_bytes=0,too_large=0)
-    def offer(self,topic,payload,retain=False,qos1=False,now=None):
+    def offer(self,topic,payload,retain=False,qos1=False,now=None,packed=False):
         now=time.monotonic() if now is None else now
         priority,_,latest,twice=POLICY[topic]
         with self.lock:
@@ -275,7 +307,7 @@ class Sender:
             else:
                 self.fifo+=1; key=(topic,self.fifo)
             sends=(COMMAND_SENDS if topic in GROUND_TOPICS else 2) if twice else 1
-            self.box[key]=Pending(topic,payload,retain,qos1,priority,now,sends)
+            self.box[key]=Pending(topic,payload,retain,qos1,priority,now,sends,packed=packed)
             self.stats['queued']+=1
     def _expire(self,now):
         for key,p in list(self.box.items()):
@@ -291,7 +323,8 @@ class Sender:
         p=self.box.pop(min(due,key=lambda d:d[:3])[3])
         if p.msg is None: self.msg=(self.msg+1)&0xFF; msg=self.msg
         else: msg=p.msg
-        try: parts=split_message(DATA,msg,p.topic,p.payload,retain=p.retain,qos1=p.qos1,frame_max=self.frame_max)
+        try: parts=split_message(DATA,msg,p.topic,p.payload,retain=p.retain,qos1=p.qos1,frame_max=self.frame_max,
+                                 packed=p.packed)
         except ValueError: self.stats['too_large']+=1; return
         self.wire.extend(parts)
         if p.repeat>1:
@@ -299,7 +332,7 @@ class Sender:
             self.fifo+=1
             gap=REPEAT_GAP_S if p.msg is None else 2*REPEAT_GAP_S
             self.box[('copy',self.fifo)]=Pending(p.topic,p.payload,p.retain,p.qos1,p.priority,p.created,
-                                                 p.repeat-1,msg,now+gap)
+                                                 p.repeat-1,msg,now+gap,p.packed)
         if p.msg is None: self.last_sent[p.topic]=now; self.stats['sent_messages']+=1
     @staticmethod
     def _stamp(part):
@@ -365,7 +398,7 @@ def open_port(path,baud):
 
 class Bridge:
     def __init__(self,*,role,device,baud,mqtt_cfg,node_id,credentials_file=None,demo=False,rate=1000,
-                 frame_max=200,heartbeat_s=5.0,link_timeout_s=15.0,angular_every_s=3.5,detail_every_s=30.0,
+                 frame_max=200,heartbeat_s=5.0,link_timeout_s=15.0,angular_every_s=1.5,detail_every_s=30.0,
                  status_every_s=5.0,time_every_s=16.0,chrony_sock=None,health_every_s=2.0):
         if role not in ('edge','ground'): raise ValueError('ROLE')
         self.role=role; self.device=device; self.baud=baud; self.node_id=node_id
@@ -395,7 +428,9 @@ class Bridge:
         retain=self.role=='edge' and tid in (7,8,9)
         if retain:
             with self.lock: self.retained[tid]=payload
-        self.sender.offer(tid,payload,retain=retain,qos1=tid in (7,8,9,10,11,12) or tid>=64)
+        body=pack_angular(payload) if tid in (4,6) else None
+        self.sender.offer(tid,payload if body is None else body,retain=retain,
+                          qos1=tid in (7,8,9,10,11,12) or tid>=64,packed=body is not None)
     # ---- radio -> MQTT ----
     def _deliver(self,tid,payload,retain,qos1):
         incoming=GROUND_TOPICS if self.role=='edge' else EDGE_TOPICS
