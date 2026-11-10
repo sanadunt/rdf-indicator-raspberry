@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.12.2 - Unreleased
+
+Contract `1.12` (unchanged).
+
+- A config.patch that takes the restart path (a gain change, a large jump, or a failed live retune) never
+  leaves the SDR engine stopped because the helper refused the write.
+  - The center now always goes with its VFO0, even when that VFO0 is what the file already has. Moving the
+    center onto the old VFO0 together with a gain change used to fail with
+    `CENTER_CHANGE_REQUIRES_VFO0_TARGET` after the engine had been stopped.
+  - Any refusal after the stop (a gain outside the approved table, a frequency outside the helper's range)
+    now starts the engine again on its old settings. The result is `FAILED` with the helper's code,
+    `persisted: false` and `engine: RESTARTED`, or `OUTCOME_UNKNOWN` with
+    `engine: NOT_HEALTHY_AFTER_RESTART` when that start does not come back healthy.
+- `ERROR_MESSAGES` lost four duplicate codes whose first text was never used; the texts sent stay the same.
+
 ## 1.12.1 - Unreleased
 
 Contract `1.12` (unchanged). Changes to the LoRa bridge only.
