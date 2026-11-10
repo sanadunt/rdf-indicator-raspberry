@@ -134,6 +134,34 @@ Jembatan meneruskan tiap kurva Angular yang dibuat Edge (`--angular-every` 1.5 s
 sendiri menjarakkan kurva `max(angular_s, ukuran JSON kurva / telemetry.bulk_budget_bytes_s)`: kurva 180
 titik ~1.1 KB JSON, jadi kurva tiap 2 s butuh `bulk_budget_bytes_s` ≥ ~650 (pakai 1000).
 
+`control_budget_bytes_s` juga harus 1250 (batas atas). Edge menganggap DoA + health sudah memakai ~800 B/s
+Control. Selama kurva ditahan, kurva diagnostik (~1.1–1.4 KB) ikut lewat Control. Dengan 1000, antrean
+Control sering melewati 3 s (`CONTROL_BACKLOG`). Jeda 20 s (`resume_stable_seconds`) lalu terus diulang,
+sehingga kurva hanya jalan ~28 s dari 170 s. Dengan 1250, `CONTROL_BACKLOG` tidak muncul dalam 3 menit
+(antrean paling lama 2.8 s). Yang tersisa hanya `SOURCE_NOT_ELIGIBLE` sesaat bila sinyal dekat squelch.
+
+### Terukur 2026-11-10: kurva 180 terkemas, 2 s vs 4 s
+
+Edge 1.12.0, kedua jembatan 1.12, console 3.21.0, Control 1250 / Bulk 1000. Setiap uji berlangsung 180 s.
+Selama uji, Ground mengirim `operation.get` dummy tiap 5 s (`tools/lora_bench/`). Sinyal −80 dB, sekitar
+5 dB di atas squelch.
+
+| | 2 s (`graph_u8`) #1 | 2 s #2 | 4 s (`balanced`) |
+|---|---|---|---|
+| Kurva sampai di Ground | 70 | 56 (termasuk jeda ganti profil 29 s) | 33 |
+| Jarak kurva: median / terlama | 2.1 s / 6.7 s | 2.1 s / 8.7 s | 4.1 s / 20.3 s |
+| Kurva `PEAK_MOVED` | 50% | 52% | 33% |
+| Edge → udara | 564 B/s, 4.4 frame/s | 553 B/s | 487 B/s |
+| Frame Edge→Ground hilang | 7.8% | 9.2% | 6.9% |
+| Frame Ground→Edge hilang | 7.8% | 16.5% | 19.5% |
+| ACK command dummy | 35/36, RTT p50 2.7 s / maks 7.0 s | 32/36, 2.3 / 7.5 s | 28/36, 2.3 / 5.9 s |
+
+Pembanding (1.11, kurva 360, jembatan 3.5 s, 2 menit): kurva tiap ~4.5 s, Edge 413 B/s, Ground→Edge 3%.
+
+2 s mengirim kurva dua kali lebih sering dan hanya menambah ~70 B/s di udara. ACK command tidak memburuk:
+kedua uji 2 s lebih baik daripada uji 4 s. Selisih kehilangan Ground→Edge antar-uji lebih dipengaruhi
+kondisi radio, karena pagi harinya Ground→Edge hilang ~3% di jarak yang sama. Pakai `graph_u8`.
+
 ## Pemasangan
 
 Hentikan PPP lebih dulu: port LoRa hanya boleh dibuka satu program.
