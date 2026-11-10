@@ -64,6 +64,8 @@ CRC_LEN=2
 # Fragment state older than this is dropped (a lost fragment never completes its message).
 REASSEMBLY_S=15.0
 DEDUP_S=30.0
+# Rounding of the integer uptime and the one-way latency, when telling a restart from a stale heartbeat.
+RESTART_SLACK_S=3.0
 
 # Topic ids are part of the wire format: never renumber, only append.
 EDGE_TOPICS={
@@ -221,6 +223,11 @@ def decode_frame(wire: bytes):
     if magic!=MAGIC or kind not in (DATA,HEARTBEAT,TIME,RECEIPT) or not count or index>=count: raise ValueError('FRAME_BAD_HEADER')
     return kind,seq,msg,topic,flags,index,count,raw[HEADER.size:-2]
 
+class Delivered(tuple):
+    """(topic, payload, retain, qos1) of a received message, with its dedup key and whether it is receipted."""
+    def __new__(cls,fields,key,receipt):
+        self=super().__new__(cls,fields); self.key=key; self.receipt=receipt; return self
+
 class Receiver:
     """Splits the byte stream into frames, checks them and reassembles messages."""
     def __init__(self):
@@ -263,6 +270,11 @@ class Receiver:
                     # moved on a second or more (a run shorter than one heartbeat period sends 0 each time). Its
                     # message ids start again, so ids this side completed in the last DEDUP_S are new messages
                     # now, not copies.
+                    if self.peer and up<self.peer['uptime_s'] and up>now-self.peer['at']+RESTART_SLACK_S:
+                        # Too old to be a fresh start: a stale heartbeat that left after a newer one (a Ground
+                        # bridge before 1.12.1 could queue two). A restarted peer cannot be older than the time
+                        # since its last heartbeat. Ignore it.
+                        continue
                     if self.peer and (up<self.peer['uptime_s'] or
                                       (up==self.peer['uptime_s'] and clock-self.peer_clock>=1000)):
                         self.recent.clear(); self.parts.clear(); self.stats['peer_restarts']+=1
@@ -288,15 +300,23 @@ class Receiver:
         started,meta,pieces=self.parts.get(key,(now,flags,{}))
         pieces[index]=chunk; self.parts[key]=(started,meta,pieces)
         if len(pieces)<count: return None
-        del self.parts[key]; self.recent[key]=now
+        del self.parts[key]
         body=b''.join(pieces[i] for i in range(count))
         try:
             payload=decompress(body) if flags&F_ZLIB else body
             if flags&F_PACKED: payload=unpack_angular(payload)
-        except (ValueError,zlib.error,struct.error): self.stats['bad_frames']+=1; return None
-        self.stats['messages']+=1
-        if flags&F_RECEIPT: self.receipts_due.append((msg,topic))
-        return topic,payload,bool(flags&F_RETAIN),bool(flags&F_QOS1)
+        except (ValueError,zlib.error,struct.error):
+            # Not recorded as delivered and not receipted: a resend reassembles it from scratch.
+            self.stats['bad_frames']+=1; return None
+        self.recent[key]=now; self.stats['messages']+=1
+        receipt=bool(flags&F_RECEIPT)
+        if receipt: self.receipts_due.append((msg,topic))
+        return Delivered((topic,payload,bool(flags&F_RETAIN),bool(flags&F_QOS1)),key,receipt)
+    def forget(self,message):
+        """The bridge could not hand this message on: take back its receipt so the sender resends it."""
+        self.recent.pop(message.key,None)
+        if message.receipt and (message.key[0],message.key[1]) in self.receipts_due:
+            self.receipts_due.remove((message.key[0],message.key[1]))
 
 # The copy of a command or ACK leaves this long after the first, so one collision on the half-duplex
 # radio cannot take both; a command's third send waits twice as long, so it lands in a later turn.
@@ -328,6 +348,9 @@ class Sender:
                         resent=0,confirmed=0,unconfirmed=0)
         # Receipts: set by the bridge from the peer's heartbeat; messages sent and still waiting for theirs.
         self.peer_receipts=False; self.resend_s=resend_s; self.waiting={}
+        # Receipted messages whose frames are queued but not all sent yet: their resend clock starts only
+        # when the last fragment leaves, so a message that waits for a window is not resent at once.
+        self.inflight={}; self.took_data=False
     def offer(self,topic,payload,retain=False,qos1=False,now=None,packed=False):
         now=time.monotonic() if now is None else now
         priority,_,latest,twice=POLICY[topic]
@@ -357,8 +380,14 @@ class Sender:
         """The peer received these (message id, topic) pairs: stop resending them."""
         with self.lock:
             for key in pairs:
+                key=tuple(key)
                 hit=self.waiting.pop(key,None) is not None
-                hit=self.box.pop(('resend',)+tuple(key),None) is not None or hit
+                hit=self.box.pop(('resend',)+key,None) is not None or hit
+                if self.inflight.pop(key,None) is not None:
+                    # A resend already queued: drop its frames that have not left yet.
+                    hit=True
+                    for part in [x for x in self.wire if x[0]==DATA and x[3]&F_RECEIPT and (x[1],x[2])==key]:
+                        self.wire.remove(part)
                 if hit: self.stats['confirmed']+=1
     def _load(self,now):
         self._expire(now)
@@ -375,8 +404,7 @@ class Sender:
         except ValueError: self.stats['too_large']+=1; return
         self.wire.extend(parts)
         if p.receipt:
-            if not first: self.stats['resent']+=1
-            p.msg=msg; p.sends+=1; self.waiting[(msg,p.topic)]=(p,now)
+            p.msg=msg; self.inflight[(msg,p.topic)]=p
         elif p.repeat>1:
             # The copy keeps the message id, so the receiver drops it when the first one arrived.
             self.fifo+=1
@@ -406,6 +434,15 @@ class Sender:
                     (max_bytes is not None and used+len(frame)>max_bytes)): break
             self.wire.popleft(); self.seq=(self.seq+1)&0xFFFF; self.tokens-=len(frame); out.append(frame); used+=len(frame)
             self.stats['sent_frames']+=1; self.stats['sent_bytes']+=len(frame)
+            kind,msg,topic,flags,index,count=part[:6]
+            if kind==DATA:
+                self.took_data=True
+                if flags&F_RECEIPT and index==count-1:
+                    p=self.inflight.pop((msg,topic),None)
+                    if p is not None:
+                        p.sends+=1
+                        if p.sends>1: self.stats['resent']+=1
+                        self.waiting[(msg,topic)]=(p,now)
             self.air_until=max(self.air_until,now)+len(frame)*AIR_S_PER_BYTE
             if turn:
                 # Stay off the air until this frame (and whatever was queued before it) is out, then
@@ -418,11 +455,13 @@ class Sender:
         with self.lock:
             self.tokens=min(float(self.burst),self.tokens+max(0.0,now-self.refilled)*self.rate); self.refilled=now
             if not self.wire: self._load(now)
+            self.took_data=False
             out=self._take(limit,now,max_bytes)
-            # Ground talks only in short windows: when a queued heartbeat used the start of one, the next
-            # message still goes in the same window while it has room, instead of waiting a whole turn.
+            # Ground talks only in short windows: when queued control frames (heartbeat, TIME, receipts) used
+            # the start of one, one message still goes in the same window while it has room, instead of
+            # waiting a whole turn.
             for _ in range(8):
-                if not out or self.wire or now<self.next_at: break
+                if not out or self.wire or now<self.next_at or self.took_data: break
                 left_n=None if limit is None else limit-len(out)
                 left_b=None if max_bytes is None else max_bytes-sum(map(len,out))
                 if left_n is not None and left_n<=0 or left_b is not None and left_b<=0: break
@@ -499,12 +538,14 @@ class Bridge:
                           qos1=tid in (7,8,9,10,11,12) or tid>=64,packed=body is not None)
     # ---- radio -> MQTT ----
     def _deliver(self,tid,payload,retain,qos1):
+        """False only when the local broker did not take it (a resend may then get through)."""
         incoming=GROUND_TOPICS if self.role=='edge' else EDGE_TOPICS
-        if tid not in incoming: self.ignored+=1; return
+        if tid not in incoming: self.ignored+=1; return True
         key=f'lora:{tid}' if POLICY[tid][2] else f'lora:{tid}:{time.monotonic_ns()}'
         if not self.client.offer(key,self.prefix+'/'+incoming[tid],payload,qos=1 if qos1 else 0,
                                  retain=retain and self.role=='ground',priority=POLICY[tid][0]):
-            self.mqtt_dropped+=1
+            self.mqtt_dropped+=1; return False
+        return True
     def _rx_loop(self):
         while not self.stop_event.is_set():
             fd=self.fd
@@ -526,9 +567,12 @@ class Bridge:
                     self.link_changes+=1
                     # The other side may have missed every retained topic while the link was down.
                     if self.role=='edge': self._resend_retained()
-            for m in messages: self._deliver(*m)
-            self._receipts()
+            self._dispatch(messages)
             while self.receiver.time_frames: self._on_time(*self.receiver.time_frames.pop(0))
+    def _dispatch(self,messages):
+        for m in messages:
+            if not self._deliver(*m) and isinstance(m,Delivered): self.receiver.forget(m)
+        self._receipts()
     def _receipts(self):
         r=self.receiver; peer=r.peer
         self.sender.peer_receipts=bool(peer and peer.get('features',0)&FEATURE_RECEIPTS)

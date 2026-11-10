@@ -14,8 +14,14 @@ Contract `1.12` (unchanged). Changes to the LoRa bridge only.
 
   On 2026-11-10 one retune command was lost although all three copies were sent.
 - Status `tx.resent`, `tx.confirmed`, `tx.unconfirmed`, `rx.receipts`, `peer.features`.
-- A Ground window that starts with a queued heartbeat now also carries the next message while it fits,
-  instead of leaving it for the next turn.
+- The resend clock starts when a message's last fragment really leaves, and a receipt also drops a resend
+  still queued.
+- A message is receipted only after it decodes and the local broker takes it. A failed decode or an MQTT
+  drop is not recorded as delivered, so a resend still gets through.
+- A Ground window that starts with queued control frames (heartbeat, TIME, receipts) now also carries one
+  message while it fits, instead of leaving it for the next turn.
+- The receiver treats a lower uptime that is older than the time since the peer's last heartbeat (+3 s)
+  as a stale heartbeat, not a restart. This covers Ground bridges before 1.12.1.
 - One queued heartbeat at most. Before, two heartbeats queued while Ground waited for a turn left newest
   first; the older uptime read as a peer restart, the receiver forgot what it had delivered, and the next
   copy of a command was delivered twice.

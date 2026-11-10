@@ -313,6 +313,89 @@ class ReceiptTests(unittest.TestCase):
     def test_a_stray_or_late_receipt_is_harmless(self):
         s=Sender(100000,200);s.peer_receipts=True
         s.confirm([(1,64),(255,11)]);self.assertEqual(s.stats['confirmed'],0)
+    # Final review fixes: the resend clock, what a receipt means, and stale heartbeats from an old Ground.
+    def _ground_windows(self,s,times,confirm_at=None,max_bytes=lora.GROUND_WINDOW_BYTES):
+        sent=[]
+        for t in times:
+            if confirm_at and t>=confirm_at[0]:
+                s.confirm(confirm_at[1]);confirm_at=None
+            sent+=[decode_frame(f[:-1]) for f in s.next_frames(t,max_bytes=max_bytes)]
+        return sent
+    def test_the_resend_clock_starts_when_the_message_really_leaves(self):
+        # A command that does not fit its first window (heartbeat + TIME reply ahead of it) leaves a turn
+        # later; its receipt then comes in time and nothing is resent.
+        s=Sender(100000,200,resend_s=.9);s.peer_receipts=True;t=1000.0
+        s.offer(65,os.urandom(170),qos1=True,now=t)
+        s.heartbeat(5,Receiver().stats,t);s.urgent(lora.TIME,lora.TIME_RESP.pack(2,1,2,3))
+        w0=[decode_frame(f[:-1]) for f in s.next_frames(t,max_bytes=lora.GROUND_WINDOW_BYTES)]
+        self.assertEqual(sorted(f[0] for f in w0),sorted([lora.HEARTBEAT,lora.TIME]))
+        w1=[decode_frame(f[:-1]) for f in s.next_frames(t+1.05,max_bytes=lora.GROUND_WINDOW_BYTES)]
+        self.assertEqual([f[0] for f in w1],[DATA])
+        s.confirm([(w1[0][2],65)])  # the receipt, ~0.55 s later
+        self.assertEqual(self._ground_windows(s,[t+2.1,t+3.15,t+4.2]),[])
+        self.assertEqual((s.stats['resent'],s.stats['confirmed'],s.depth()),(0,1,0))
+    def test_a_receipt_cancels_a_resend_already_queued(self):
+        s=Sender(100000,200,resend_s=.9);s.peer_receipts=True;t=1000.0
+        s.offer(65,b'{"op":"config.patch"}',qos1=True,now=t)
+        msg=decode_frame(s.next_frames(t)[0][:-1])[2]
+        self.assertEqual(s.next_frames(t+1.0,max_bytes=10),[])  # resend due but the window is too small
+        s.confirm([(msg,65)])
+        self.assertEqual(s.next_frames(t+2.0),[]);self.assertEqual(s.depth(),0)
+        self.assertEqual((s.stats['confirmed'],s.stats['resent']),(1,0))
+    def test_a_window_adds_at_most_one_message_after_its_control_frames(self):
+        s=Sender(100000,200);t=1000.0
+        for i in range(3): s.offer(64,b'{"i":%d}'%i,qos1=True,now=t)
+        s.heartbeat(5,Receiver().stats,t)
+        kinds=[decode_frame(f[:-1])[0] for f in s.next_frames(t,max_bytes=lora.GROUND_WINDOW_BYTES)]
+        self.assertEqual(kinds,[lora.HEARTBEAT,DATA])
+    def test_counters_and_depth_follow_the_message(self):
+        s=Sender(100000,200,resend_s=.9);s.peer_receipts=True;t=1000.0
+        s.offer(64,b'{"op":"config.get"}',qos1=True,now=t)
+        msg=decode_frame(s.next_frames(t)[0][:-1])[2]
+        self.assertEqual(s.depth(),1)  # waiting for its receipt
+        self.assertEqual(len(s.next_frames(t+.95)),1)
+        self.assertEqual((s.stats['sent_messages'],s.stats['resent']),(1,1))
+        # Gives up only resend_s after the last send: a receipt just before that still counts.
+        s=Sender(100000,200,resend_s=.9);s.peer_receipts=True
+        s.offer(64,b'{"op":"config.get"}',qos1=True,now=t)
+        sent=self._sent(s,t,t+7.0)
+        self.assertEqual(len(sent),lora.RELIABLE_MAX_SENDS)
+        s.confirm([(decode_frame(sent[0][1][:-1])[2],64)])
+        self.assertEqual((s.stats['confirmed'],s.stats['unconfirmed']),(1,0))
+    def test_a_message_that_fails_to_decode_is_not_receipted_and_a_resend_can_still_deliver_it(self):
+        r=Receiver();good=b'{"id":"c1"}'
+        bad=lora.frame_bytes(0,(DATA,7,65,lora.F_ZLIB|lora.F_RECEIPT|lora.F_QOS1,0,1,b'not zlib'))
+        self.assertEqual(r.feed(bad),[]);self.assertEqual((r.stats['bad_frames'],r.receipts_due),(1,[]))
+        out=r.feed(_frames(DATA,1,7,65,good,qos1=True,receipt=True)[0])
+        self.assertEqual(out,[(65,good,False,True)]);self.assertEqual(r.receipts_due,[(7,65)])
+    def test_a_message_the_bridge_could_not_hand_to_mqtt_is_forgotten_and_not_receipted(self):
+        class Client:
+            def __init__(self): self.ok=[False,True]; self.got=[]
+            def offer(self,key,topic,payload,**kw): self.got.append(payload); return self.ok.pop(0)
+        b=object.__new__(Bridge);b.role='edge';b.prefix='sdr/v2/uav-01';b.ignored=0;b.mqtt_dropped=0
+        b.receiver=Receiver();b.sender=Sender(100000,200);b.client=Client()
+        cmd=b'{"id":"c1"}'
+        b._dispatch(b.receiver.feed(_frames(DATA,0,7,65,cmd,qos1=True,receipt=True)[0]))
+        self.assertEqual((b.mqtt_dropped,b.sender.depth()),(1,0))  # dropped: no receipt queued
+        b._dispatch(b.receiver.feed(_frames(DATA,1,7,65,cmd,qos1=True,receipt=True)[0]))
+        self.assertEqual(b.client.got,[cmd,cmd])  # the resend is delivered this time
+        self.assertEqual(decode_frame(b.sender.next_frames(1.0)[0][:-1])[0],lora.RECEIPT)
+    def test_an_old_peer_heartbeat_switches_receipts_off(self):
+        b=object.__new__(Bridge);b.receiver=Receiver();b.sender=Sender(100000,200);b.sender.peer_receipts=True
+        old=struct.pack('!IIHHQ',5,0,0,0,1793446155142)
+        b.receiver.feed(_frames(lora.HEARTBEAT,0,0,0,old)[0],10.0);b._receipts()
+        self.assertFalse(b.sender.peer_receipts)
+        b.sender.offer(65,b'{"op":"config.patch"}',qos1=True,now=11.0)
+        self.assertEqual(len(self._sent(b.sender,11.0,14.0)),lora.COMMAND_SENDS)
+    def test_a_stale_heartbeat_from_an_old_ground_is_not_a_restart(self):
+        # A Ground bridge before 1.12.1 still sends two queued heartbeats newest first.
+        def beat(up):
+            return _frames(lora.HEARTBEAT,0,0,0,struct.pack('!IIHHQ',up,0,0,0,1793446155142))[0]
+        r=Receiver();t=100.0
+        r.feed(beat(100),t);r.feed(beat(110),t+10);r.feed(beat(105),t+10.05)
+        self.assertEqual((r.stats['peer_restarts'],r.peer['uptime_s']),(0,110))
+        r.feed(beat(3),t+30)  # a real restart: its uptime fits the time since the last heartbeat
+        self.assertEqual(r.stats['peer_restarts'],1)
 
 class PackedAngularTests(unittest.TestCase):
     def test_pack_angular_round_trip_180_and_360(self):
@@ -599,12 +682,26 @@ class BridgeTests(unittest.TestCase):
         self.assertGreaterEqual(self.ground.sender.stats['resent'],1)
         self.assertEqual(self.ground.sender.stats['unconfirmed'],0)
         self.assertGreaterEqual(self.ground.status()['rx']['receipts'],1)
+        self.assertEqual((self.ground.sender.resend_s,self.edge.sender.resend_s),(lora.RESEND_GROUND_S,lora.RESEND_EDGE_S))
+        self.assertEqual(self.edge.status()['rx']['peer_restarts'],0)
     def test_an_ack_is_confirmed_by_ground(self):
         self.assertTrue(wait(lambda:self.edge.sender.peer_receipts,5))
         self.edge_pub.offer('k','sdr/v2/uav-01/ack/operation',b'{"v":2,"id":"c3","status":"APPLIED"}',qos=1)
         self.assertTrue(wait(lambda:self.published(self.ground_broker,'ack/operation'),5))
         self.assertTrue(wait(lambda:self.edge.sender.stats['confirmed']>=1,5),self.edge.status())
         time.sleep(2);self.assertEqual(len(self.published(self.ground_broker,'ack/operation')),1)
+    def test_a_lost_ack_is_resent_until_ground_confirms_it(self):
+        self.assertTrue(wait(lambda:self.edge.sender.peer_receipts,5))
+        self.up_on.clear()  # edge -> Ground loses everything for a while: the first ACK is gone
+        self.edge_pub.offer('k','sdr/v2/uav-01/ack/config',b'{"v":2,"id":"c4","status":"APPLIED"}',qos=1)
+        self.assertTrue(wait(lambda:self.edge.sender.stats['sent_messages']>=1,5))
+        time.sleep(2);self.up_on.set()
+        self.assertTrue(wait(lambda:self.published(self.ground_broker,'ack/config'),8),self.edge.status())
+        self.assertTrue(wait(lambda:self.edge.sender.stats['confirmed']>=1,8),self.edge.status())
+        time.sleep(2)
+        self.assertEqual(len(self.published(self.ground_broker,'ack/config')),1)
+        self.assertGreaterEqual(self.edge.sender.stats['resent'],1)
+        self.assertEqual(self.ground.status()['rx']['peer_restarts'],0)
     def test_link_loss_is_reported_and_retained_topics_are_resent(self):
         avail=b'{"v":2,"sid":"7a8b9c0d","contract":"1.6","online":true,"t":1}'
         self.edge_pub.offer('v','sdr/v2/uav-01/availability',avail,qos=1,retain=True)

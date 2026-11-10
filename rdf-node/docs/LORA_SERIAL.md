@@ -71,8 +71,16 @@ hilang walau dikirim 3 kali, karena ketiga salinannya hilang. Cara kerjanya seka
 - Laporan settings (`settings/reported`, ~8 KB) tetap dikirim dua kali, karena terlalu besar untuk diulang.
 - Bila lawan belum mengumumkan fitur, cara lama tetap dipakai: command 3×, ACK 2×. Jembatan lama membuang
   frame RECEIPT sebagai `bad_frames` dan tidak terganggu, jadi urutan pasang bebas.
+- Jam kirim ulang mulai saat fragmen terakhir pesan benar-benar keluar, bukan saat masuk antrean.
+  Tanda terima yang datang saat salinan masih antre ikut membuang salinan itu.
+- Tanda terima hanya dikirim setelah pesan utuh terbaca dan diteruskan ke broker lokal. Pesan yang gagal
+  dibaca, atau ditolak broker (MQTT putus), tidak dicatat sebagai sudah diterima, sehingga kiriman ulang
+  berikutnya masih bisa lewat.
 - `tx.resent` menghitung kirim ulang, `tx.confirmed` pesan yang dikonfirmasi, dan `tx.unconfirmed` pesan
   yang menyerah. `rx.receipts` menghitung frame RECEIPT yang diterima.
+- Heartbeat yang uptime-nya turun tetapi lebih besar dari waktu sejak heartbeat terakhir lawan (+3 s)
+  tidak dihitung restart, melainkan heartbeat basi. Jembatan Ground sebelum 1.12.1 bisa mengirim dua
+  heartbeat terbalik.
 
 Id pesan memakai satu penghitung untuk semua topik dan mulai dari nilai acak setiap jembatan start.
 Penerima membuang pesan dengan (id, topik, jumlah fragmen) yang sudah utuh dalam 30 s terakhir (salinan).
@@ -119,8 +127,9 @@ dengan flag `TURN` (bit3), lalu diam `0.45 s`. Jeda itu dihitung dari perkiraan 
 semua frame yang ditulis ke modul sebelumnya selesai di udara (0.8 ms/byte, laju frame beruntun;
 0.5 ms/byte dari frame tunggal terlalu optimis), bukan dari saat ditulis.
 Ground hanya memancar dalam `0.08 s` setelah menerima frame `TURN` (maks. 250 B per giliran), atau bebas
-bila Edge diam lebih dari 3 s. Sejak 1.12.1, bila heartbeat yang menunggu sudah memakai awal giliran, pesan
-berikutnya ikut di giliran yang sama selama muat. Sebelumnya pesan itu menunggu satu giliran penuh. Frame TIME diberi timestamp saat benar-benar dikirim, jadi menunggu giliran
+bila Edge diam lebih dari 3 s. Sejak 1.12.1, bila frame kontrol yang menunggu (heartbeat, TIME, tanda
+terima) sudah memakai awal giliran, satu pesan berikutnya ikut di giliran yang sama selama muat.
+Sebelumnya pesan itu menunggu satu giliran penuh. Frame TIME diberi timestamp saat benar-benar dikirim, jadi menunggu giliran
 tidak merusak ukuran jam. Dengan kurva Angular tiap ~4.5 s dan perkiraan 0.5 ms/byte, ~92% frame
 Ground→Edge hilang; dengan 0.8 ms/byte ~3% (2026-11-10). Terukur dengan DoA dan Angular berjalan (1.10.1): hilang ~4% Edge→Ground dan
 ~13% Ground→Edge (sebelumnya, dengan jeda 0.3 s dari saat tulis, ~62% Ground→Edge).
