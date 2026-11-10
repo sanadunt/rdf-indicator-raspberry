@@ -230,6 +230,31 @@ class PackedAngularTests(unittest.TestCase):
         self.assertIsNone(lora.pack_angular(ANGULAR))                           # range over 2.55 (0..19.98)
         last=json.dumps({'values':[0.1]*180,'q':1},separators=(',',':')).encode()
         self.assertIsNone(lora.pack_angular(last))                              # values not the last key
+    def test_pack_angular_non_finite_falls_back(self):
+        # json.loads reads NaN/Infinity; a stray publisher on the Edge broker must not break the MQTT reader.
+        for bad in ('NaN','Infinity','-Infinity'):
+            p=angular_1_12([0.5]*180).replace(b'[0.5,',b'['+bad.encode()+b',',1)
+            self.assertIsNone(lora.pack_angular(p),bad)
+    def test_bridge_packs_live_and_diagnostic_angular(self):
+        import math,random
+        rnd=random.Random(7)
+        noisy=angular_1_12([round(0.6+0.7*math.exp(-(((2*k-137+180)%360-180)/14)**2)+rnd.uniform(0,.08),2)
+                            for k in range(180)])
+        offers=[]
+        class Stub:
+            def offer(self,tid,payload,**kw): offers.append((tid,payload,kw['packed']))
+        b=object.__new__(lora.Bridge)
+        b.prefix='sdr/v2/uav-01';b.role='edge';b.ignored=0;b.lock=threading.Lock();b.retained={};b.sender=Stub()
+        for suffix in ('telemetry/angular','telemetry/diagnostic/angular'):
+            offers.clear();b._from_mqtt(b.prefix+'/'+suffix,noisy,False)
+            (tid,body,packed),=offers
+            self.assertTrue(packed,suffix);self.assertEqual(body[0],lora.PACKED_V1,suffix)
+            self.assertEqual(lora.unpack_angular(body),noisy,suffix)
+            self.assertLess(len(lora.compress(body)[0]),len(lora.compress(noisy)[0]),suffix)
+        wide=angular_1_12([0.0]*179+[3.0])
+        for suffix,payload in (('telemetry/angular',wide),('telemetry/health',HEALTH)):
+            offers.clear();b._from_mqtt(b.prefix+'/'+suffix,payload,False)
+            self.assertEqual(offers,[(offers[0][0],payload,False)],suffix)
     def test_bridge_sends_packed_angular_in_two_frames(self):
         parts=lora.split_message(DATA,1,TOPIC_IDS['telemetry/angular'],lora.pack_angular(ANGULAR_180),packed=True)
         self.assertLessEqual(len(parts),2)

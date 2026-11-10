@@ -16,6 +16,7 @@ are sent twice and commands three times (the receiver drops the copies).
 """
 from __future__ import annotations
 import json
+import math
 import os
 import select
 import struct
@@ -159,7 +160,7 @@ def pack_angular(payload: bytes):
     if cut<0 or not payload.endswith(b']}'): return None
     try: values=json.loads(payload[cut+len(VALUES_KEY)-1:-1])
     except ValueError: return None
-    if not values or not all(type(v) is float for v in values): return None
+    if not values or not all(type(v) is float and math.isfinite(v) for v in values): return None
     hundredths=[round(v*100) for v in values]
     if any(n/100!=v for n,v in zip(hundredths,values)): return None
     low=min(hundredths); steps=[n-low for n in hundredths]

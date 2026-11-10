@@ -158,6 +158,11 @@ Selama uji, Ground mengirim `operation.get` dummy tiap 5 s (`tools/lora_bench/`)
 
 Pembanding (1.11, kurva 360, jembatan 3.5 s, 2 menit): kurva tiap ~4.5 s, Edge 413 B/s, Ground→Edge 3%.
 
+Baris `PEAK_MOVED` terutama mengukur goyangan DoA di sinyal 5 dB di atas squelch. Angka itu tidak mengukur
+galat upsampling. Ground menilai frame kurva yang lebih lama terhadap DoA yang lebih baru. Belum ada
+pembanding 360 titik pada sinyal yang sama. Pada kurva sintetis (lobus Gaussian lebar 5–60°), upsampling
+180→360 tidak menambah satu pun `PEAK_MOVED`.
+
 2 s mengirim kurva dua kali lebih sering dan hanya menambah ~70 B/s di udara. ACK command tidak memburuk:
 kedua uji 2 s lebih baik daripada uji 4 s. Selisih kehilangan Ground→Edge antar-uji lebih dipengaruhi
 kondisi radio, karena pagi harinya Ground→Edge hilang ~3% di jarak yang sama. Pakai `graph_u8`.

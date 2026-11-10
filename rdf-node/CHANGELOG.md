@@ -12,6 +12,13 @@ Contract `1.12` (Angular may carry 180 points).
   companion's decoder uses it, so it accepts both shapes.
 - `telemetry.bulk_budget_bytes_s` may go up to 2000 and Control + Bulk up to 3000 B/s: the 1500 B/s cap was
   the T900 link's; MQTT is now local and the LoRa bridge paces the radio. A curve every 2 s needs ~1000.
+  Keep `control_budget_bytes_s` at 1250 on LoRa. At 1000 the diagnostic curve waits too long in the
+  Control queue, `CONTROL_BACKLOG` keeps restarting the 20 s resume, and live curves stall.
+- LoRa bridge: frame flag bit 4 (`F_PACKED`) carries topics 4 and 6 as a lossless binary body, with the
+  JSON header and one byte per value. It is used only when it rebuilds the JSON byte for byte; otherwise
+  the curve goes as plain JSON. `--angular-every` default 3.5 → 1.5 s. A bridge before 1.12 forwards a
+  packed body unread, so install the Ground bridge first, then the Edge bridge, then Ground console
+  3.21.0, then this Edge (`docs/LORA_SERIAL.md`).
 
 ## 1.11.0 - Unreleased
 
