@@ -20,6 +20,12 @@ Contract `1.11` (two optional `telemetry/health` fields).
 - Panel: without a fresh sample (`NO_RECORD`, `NO_FRESH_DOA`, `EMPTY_CSV`, `DOA_FILE_NOT_UPDATING`) the line
   under the frequency reads `Puncak … dB / SQ … dB` instead of the last sample's PAPR/P. A fresh sample held
   back only by approval keeps its PAPR/P.
+- LoRa bridge (edge): every Angular curve Edge publishes now goes over the link (`--angular-every` 3.5 s instead
+  of 20 s), so Ground gets a curve about every 4.5 s with `telemetry.bulk_budget_bytes_s` 500 (every ~9 s at 250).
+- LoRa bridge (edge): air time is estimated at 0.8 ms/byte instead of 0.5. Back to back the radio moves only
+  ~1.2-1.5 KB/s, so after a 5-frame curve the edge came back inside Ground's reply: with curves every 4.5 s the
+  edge lost ~92% of Ground's frames and showed the link DOWN. Measured after the change on the Pi and
+  groundstation: Ground to Edge ~3%, Edge to Ground ~5% at ~410 B/s.
 
 ## 1.10.2 - Unreleased
 

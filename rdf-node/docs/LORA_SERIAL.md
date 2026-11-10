@@ -62,9 +62,9 @@ pertama setelah restart hilang, id awal yang acak yang mencegah sebagian besar b
 | 1 | `telemetry/health` | Edge→Ground | 2 | 6 s | terbaru menang, min. tiap 2 s (`--health-every`) |
 | 2 | `telemetry/health/detail` | Edge→Ground | 4 | 15 s | terbaru menang, min. tiap 30 s |
 | 3 | `telemetry/doa` | Edge→Ground | 1 | 3 s | terbaru menang, **dikirim 2×** (prioritas data tertinggi) |
-| 4 | `telemetry/angular` | Edge→Ground | 5 | 8 s | terbaru menang, min. tiap 20 s |
+| 4 | `telemetry/angular` | Edge→Ground | 5 | 8 s | terbaru menang, min. tiap 3.5 s (`--angular-every`) |
 | 5 | `telemetry/diagnostic/doa` | Edge→Ground | 2 | 3 s | terbaru menang |
-| 6 | `telemetry/diagnostic/angular` | Edge→Ground | 5 | 8 s | terbaru menang, min. tiap 20 s |
+| 6 | `telemetry/diagnostic/angular` | Edge→Ground | 5 | 8 s | terbaru menang, min. tiap 3.5 s (`--angular-every`) |
 | 7 | `state` | Edge→Ground | 0 | – | retained, terbaru menang |
 | 8 | `capabilities` | Edge→Ground | 3 | – | retained, terbaru menang |
 | 9 | `availability` | Edge→Ground | 0 | – | retained, terbaru menang |
@@ -89,10 +89,12 @@ ACK 20 s kemudian; tiga kali kirim menurunkan kehilangan command satu frame dari
 
 Radio LoRa tidak bisa kirim dan terima bersamaan. Kira-kira sekali per detik Edge menandai satu frame
 dengan flag `TURN` (bit3), lalu diam `0.45 s`. Jeda itu dihitung dari perkiraan saat frame `TURN` dan
-semua frame yang ditulis ke modul sebelumnya selesai di udara (~0.5 ms/byte), bukan dari saat ditulis.
+semua frame yang ditulis ke modul sebelumnya selesai di udara (0.8 ms/byte, laju frame beruntun;
+0.5 ms/byte dari frame tunggal terlalu optimis), bukan dari saat ditulis.
 Ground hanya memancar dalam `0.08 s` setelah menerima frame `TURN` (maks. 250 B per giliran), atau bebas
 bila Edge diam lebih dari 3 s. Frame TIME diberi timestamp saat benar-benar dikirim, jadi menunggu giliran
-tidak merusak ukuran jam. Terukur dengan DoA dan Angular berjalan (1.10.1): hilang ~4% Edge→Ground dan
+tidak merusak ukuran jam. Dengan kurva Angular tiap ~4.5 s dan perkiraan 0.5 ms/byte, ~92% frame
+Ground→Edge hilang; dengan 0.8 ms/byte ~3% (2026-11-10). Terukur dengan DoA dan Angular berjalan (1.10.1): hilang ~4% Edge→Ground dan
 ~13% Ground→Edge (sebelumnya, dengan jeda 0.3 s dari saat tulis, ~62% Ground→Edge).
 
 ## Status jembatan
@@ -115,9 +117,14 @@ Ground melihat link putus dari topik ini dan dari health yang berhenti.
 ## Anggaran
 
 Dengan kompresi: `health` lengkap (kompas + GPS) 232 B JSON → 126 B di udara; kurva Angular 2078 B →
-861 B (5 frame). Perkiraan rata-rata: health ~130 B/s, DoA ~100 B/s, diagnostic DoA ~40 B/s, detail
-~8 B/s, Angular ~45 B/s → sekitar 320 B/s dari 1000 B/s. Arah Ground→Edge hanya command dan heartbeat,
-supaya tabrakan half-duplex tetap jarang.
+861 B (5 frame). Perkiraan rata-rata: health ~65 B/s (tiap 2 s), DoA ~100 B/s, diagnostic DoA ~40 B/s,
+detail ~8 B/s, Angular ~215 B/s (tiap 4 s) → sekitar 450 B/s dari 1000 B/s. Arah Ground→Edge hanya
+command dan heartbeat, supaya tabrakan half-duplex tetap jarang.
+
+Jembatan meneruskan tiap kurva Angular yang dibuat Edge (`--angular-every` 3.5 s, sedikit di bawah
+`angular_s` 4 s profil `balanced`, supaya kurva yang datang sedikit lebih awal tidak tertahan). Edge
+sendiri menjarakkan kurva `max(angular_s, ukuran kurva / telemetry.bulk_budget_bytes_s)`: dengan kurva
+~2.1 KB dan `bulk_budget_bytes_s` 250 jaraknya ~9 s, dengan 500 ~4.5 s.
 
 ## Pemasangan
 

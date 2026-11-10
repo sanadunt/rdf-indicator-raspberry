@@ -162,6 +162,18 @@ class SenderTests(unittest.TestCase):
         s.offer(11,b'{"ack":2}',now=t+.5)
         self.assertEqual(s.next_frames(air_end+.29),[])
         self.assertTrue(s.next_frames(air_end+.31))
+    def test_quiet_window_outlasts_a_curve_at_the_back_to_back_rate(self):
+        # Back to back the radio moves only ~1.2-1.5 KB/s: after a whole curve the edge must still leave the
+        # full quiet window from the moment the curve really ends on the air (2026-11-10: 0.5 ms/byte did not).
+        s=Sender(100000,200,burst=5000,turn_every_s=1.0,quiet_s=.45);t=1000.0
+        s.last_turn=t-.5
+        s.offer(4,b''.join(hashlib.sha256(bytes([i])).digest() for i in range(30)),now=t)  # ~1 KB, 5+ frames
+        burst=s.next_frames(t)
+        s.offer(11,b'{"ack":1}',now=t+.5)
+        turn=s.next_frames(t+.5)
+        self.assertTrue(decode_frame(turn[0][:-1])[4]&lora.F_TURN)
+        on_air=sum(len(f) for f in burst+turn)/1250
+        self.assertGreaterEqual(s.next_at,t+on_air+.45)
     def test_time_frames_are_stamped_when_sent_not_when_queued(self):
         s=Sender(100000,200)
         s.urgent(lora.TIME,lora.TIME_REQ.pack(1,1));s.urgent(lora.TIME,lora.TIME_RESP.pack(2,5,6,7))

@@ -44,7 +44,10 @@ F_RETAIN=1; F_QOS1=2; F_ZLIB=4
 # for EDGE_QUIET_S; the ground transmits only right after such a frame (or freely when the edge has been
 # silent for GROUND_FREE_AFTER_S), so the two radios rarely talk at once.
 F_TURN=8
-AIR_S_PER_BYTE=0.0005  # measured on the link: ~0.48 ms per byte on air
+# Air time per byte while frames go back to back: a single frame takes ~0.48 ms/byte, but a run of frames
+# only moves ~1.2-1.5 KB/s. With 0.5 ms the estimate fell 0.2-0.3 s short after a 5-frame Angular curve,
+# the edge came back inside Ground's reply and ~92% of Ground->edge frames were lost (2026-11-10).
+AIR_S_PER_BYTE=0.0008
 # The quiet window counts from the moment the turn frame really leaves the air: frames written just
 # before it still sit in the module's buffer, and Ground needs its reply window (GROUND_REPLY_WINDOW_S),
 # up to GROUND_WINDOW_BYTES on the air (~0.12 s) and its own module's latency inside that window.
@@ -362,7 +365,7 @@ def open_port(path,baud):
 
 class Bridge:
     def __init__(self,*,role,device,baud,mqtt_cfg,node_id,credentials_file=None,demo=False,rate=1000,
-                 frame_max=200,heartbeat_s=5.0,link_timeout_s=15.0,angular_every_s=20.0,detail_every_s=30.0,
+                 frame_max=200,heartbeat_s=5.0,link_timeout_s=15.0,angular_every_s=3.5,detail_every_s=30.0,
                  status_every_s=5.0,time_every_s=16.0,chrony_sock=None,health_every_s=2.0):
         if role not in ('edge','ground'): raise ValueError('ROLE')
         self.role=role; self.device=device; self.baud=baud; self.node_id=node_id
