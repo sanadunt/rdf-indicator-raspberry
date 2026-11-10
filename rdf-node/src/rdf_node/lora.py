@@ -12,7 +12,8 @@ So rdf-edge, rdf-ground and any other consumer keep the MQTT contract unchanged.
 dictionary when that is smaller, split into fragments of at most `frame_max` bytes on the wire, and
 paced by a byte budget so the module's ~1 KB buffer never overflows. There is no retransmission:
 telemetry is replaced by newer telemetry, retained topics are resent when the link comes back, ACKs
-are sent twice and commands three times (the receiver drops the copies).
+are sent twice and commands three times (the receiver drops the copies). Once the other bridge says in its
+heartbeat that it sends receipts (1.12.1), commands and ACKs go once and are resent until it confirms them.
 """
 from __future__ import annotations
 import json
@@ -37,6 +38,7 @@ MAGIC=0xA1
 DATA=1
 HEARTBEAT=2
 TIME=4  # 3 is the TEST frame of lora_test
+RECEIPT=5  # body: (message id, topic id) byte pairs the sender of this frame received
 TIME_REQ=struct.Struct('!BQ')        # op 1, t1 (edge wall clock, us)
 TIME_RESP=struct.Struct('!BQQQ')     # op 2, t1, t2 (ground receive), t3 (ground send), us
 HEADER=struct.Struct('!BBHBBBBB')  # magic type seq msg topic flags index count
@@ -47,6 +49,8 @@ F_RETAIN=1; F_QOS1=2; F_ZLIB=4
 F_TURN=8
 # An Angular curve (topics 4, 6) whose values went over as one byte each; the receiver rebuilds the JSON.
 F_PACKED=16
+# The sender wants a RECEIPT for this message and sends it again until one comes (commands, ACKs).
+F_RECEIPT=32
 # Air time per byte while frames go back to back: a single frame takes ~0.48 ms/byte, but a run of frames
 # only moves ~1.2-1.5 KB/s. With 0.5 ms the estimate fell 0.2-0.3 s short after a 5-frame Angular curve,
 # the edge came back inside Ground's reply and ~92% of Ground->edge frames were lost (2026-11-10).
@@ -90,6 +94,16 @@ for _id in GROUND_TOPICS: POLICY[_id]=(0,10,False,True)
 # 20 s later: three sends of a one-frame command lose it ~0.2% of the time instead of ~1.7%. Commands are
 # rare and small, so the airtime costs nothing.
 COMMAND_SENDS=3
+# Receipts (1.12.1). A bridge that sets FEATURE_RECEIPTS in its heartbeat answers every F_RECEIPT message,
+# and every copy of one, with a RECEIPT frame. Until the peer's heartbeat shows the feature, the copies above
+# are used. Commands down and ACKs up then go once and again every resend_s until their receipt, at most
+# RELIABLE_MAX_SENDS times within their age. Ground resends just before the edge's next turn (~1 s); the
+# edge waits a full turn of Ground's for the receipt of an ACK. Settings reports are too big to repeat.
+RELIABLE=frozenset(GROUND_TOPICS)|{11,12}
+FEATURE_RECEIPTS=1
+RELIABLE_MAX_SENDS=8
+RESEND_GROUND_S=0.9; RESEND_EDGE_S=1.6
+RECEIPT_PAIRS_PER_FRAME=64
 RETAINED_RESEND=(9,7,8)  # availability, state, capabilities: resent when the link comes back
 # ...and every few minutes: a retained topic Edge publishes once (capabilities at connect) is lost for good
 # when one of its frames is, and a few hundred bytes every 2 min cost nothing on the link.
@@ -175,11 +189,12 @@ def unpack_angular(body: bytes) -> bytes:
     start=PACKED_HEAD.size+cut
     return _angular_json(body[PACKED_HEAD.size:start],low,body[start:])
 
-def split_message(kind,msg,topic,payload,*,retain=False,qos1=False,frame_max=200,packed=False):
+def split_message(kind,msg,topic,payload,*,retain=False,qos1=False,frame_max=200,packed=False,receipt=False):
     """Unsent frames of one message: (kind, msg, topic, flags, index, count, chunk). The sequence number
     is given at send time, so frames that are sent later (a heartbeat in between) keep the order."""
     body,zipped=compress(payload) if kind==DATA else (payload,False)
-    flags=(F_RETAIN if retain else 0)|(F_QOS1 if qos1 else 0)|(F_ZLIB if zipped else 0)|(F_PACKED if packed else 0)
+    flags=((F_RETAIN if retain else 0)|(F_QOS1 if qos1 else 0)|(F_ZLIB if zipped else 0)|(F_PACKED if packed else 0)|
+           (F_RECEIPT if receipt else 0))
     # Worst-case COBS adds one byte per 254, plus the code byte and the 0x00 delimiter.
     room=frame_max-HEADER.size-CRC_LEN-2-(frame_max//254+1)
     if room<16: raise ValueError('FRAME_MAX_TOO_SMALL')
@@ -203,7 +218,7 @@ def decode_frame(wire: bytes):
     if len(raw)<HEADER.size+CRC_LEN: raise ValueError('FRAME_SHORT')
     if struct.unpack('!H',raw[-2:])[0]!=crc16(raw[:-2]): raise ValueError('CRC_MISMATCH')
     magic,kind,seq,msg,topic,flags,index,count=HEADER.unpack_from(raw)
-    if magic!=MAGIC or kind not in (DATA,HEARTBEAT,TIME) or not count or index>=count: raise ValueError('FRAME_BAD_HEADER')
+    if magic!=MAGIC or kind not in (DATA,HEARTBEAT,TIME,RECEIPT) or not count or index>=count: raise ValueError('FRAME_BAD_HEADER')
     return kind,seq,msg,topic,flags,index,count,raw[HEADER.size:-2]
 
 class Receiver:
@@ -211,8 +226,10 @@ class Receiver:
     def __init__(self):
         self.buf=bytearray(); self.parts={}; self.recent={}; self.last_seq=None
         self.stats=dict(frames=0,crc_errors=0,bad_frames=0,lost_frames=0,messages=0,duplicates=0,
-                        incomplete=0,heartbeats=0,peer_restarts=0)
+                        incomplete=0,heartbeats=0,peer_restarts=0,receipts=0)
         self.peer=None; self.peer_clock=None; self.time_frames=[]; self.turn_at=None
+        # (msg, topic) pairs to confirm to the peer, and pairs the peer confirmed; the bridge empties both.
+        self.receipts_due=[]; self.receipts_in=[]
     def feed(self,data,now=None):
         now=time.monotonic() if now is None else now
         out=[]; self.buf+=data
@@ -235,6 +252,9 @@ class Receiver:
             if kind==TIME:
                 # Arrival wall clock, as close to the radio as this process gets.
                 self.time_frames.append((chunk,time.time_ns()//1000)); continue
+            if kind==RECEIPT:
+                self.stats['receipts']+=1
+                self.receipts_in.extend((chunk[i],chunk[i+1]) for i in range(0,len(chunk)-1,2)); continue
             if kind==HEARTBEAT:
                 self.stats['heartbeats']+=1
                 if len(chunk)>=20:
@@ -248,8 +268,9 @@ class Receiver:
                         self.recent.clear(); self.parts.clear(); self.stats['peer_restarts']+=1
                     self.peer_clock=clock
                     # Peer wall clock minus ours at arrival (includes one-way latency, ~0.1 s).
+                    # A 21st byte carries feature bits (1.12.1); older bridges send 20 bytes and read only those.
                     self.peer=dict(uptime_s=up,rx_frames=rx,crc_errors=crc,lost_frames=lost,
-                                   clock_offset_ms=clock-now_ms(),at=now)
+                                   clock_offset_ms=clock-now_ms(),at=now,features=chunk[20] if len(chunk)>20 else 0)
                 continue
             message=self._assemble(msg,topic,flags,index,count,chunk,now)
             if message: out.append(message)
@@ -259,7 +280,11 @@ class Receiver:
         return out
     def _assemble(self,msg,topic,flags,index,count,chunk,now):
         key=(msg,topic,count)
-        if key in self.recent: self.stats['duplicates']+=1; return None
+        if key in self.recent:
+            # A copy of a message already delivered: our receipt for it may have been lost, so send another.
+            self.stats['duplicates']+=1
+            if flags&F_RECEIPT: self.receipts_due.append((msg,topic))
+            return None
         started,meta,pieces=self.parts.get(key,(now,flags,{}))
         pieces[index]=chunk; self.parts[key]=(started,meta,pieces)
         if len(pieces)<count: return None
@@ -270,6 +295,7 @@ class Receiver:
             if flags&F_PACKED: payload=unpack_angular(payload)
         except (ValueError,zlib.error,struct.error): self.stats['bad_frames']+=1; return None
         self.stats['messages']+=1
+        if flags&F_RECEIPT: self.receipts_due.append((msg,topic))
         return topic,payload,bool(flags&F_RETAIN),bool(flags&F_QOS1)
 
 # The copy of a command or ACK leaves this long after the first, so one collision on the half-duplex
@@ -277,17 +303,18 @@ class Receiver:
 REPEAT_GAP_S=0.5
 
 class Pending:
-    __slots__=('topic','payload','retain','qos1','priority','created','repeat','msg','not_before','packed')
-    def __init__(self,topic,payload,retain,qos1,priority,created,repeat,msg=None,not_before=0.0,packed=False):
+    __slots__=('topic','payload','retain','qos1','priority','created','repeat','msg','not_before','packed','receipt','sends')
+    def __init__(self,topic,payload,retain,qos1,priority,created,repeat,msg=None,not_before=0.0,packed=False,receipt=False):
         self.topic=topic; self.payload=payload; self.retain=retain; self.qos1=qos1; self.packed=packed
         self.priority=priority; self.created=created; self.repeat=repeat; self.msg=msg; self.not_before=not_before
+        self.receipt=receipt; self.sends=0
 
 class Sender:
     """Per-topic mailbox with priorities and ages, and a byte budget that releases one frame at a time.
 
     The radio module has a ~1 KB buffer and no flow control, so the bucket holds at most `burst` bytes:
     a multi-frame message (an Angular curve) leaves frame by frame at `rate` bytes/s, never in one go."""
-    def __init__(self,rate,frame_max,min_interval=None,burst=400,turn_every_s=None,quiet_s=0.0):
+    def __init__(self,rate,frame_max,min_interval=None,burst=400,turn_every_s=None,quiet_s=0.0,resend_s=1.0):
         self.rate=rate; self.frame_max=frame_max; self.min_interval=dict(min_interval or {})
         self.turn_every_s=turn_every_s; self.quiet_s=quiet_s; self.last_turn=-1e9; self.next_at=0.0
         # When the radio is expected to finish what was written to it (frames queue in its buffer).
@@ -297,7 +324,10 @@ class Sender:
         # then still remembers the old ids), new messages rarely reuse an id it completed recently.
         self.lock=threading.Lock(); self.box={}; self.fifo=0; self.seq=0; self.msg=os.urandom(1)[0]
         self.wire=deque(); self.last_sent={}; self.tokens=float(self.burst); self.refilled=time.monotonic()
-        self.stats=dict(queued=0,superseded=0,expired=0,sent_messages=0,sent_frames=0,sent_bytes=0,too_large=0)
+        self.stats=dict(queued=0,superseded=0,expired=0,sent_messages=0,sent_frames=0,sent_bytes=0,too_large=0,
+                        resent=0,confirmed=0,unconfirmed=0)
+        # Receipts: set by the bridge from the peer's heartbeat; messages sent and still waiting for theirs.
+        self.peer_receipts=False; self.resend_s=resend_s; self.waiting={}
     def offer(self,topic,payload,retain=False,qos1=False,now=None,packed=False):
         now=time.monotonic() if now is None else now
         priority,_,latest,twice=POLICY[topic]
@@ -307,14 +337,29 @@ class Sender:
                 key=topic
             else:
                 self.fifo+=1; key=(topic,self.fifo)
-            sends=(COMMAND_SENDS if topic in GROUND_TOPICS else 2) if twice else 1
-            self.box[key]=Pending(topic,payload,retain,qos1,priority,now,sends,packed=packed)
+            receipt=self.peer_receipts and topic in RELIABLE
+            sends=1 if receipt else (COMMAND_SENDS if topic in GROUND_TOPICS else 2) if twice else 1
+            self.box[key]=Pending(topic,payload,retain,qos1,priority,now,sends,packed=packed,receipt=receipt)
             self.stats['queued']+=1
     def _expire(self,now):
         for key,p in list(self.box.items()):
             age=POLICY[p.topic][1]
             if age is not None and now-p.created>age:
-                del self.box[key]; self.stats['expired']+=1
+                del self.box[key]; self.stats['unconfirmed' if p.receipt and p.sends else 'expired']+=1
+        for key,(p,last) in list(self.waiting.items()):
+            age=POLICY[p.topic][1]
+            if (age is not None and now-p.created>age) or (p.sends>=RELIABLE_MAX_SENDS and now-last>=self.resend_s):
+                del self.waiting[key]; self.stats['unconfirmed']+=1
+            elif now-last>=self.resend_s:
+                # No receipt in time: the same message (same id) goes again.
+                del self.waiting[key]; self.box[('resend',)+key]=p
+    def confirm(self,pairs):
+        """The peer received these (message id, topic) pairs: stop resending them."""
+        with self.lock:
+            for key in pairs:
+                hit=self.waiting.pop(key,None) is not None
+                hit=self.box.pop(('resend',)+tuple(key),None) is not None or hit
+                if hit: self.stats['confirmed']+=1
     def _load(self,now):
         self._expire(now)
         due=[(p.priority,p.created,order,key) for order,(key,p) in enumerate(self.box.items())
@@ -322,19 +367,23 @@ class Sender:
                  now-self.last_sent.get(p.topic,-1e9)>=self.min_interval.get(p.topic,0))]
         if not due: return
         p=self.box.pop(min(due,key=lambda d:d[:3])[3])
-        if p.msg is None: self.msg=(self.msg+1)&0xFF; msg=self.msg
+        first=p.msg is None
+        if first: self.msg=(self.msg+1)&0xFF; msg=self.msg
         else: msg=p.msg
         try: parts=split_message(DATA,msg,p.topic,p.payload,retain=p.retain,qos1=p.qos1,frame_max=self.frame_max,
-                                 packed=p.packed)
+                                 packed=p.packed,receipt=p.receipt)
         except ValueError: self.stats['too_large']+=1; return
         self.wire.extend(parts)
-        if p.repeat>1:
+        if p.receipt:
+            if not first: self.stats['resent']+=1
+            p.msg=msg; p.sends+=1; self.waiting[(msg,p.topic)]=(p,now)
+        elif p.repeat>1:
             # The copy keeps the message id, so the receiver drops it when the first one arrived.
             self.fifo+=1
             gap=REPEAT_GAP_S if p.msg is None else 2*REPEAT_GAP_S
             self.box[('copy',self.fifo)]=Pending(p.topic,p.payload,p.retain,p.qos1,p.priority,p.created,
                                                  p.repeat-1,msg,now+gap,p.packed)
-        if p.msg is None: self.last_sent[p.topic]=now; self.stats['sent_messages']+=1
+        if first: self.last_sent[p.topic]=now; self.stats['sent_messages']+=1
     @staticmethod
     def _stamp(part):
         # TIME frames carry the wall clock of the moment they really leave, not when they were queued.
@@ -369,19 +418,34 @@ class Sender:
         with self.lock:
             self.tokens=min(float(self.burst),self.tokens+max(0.0,now-self.refilled)*self.rate); self.refilled=now
             if not self.wire: self._load(now)
-            return self._take(limit,now,max_bytes)
+            out=self._take(limit,now,max_bytes)
+            # Ground talks only in short windows: when a queued heartbeat used the start of one, the next
+            # message still goes in the same window while it has room, instead of waiting a whole turn.
+            for _ in range(8):
+                if not out or self.wire or now<self.next_at: break
+                left_n=None if limit is None else limit-len(out)
+                left_b=None if max_bytes is None else max_bytes-sum(map(len,out))
+                if left_n is not None and left_n<=0 or left_b is not None and left_b<=0: break
+                self._load(now)
+                more=self._take(left_n,now,left_b)
+                if not more: break
+                out+=more
+            return out
     def urgent(self,kind,body):
         """One small control frame (TIME) ahead of everything queued."""
         with self.lock: self.wire.appendleft(split_message(kind,0,0,body,frame_max=self.frame_max)[0])
     def heartbeat(self,uptime_s,rx,now=None):
         """Heartbeat frame ahead of any queued fragment; it still waits for budget."""
         now=time.monotonic() if now is None else now
-        body=struct.pack('!IIHHQ',int(uptime_s)&0xFFFFFFFF,rx['frames']&0xFFFFFFFF,
-                         min(rx['crc_errors'],0xFFFF),min(rx['lost_frames'],0xFFFF),now_ms())
+        body=struct.pack('!IIHHQB',int(uptime_s)&0xFFFFFFFF,rx['frames']&0xFFFFFFFF,
+                         min(rx['crc_errors'],0xFFFF),min(rx['lost_frames'],0xFFFF),now_ms(),FEATURE_RECEIPTS)
         with self.lock:
+            # One heartbeat at most: a stale one still queued (Ground waits for the edge's turn) would leave
+            # after the new one, and its lower uptime reads as a peer restart on the other side.
+            for part in [x for x in self.wire if x[0]==HEARTBEAT]: self.wire.remove(part)
             self.wire.appendleft(split_message(HEARTBEAT,0,0,body,frame_max=self.frame_max)[0])
     def depth(self):
-        with self.lock: return len(self.box)+len(self.wire)
+        with self.lock: return len(self.box)+len(self.wire)+len(self.waiting)
 
 def open_port(path,baud):
     if termios is None: raise OSError(0,'TERMIOS_UNAVAILABLE')
@@ -406,8 +470,9 @@ class Bridge:
         self.prefix=('sdr/demo/v2/' if demo else 'sdr/v2/')+node_id
         self.heartbeat_s=heartbeat_s; self.link_timeout_s=link_timeout_s; self.status_every_s=status_every_s
         intervals={4:angular_every_s,6:angular_every_s,2:detail_every_s,1:health_every_s} if role=='edge' else {}
-        self.sender=(Sender(rate,frame_max,intervals,turn_every_s=EDGE_TURN_EVERY_S,quiet_s=EDGE_QUIET_S)
-                     if role=='edge' else Sender(rate,frame_max,intervals))
+        self.sender=(Sender(rate,frame_max,intervals,turn_every_s=EDGE_TURN_EVERY_S,quiet_s=EDGE_QUIET_S,
+                            resend_s=RESEND_EDGE_S)
+                     if role=='edge' else Sender(rate,frame_max,intervals,resend_s=RESEND_GROUND_S))
         self.receiver=Receiver(); self.rx_event=threading.Event()
         self.started=time.monotonic(); self.last_rx=None; self.last_frame_rx=None; self.link_up=False; self.link_changes=0
         self.retained={}; self.stop_event=threading.Event(); self.fd=None; self.port_error=None
@@ -462,7 +527,15 @@ class Bridge:
                     # The other side may have missed every retained topic while the link was down.
                     if self.role=='edge': self._resend_retained()
             for m in messages: self._deliver(*m)
+            self._receipts()
             while self.receiver.time_frames: self._on_time(*self.receiver.time_frames.pop(0))
+    def _receipts(self):
+        r=self.receiver; peer=r.peer
+        self.sender.peer_receipts=bool(peer and peer.get('features',0)&FEATURE_RECEIPTS)
+        if r.receipts_in: self.sender.confirm(r.receipts_in); r.receipts_in.clear()
+        due,r.receipts_due=r.receipts_due,[]
+        for i in range(0,len(due),RECEIPT_PAIRS_PER_FRAME):
+            self.sender.urgent(RECEIPT,bytes(b for pair in due[i:i+RECEIPT_PAIRS_PER_FRAME] for b in pair))
     def _on_time(self,chunk,arrival_us):
         if self.role=='ground' and len(chunk)==TIME_REQ.size and chunk[0]==1:
             _,t1=TIME_REQ.unpack(chunk)

@@ -29,11 +29,11 @@ Setiap frame: `header(9) | chunk | CRC-16 (2)`, lalu di-COBS-encode dan diakhiri
 | Byte | Isi |
 |---|---|
 | 0 | magic `0xA1` |
-| 1 | tipe: `1` DATA, `2` HEARTBEAT, `4` TIME (sinkron jam, lihat bawah); `3` dipakai frame TEST `lora-test` |
+| 1 | tipe: `1` DATA, `2` HEARTBEAT, `4` TIME (sinkron jam, lihat bawah), `5` RECEIPT (tanda terima, sejak 1.12.1); `3` dipakai frame TEST `lora-test` |
 | 2–3 | nomor urut frame pengirim (uint16 BE), naik 1 per frame yang benar-benar dikirim |
 | 4 | id pesan (uint8); fragmen satu pesan dan salinannya memakai id yang sama |
 | 5 | id topik (tabel di bawah) |
-| 6 | flag: bit0 retain, bit1 QoS 1, bit2 zlib, bit3 TURN (giliran bicara), bit4 Angular terkemas (lihat bawah) |
+| 6 | flag: bit0 retain, bit1 QoS 1, bit2 zlib, bit3 TURN (giliran bicara), bit4 Angular terkemas (lihat bawah), bit5 minta tanda terima (sejak 1.12.1) |
 | 7 | indeks fragmen |
 | 8 | jumlah fragmen (1–255) |
 | … | potongan payload |
@@ -52,8 +52,27 @@ Payload dikompres raw deflate (`wbits -15`, level 9) dengan kamus bersama `ZDICT
 bersama versi protokol baru.
 
 HEARTBEAT (tiap 5 s dari kedua sisi) berisi `uptime_s` (u32), frame diterima (u32), error CRC (u16),
-frame hilang (u16), dan jam dinding pengirim dalam ms (u64). Dari situ tiap sisi tahu kualitas link
-arah sebaliknya dan selisih jam (`peer.clock_offset_ms`, termasuk latensi satu arah ~0.1 s).
+frame hilang (u16), dan jam dinding pengirim dalam ms (u64). Sejak 1.12.1 ada byte ke-21: bit fitur
+(bit0 = mengirim tanda terima). Jembatan lama hanya membaca 20 byte pertama. Dari heartbeat tiap sisi tahu
+kualitas link arah sebaliknya, selisih jam (`peer.clock_offset_ms`, termasuk latensi satu arah ~0.1 s), dan
+fitur lawan (`peer.features`).
+
+**Tanda terima (sejak 1.12.1).** Command (Ground→Edge, topik 64–74) dan ACK (Edge→Ground, `ack/config`,
+`ack/operation`) yang hilang dulu hanya terlihat sebagai "tidak ada ACK". Pada 2026-11-10, satu command
+hilang walau dikirim 3 kali, karena ketiga salinannya hilang. Cara kerjanya sekarang:
+
+- Pengirim memakai cara baru hanya bila heartbeat lawan memuat bit fitur. Pesan itu diberi flag bit5 dan
+  dikirim **sekali**.
+- Penerima membalas setiap pesan ber-bit5, juga setiap salinannya, dengan frame RECEIPT. Body-nya pasangan
+  byte (id pesan, id topik).
+- Tanpa tanda terima, pesan yang sama (id sama) dikirim lagi. Ground mengirim ulang tiap 0.9 s, yaitu di
+  giliran Edge berikutnya. Edge mengirim ulang ACK tiap 1.6 s, satu giliran penuh Ground.
+- Pengiriman ulang berhenti setelah 8 kali atau setelah umur topiknya habis (command 10 s, ACK 30 s).
+- Laporan settings (`settings/reported`, ~8 KB) tetap dikirim dua kali, karena terlalu besar untuk diulang.
+- Bila lawan belum mengumumkan fitur, cara lama tetap dipakai: command 3×, ACK 2×. Jembatan lama membuang
+  frame RECEIPT sebagai `bad_frames` dan tidak terganggu, jadi urutan pasang bebas.
+- `tx.resent` menghitung kirim ulang, `tx.confirmed` pesan yang dikonfirmasi, dan `tx.unconfirmed` pesan
+  yang menyerah. `rx.receipts` menghitung frame RECEIPT yang diterima.
 
 Id pesan memakai satu penghitung untuk semua topik dan mulai dari nilai acak setiap jembatan start.
 Penerima membuang pesan dengan (id, topik, jumlah fragmen) yang sudah utuh dalam 30 s terakhir (salinan).
@@ -100,7 +119,8 @@ dengan flag `TURN` (bit3), lalu diam `0.45 s`. Jeda itu dihitung dari perkiraan 
 semua frame yang ditulis ke modul sebelumnya selesai di udara (0.8 ms/byte, laju frame beruntun;
 0.5 ms/byte dari frame tunggal terlalu optimis), bukan dari saat ditulis.
 Ground hanya memancar dalam `0.08 s` setelah menerima frame `TURN` (maks. 250 B per giliran), atau bebas
-bila Edge diam lebih dari 3 s. Frame TIME diberi timestamp saat benar-benar dikirim, jadi menunggu giliran
+bila Edge diam lebih dari 3 s. Sejak 1.12.1, bila heartbeat yang menunggu sudah memakai awal giliran, pesan
+berikutnya ikut di giliran yang sama selama muat. Sebelumnya pesan itu menunggu satu giliran penuh. Frame TIME diberi timestamp saat benar-benar dikirim, jadi menunggu giliran
 tidak merusak ukuran jam. Dengan kurva Angular tiap ~4.5 s dan perkiraan 0.5 ms/byte, ~92% frame
 Ground→Edge hilang; dengan 0.8 ms/byte ~3% (2026-11-10). Terukur dengan DoA dan Angular berjalan (1.10.1): hilang ~4% Edge→Ground dan
 ~13% Ground→Edge (sebelumnya, dengan jeda 0.3 s dari saat tulis, ~62% Ground→Edge).
@@ -113,9 +133,10 @@ Setiap sisi mempublish status retained ke broker lokalnya: `sdr/v2/<node>/lora/e
 ```json
 {"v":1,"role":"ground","t":1793500000000,"link":"UP","last_rx_ms":420,"port":"OPEN","port_error":null,
  "mqtt":"CONNECTED","rx":{"frames":812,"crc_errors":1,"bad_frames":0,"lost_frames":3,"messages":640,
- "duplicates":12,"incomplete":0,"heartbeats":160,"peer_restarts":0},"tx":{"queued":20,"superseded":0,"expired":0,
- "sent_messages":20,"sent_frames":200,"sent_bytes":2400,"too_large":0},"queue":0,
- "peer":{"uptime_s":812,"rx_frames":198,"crc_errors":0,"lost_frames":2,"clock_offset_ms":-35},
+ "duplicates":12,"incomplete":0,"heartbeats":160,"peer_restarts":0,"receipts":4},"tx":{"queued":20,"superseded":0,
+ "expired":0,"sent_messages":20,"sent_frames":200,"sent_bytes":2400,"too_large":0,"resent":1,"confirmed":4,
+ "unconfirmed":0},"queue":0,
+ "peer":{"uptime_s":812,"rx_frames":198,"crc_errors":0,"lost_frames":2,"clock_offset_ms":-35,"features":1},
  "mqtt_dropped":0,"ignored":0,"link_changes":1}
 ```
 

@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.12.1 - Unreleased
+
+Contract `1.12` (unchanged). Changes to the LoRa bridge only.
+
+- Receipts for commands and ACKs. The heartbeat gains a feature byte, bit0 = "sends receipts". When the
+  other bridge sets it:
+  - Commands (Ground→Edge) and `ack/config` / `ack/operation` (Edge→Ground) carry flag bit5 and go once.
+  - The receiver answers every such message, and every copy of one, with a RECEIPT frame (type 5).
+  - The sender repeats the same message every 0.9 s (Ground) or 1.6 s (Edge) until its receipt arrives:
+    at most 8 sends, and never past the topic's age.
+  - A bridge without the feature still gets the old 3 / 2 copies.
+
+  On 2026-11-10 one retune command was lost although all three copies were sent.
+- Status `tx.resent`, `tx.confirmed`, `tx.unconfirmed`, `rx.receipts`, `peer.features`.
+- A Ground window that starts with a queued heartbeat now also carries the next message while it fits,
+  instead of leaving it for the next turn.
+- One queued heartbeat at most. Before, two heartbeats queued while Ground waited for a turn left newest
+  first; the older uptime read as a peer restart, the receiver forgot what it had delivered, and the next
+  copy of a command was delivered twice.
+- `pack_angular` returns `None` (plain JSON) for NaN/Infinity instead of raising inside the MQTT reader.
+
 ## 1.12.0 - Unreleased
 
 Contract `1.12` (Angular may carry 180 points).
